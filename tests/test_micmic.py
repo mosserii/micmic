@@ -1909,7 +1909,7 @@ def t_dates_are_worked_out_not_guessed(j):
 
     def as_date(text):
         """Either shape is correct; which one depends on the field it is going into."""
-        for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+        for fmt in ("%b %d, %Y", "%Y-%m-%d", "%m/%d/%Y"):
             try:
                 return datetime.datetime.strptime(text, fmt).date()
             except ValueError:
@@ -1940,9 +1940,23 @@ def t_dates_are_worked_out_not_guessed(j):
           bool(iso) and as_date(iso) == today + datetime.timedelta(days=1)
           and iso[4] == "-", repr(iso))
     plain = ask("tomorrow", "text")
-    check("a text box gets the everyday format",
+    check("a text box gets the month spelled out, which no page can misread",
           bool(plain) and as_date(plain) == today + datetime.timedelta(days=1)
-          and "/" in plain, repr(plain))
+          and "/" not in plain and plain[:3].isalpha(), repr(plain))
+
+    # 02/10 is 2 October or 10 February depending on who reads it; Google Flights read
+    # February, and "next Friday" (2 October 2026) failed 3/3. The shapes, offline:
+    oct2 = time.mktime((2026, 10, 2, 12, 0, 0, 0, 0, -1))
+    for label, want in (("Departure", "Oct 2, 2026"),
+                        ("Departure (MM/DD/YYYY)", "10/02/2026"),
+                        ("Date dd/mm/yyyy", "02/10/2026"),
+                        ("Datum TT.MM.JJJJ dd.mm.yyyy", "02.10.2026"),
+                        ("yyyy-mm-dd", "2026-10-02")):
+        got = time.strftime(web.date_format({"label": label, "type": "text"}),
+                            time.localtime(oct2))
+        check(f"2 October in a box labelled {label!r} is {want!r}", got == want, got)
+    check("a native date input still gets ISO",
+          web.date_format({"label": "Departure", "type": "date"}) == "%Y-%m-%d")
 
     rows = web.date_candidates(30)
     check("a month of candidates is offered", 25 <= len(rows) <= 40, str(len(rows)))
@@ -1956,7 +1970,7 @@ def t_dates_are_worked_out_not_guessed(j):
             bad.append(value)
     check("every candidate is a real date, today or later", not bad, str(bad[:4]))
     check("the first one is today",
-          rows[0][0] == today.strftime("%d/%m/%Y"), rows[0][0])
+          as_date(rows[0][0]) == today, rows[0][0])
 
 
 def t_the_app_loop_actually_drives(j):

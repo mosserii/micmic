@@ -3,7 +3,7 @@
 <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero-dark.gif">
     <source media="(prefers-color-scheme: light)" srcset="docs/assets/hero-light.gif">
-    <img alt="MicMic. Talk to your Mac. You hold right Option and say &quot;Remind me in ten minutes to call Mom&quot;, and the bar answers &quot;I will remind you in 10 minutes&quot; with an Undo button." src="docs/assets/hero-light.gif" width="820">
+    <img alt="MicMic. Talk to your Mac. You hold right Option and say &quot;Find me a flight from Tel Aviv to Lisbon next Friday&quot;. The bar works on it for about half a minute, answers &quot;Found it. It is on the screen.&quot;, and the real Google Flights results for Friday, October 2 slide in: one way, Tel Aviv to Lisbon." src="docs/assets/hero-light.gif" width="820">
 </picture>
 
 ### Talk to your Mac. It does the thing.
@@ -54,7 +54,7 @@ Replies in quotes are MicMic's own words.
 | **Find the contract I signed** | Searches your files with Spotlight and opens the one you meant, even across languages. |
 | **In the calculator, press five** | Presses real buttons in other apps through Accessibility, the way VoiceOver reads them. |
 | **What's the weather in Lisbon?** | That town, spoken back in your language. The time and the weather never touch a language model. |
-| **Find me a flight to London next Sunday** | Drives a real browser through the search and the date picker, and stops before anything is paid for. |
+| **Find me a flight from Tel Aviv to Lisbon next Friday** | Drives a real browser to Google Flights, fills in the trip and the date, and leaves the results on your screen. It never pays for anything. |
 | **Send Dana a WhatsApp that I'm running late, then play some jazz** | Both, in order. |
 
 <details>

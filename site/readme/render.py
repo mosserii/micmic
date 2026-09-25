@@ -3,11 +3,16 @@ and the GitHub social preview.
 
     MICMIC_PORT=8891 MICMIC_STATE_DIR=$(mktemp -d) .venv/bin/python3 -m savta.server &
     .venv/bin/python3 site/readme/render.py http://127.0.0.1:8891 docs/assets
+    .venv/bin/python3 site/readme/render.py http://127.0.0.1:8891 docs/assets hero   # GIFs only
+
+The hero is one real browser-agent run (FLIGHT): what was said, the reply the router
+gave, how long it took, and docs/assets/flight-final.png, the page the agent stopped
+on, captured from that run. Re-record all four together or none of them.
 
 Everything the bar shows is driven through the same calls native/bar.py makes
 (barState, barHeard, barResult) on savta/web/index.html?bar=1, so the pictures are the
-shipped UI, not a drawing of it. hero.html only adds the backdrop, the name and the
-key hint around it. Every POST from the page is answered here and never reaches the
+shipped UI, not a drawing of it. hero.html only adds the backdrop, the name, the
+key hint, the tagline and the plain window the agent's screenshot sits in. Every POST from the page is answered here and never reaches the
 server: /api/duck would turn the real volume down. The phrases and replies are the
 router's own strings for things MicMic does. Needs ffmpeg for the GIF.
 """
@@ -35,16 +40,22 @@ try{ localStorage.setItem('micmic.lang', 'en'); }catch(_){}
 """
 
 # (language, what you say, what the bar answers, undo label or None). The replies are
-# the router's strings: timer_set, playing_t, the selection send, and the Hebrew timer.
+# the router's strings: timer_set, playing_t, and the selection send. English only:
+# the public README shows no other language.
 SCENES = [
     ("en", "Remind me in ten minutes to call Mom", "I will remind you in 10 minutes.", ""),
     ("en", "Play this week’s top 100 hits", "Here you go. Top 100 Songs This Week.", ""),
     ("en", "Send this to Matan", "Sending Matan what you selected. Say no and I will stop.", None),
-    ("he", "תזכירי לי בעוד עשר "
-           "דקות להתקשר לאמא",
-     "אזכיר לך בעוד 10 דקות.", ""),
 ]
 
+
+# One real run of the do_online branch (router.py) on 2026-09-25, headless, fresh
+# profile: Google Flights, one way, TLV to LIS on Fri 2 Oct ("next Friday", typed as
+# "Oct 2, 2026"), 20 agent steps, 35 s from the words to the answer. "Found it." is
+# the router's `done` line.
+FLIGHT = {"said": "Find me a flight from Tel Aviv to Lisbon next Friday",
+          "reply": "Found it. It is on the screen.", "seconds": 35,
+          "page": "google.com/travel/flights", "shot": "flight-final.png"}
 
 GITHUB_BG = {"light": "#ffffff", "dark": "#0d1117"}
 
@@ -59,12 +70,16 @@ def guard(route):
 class Bar:
     """The bar page at its native width, captured at `dpr` with a transparent window."""
 
-    def __init__(self, browser, scheme, dpr):
+    def __init__(self, browser, scheme, dpr, clock=False):
         self.ctx = browser.new_context(viewport={"width": 640, "height": 64}, color_scheme=scheme,
                                        device_scale_factor=dpr, reduced_motion="reduce")
         self.ctx.route("**/api/**", guard)
         self.ctx.add_init_script(INIT)
         self.page = self.ctx.new_page()
+        if clock:
+            # A fake clock, so the bar's own "Working · Ns" counter can be walked
+            # through the real run's seconds without waiting them out.
+            self.page.clock.install()
         self.page.goto(BASE + "/?bar=1")
         self.page.wait_for_function("() => !!window.barState")
         self.page.evaluate("document.fonts.ready")
@@ -95,7 +110,7 @@ class Bar:
 
 
 class Hero:
-    def __init__(self, browser, scheme, w, h, scale, social=False, page=None):
+    def __init__(self, browser, scheme, w, h, scale, social=False, page=None, clock=False):
         self.ctx = browser.new_context(viewport={"width": w, "height": h}, color_scheme=scheme,
                                        device_scale_factor=2, reduced_motion="reduce")
         self.page = self.ctx.new_page()
@@ -108,7 +123,7 @@ class Hero:
             self.page.evaluate("c => document.documentElement.style.setProperty('--page', c)", page)
         self.page.evaluate("document.fonts.ready")
         # Captured at the size it is shown, so it lands pixel for pixel.
-        self.bar = Bar(browser, scheme, 2 * scale)
+        self.bar = Bar(browser, scheme, 2 * scale, clock)
 
     def show(self, held=None):
         src = "data:image/png;base64," + base64.b64encode(self.bar.png()).decode()
@@ -136,8 +151,6 @@ def stills(browser):
         bar.png(str(OUT / f"bar-thinking-{scheme}.png"))
         bar.js("barResult('Shall I add Flight to Lisbon to your calendar, Friday 2 October at 07:40?', null)")
         bar.png(str(OUT / f"bar-result-{scheme}.png"))
-        bar.result(SCENES[3])
-        bar.png(str(OUT / f"bar-hebrew-{scheme}.png"))
         bar.close()
 
     # GitHub's social preview: 1280x640, dark, the finished bar.
@@ -149,10 +162,15 @@ def stills(browser):
 
 
 def loop(browser, scheme, tmp):
-    """One pass through SCENES as (png, seconds) frames, then a palette-matched GIF."""
+    """FLIGHT as (png, seconds) frames, then a palette-matched GIF."""
     # GitHub's own page colours, so the hero has no edge in the README.
-    hero = Hero(browser, scheme, 880, 440, 1.2, page=GITHUB_BG[scheme])
+    # The tagline too, as on the social preview, so the one looping picture says what
+    # MicMic is and what understands you.
+    hero = Hero(browser, scheme, 880, 620, 1.2, social=True, page=GITHUB_BG[scheme], clock=True)
     bar, frames = hero.bar, []
+    hero.page.evaluate("([s, a]) => new Promise(ok => { const i = document.getElementById('shot');"
+                       " document.getElementById('addr').textContent = a; i.onload = ok; i.src = s; })",
+                       [(OUT / FLIGHT["shot"]).resolve().as_uri(), FLIGHT["page"]])
 
     def frame(seconds, held=None):
         hero.show(held)
@@ -160,18 +178,32 @@ def loop(browser, scheme, tmp):
         hero.shot(p)
         frames.append((p, seconds))
 
-    for code, said, reply, undo in SCENES:
-        bar.lang(code)
-        bar.js("barState('listening', '')")
-        frame(0.45, held=True)
-        words = said.split(" ")
-        for i in range(1, len(words) + 1):
-            bar.js("t => barHeard(t)", " ".join(words[:i]))
-            frame(0.5 if i == len(words) else 0.17)
-        bar.js("barState('thinking', '')")
-        frame(0.9, held=False)
-        bar.js("([r, u]) => barResult(r, u)", [reply, undo])
-        frame(2.6)
+    bar.lang("en")
+    bar.js("barState('listening', '')")
+    frame(0.45, held=True)
+    words = FLIGHT["said"].split(" ")
+    for i in range(1, len(words) + 1):
+        bar.js("t => barHeard(t)", " ".join(words[:i]))
+        frame(0.5 if i == len(words) else 0.17)
+    # The bar's own counter, walked through the run's real seconds in a few ticks.
+    # Paused while it counts: rendering a frame takes real time, which the counter
+    # would otherwise add to the run's.
+    bar.page.clock.pause_at(bar.js("Date.now()") + 1000)
+    bar.js("barState('thinking', '')")
+    frame(0.6, held=False)
+    at = 0
+    for sec in (5, 12, 19, 27, FLIGHT["seconds"]):
+        bar.page.clock.run_for((sec - at) * 1000)
+        at = sec
+        frame(0.3)
+    bar.js("([r, u]) => barResult(r, u)", [FLIGHT["reply"], None])
+    bar.page.clock.resume()
+    frame(1.3)
+    # Few in-between frames: each one carries the whole screenshot, and it is those,
+    # not the bar, that decide the size of the GIF.
+    for p, seconds in ((.25, .08), (.5, .08), (.75, .08), (1, 4.2), (0, .3)):
+        hero.page.evaluate("p => reveal(p)", p)
+        frame(seconds)
     hero.close()
 
     lst = tmp / f"{scheme}.txt"
@@ -192,7 +224,8 @@ def main():
     tmp = Path(tempfile.mkdtemp(prefix="micmic-readme-"))
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        stills(browser)
+        if "hero" not in sys.argv[3:]:
+            stills(browser)
         for scheme in ("light", "dark"):
             gif = loop(browser, scheme, tmp)
             print(gif, f"{gif.stat().st_size / 1e6:.2f} MB")

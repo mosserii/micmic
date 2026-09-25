@@ -599,7 +599,32 @@ def decide(j, goal: str, snap: dict, history: list[str],
             "page_is_conf": choice(a, "page_is")[1]}
 
 
-def date_candidates(days: int = 30, iso: bool = False) -> list[tuple[str, str]]:
+# Digits alone are read by the page, not by us: 02/10/2026 is 2 October in London and
+# 10 February in New York, and Google Flights read it as February under every browser
+# language tried, so "next Friday" failed 3 out of 3 on 2026-09-25 whenever the day was
+# 12 or less. A month written out has one reading everywhere. A box that shows which
+# digit order it wants (a "MM/DD/YYYY" placeholder) gets exactly that.
+TEXT_DATE = "%b %-d, %Y"
+_DATE_PATTERNS = ((re.compile(r"\bmm\s*/\s*dd\b"), "%m/%d/%Y"),
+                  (re.compile(r"\bdd\s*/\s*mm\b"), "%d/%m/%Y"),
+                  (re.compile(r"\bdd\s*\.\s*mm\b"), "%d.%m.%Y"),
+                  (re.compile(r"\byyyy\s*-\s*mm\b"), "%Y-%m-%d"))
+
+
+def date_format(el: dict) -> str:
+    """The shape a date takes in this box: ISO for a real date input, the digit order
+    the box itself asks for, otherwise the month spelled out."""
+    if (el.get("type") or "").lower() in ("date", "datetime-local", "month"):
+        return "%Y-%m-%d"
+    blob = f"{el.get('label', '')} {el.get('name', '')}".lower()
+    for pat, fmt in _DATE_PATTERNS:
+        if pat.search(blob):
+            return fmt
+    return TEXT_DATE
+
+
+def date_candidates(days: int = 30, iso: bool = False,
+                    fmt: str | None = None) -> list[tuple[str, str]]:
     """Every date from today to a month out, as (value, plain description).
 
     Code can enumerate dates perfectly; what it cannot do is know which one "next
@@ -611,7 +636,7 @@ def date_candidates(days: int = 30, iso: bool = False) -> list[tuple[str, str]]:
     base = time.mktime((now.tm_year, now.tm_mon, now.tm_mday, 12, 0, 0, 0, 0, -1))
     for i in range(days + 1):
         t = time.localtime(base + i * 86400)
-        value = time.strftime("%Y-%m-%d" if iso else "%d/%m/%Y", t)
+        value = time.strftime("%Y-%m-%d" if iso else (fmt or TEXT_DATE), t)
         when = {0: "today", 1: "tomorrow", 2: "the day after tomorrow"}.get(i, "")
         # State the arithmetic on every row, not only the first two weeks. Past day 14
         # the rows used to be bare dates, and on the 24th of a month "Saturday 24
@@ -656,8 +681,7 @@ def field_value(j, llm, goal: str, el: dict, page_title: str) -> str:
         # A native <input type="date"> accepts only YYYY-MM-DD and silently discards
         # anything else, so the field stays empty while everything reports success.
         # A text box that merely means a date wants what a person would type.
-        iso = (el.get("type") or "").lower() in ("date", "datetime-local", "month")
-        rows = date_candidates(iso=iso)
+        rows = date_candidates(fmt=date_format(el))
         opts = {v: d for v, d in rows[:MAX_OPTIONS - 1]}
         opts["__none__"] = "The goal does not say what date this field wants."
         a = j.ask({"what_she_asked_for": goal,
