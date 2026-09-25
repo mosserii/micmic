@@ -8,6 +8,8 @@
 
 ### Talk to your Mac. It does the thing.
 
+<sub>Understands you with <a href="https://typesafe.ai"><b>Jev</b></a>, by TypeSafe</sub>
+
 MicMic is a voice assistant for macOS that acts instead of searching. Hold a key, say
 what you want, let go. It plays it, sends it, opens it or reads your screen, and when it
 can be put back, Undo is one click away.
