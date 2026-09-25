@@ -7,6 +7,7 @@ stripe.Webhook.construct_event.
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import hmac
 import json
@@ -269,10 +270,26 @@ def test_checkout_creates_a_subscription_session_at_the_server_price(make_proxy,
     assert call["subscription_data"] == {"metadata": {"device_id": d["device_id"]}}
     assert call["success_url"] == f"{BASE}/checkout/success?session_id={{CHECKOUT_SESSION_ID}}"
     assert call["cancel_url"] == f"{BASE}/checkout/cancel"
-    assert call["idempotency_key"] == f"checkout:{d['device_id']}:{DAY}:{PRICE}:new"
+    now = p.clock.now
+    window = now.strftime("%Y-%m-%dT%H:") + f"{now.minute // 10}0"
+    assert call["idempotency_key"] == f"checkout:{d['device_id']}:{window}:{PRICE}:new"
     assert "customer" not in call
     # The plan does not move until a webhook says so.
     assert p.request("GET", "/v1/account", token=d["token"])[1]["plan"] == "free"
+
+
+def test_a_failed_checkout_does_not_block_the_device_for_the_day(make_proxy, fake_stripe):
+    """Stripe replays an idempotency key's first answer, errors included, for 24 hours.
+    Ten minutes later the key is a new one, so a fixed misconfiguration heals."""
+    p = make_proxy(**STRIPE_CFG)
+    _, d, _, _ = signup(p)
+    p.request("POST", "/v1/checkout", token=d["token"])
+    p.request("POST", "/v1/checkout", token=d["token"])
+    p.clock.now = p.clock.now + datetime.timedelta(minutes=10)
+    p.request("POST", "/v1/checkout", token=d["token"])
+    first, double_click, later = (c["idempotency_key"] for c in fake_stripe)
+    assert first == double_click
+    assert later != first
 
 
 def test_checkout_is_409_for_pro_and_401_without_a_token(make_proxy, fake_stripe):

@@ -60,7 +60,7 @@ def _require(cfg: Config) -> None:
         raise PaymentsUnavailable()
 
 
-def create_checkout(cfg: Config, device: dict, day: str) -> str:
+def create_checkout(cfg: Config, device: dict, window: str) -> str:
     """A Checkout Session for MicMic Pro for this device. The price is the server's
     STRIPE_PRICE_PRO, never anything the client sent."""
     _require(cfg)
@@ -84,7 +84,7 @@ def create_checkout(cfg: Config, device: dict, day: str) -> str:
     # A double click, or a retry after a timeout, gets the same session back. The key
     # changes with anything that changes the parameters, since Stripe refuses a reused
     # key with different ones.
-    key = f"checkout:{device_id}:{day}:{cfg.stripe_price_pro}:{customer or 'new'}"
+    key = f"checkout:{device_id}:{window}:{cfg.stripe_price_pro}:{customer or 'new'}"
     try:
         session = stripe.checkout.Session.create(
             api_key=cfg.stripe_secret_key, idempotency_key=key, **params)

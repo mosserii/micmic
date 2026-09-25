@@ -244,6 +244,14 @@ def _day(now: datetime) -> str:
     return now.strftime("%Y-%m-%d")
 
 
+def _window(now: datetime) -> str:
+    """The ten minutes a checkout's idempotency key covers. Stripe replays a key's first
+    answer for 24 hours, errors included, so a key that lived a whole day turned one
+    failed attempt (a product missing its tax code, 2026-09-25) into a day without
+    checkout for that device. Ten minutes still folds a double click into one session."""
+    return now.strftime("%Y-%m-%dT%H:") + f"{now.minute // 10}0"
+
+
 def _total(cfg, plan: str) -> bool:
     """The free plan is a number of requests to try, in total, not a daily allowance:
     its usage lives in one bucket that never rolls over (FREE_LIMIT_SCOPE=day brings
@@ -800,7 +808,7 @@ class Handler(BaseHTTPRequestHandler):
             return 409, h
         acct = self.server.store.account(h)
         try:
-            url = billing.create_checkout(self.server.cfg, acct, _day(self.server.clock()))
+            url = billing.create_checkout(self.server.cfg, acct, _window(self.server.clock()))
         except billing.PaymentsUnavailable:
             self._json(503, {"error": "payments_unavailable"})
             return 503, h
