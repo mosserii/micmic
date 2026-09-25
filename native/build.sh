@@ -295,20 +295,32 @@ ENT
   # on its own too, so Gatekeeper is satisfied offline before the app is even opened.
   if [ "${DMG:-0}" = "1" ]; then
     echo "  building the disk image"
-    STAGE="$DIST/dmg"
-    rm -rf "$STAGE" && mkdir -p "$STAGE"
-    ditto "$RAPP" "$STAGE/MicMic.app"
-    ln -s /Applications "$STAGE/Applications"
+    command -v uvx >/dev/null || { echo "  FAILED: the disk image needs uv (uvx runs dmgbuild)"; exit 1; }
     rm -f "$DIST/MicMic.dmg"
+    # The window it opens to (background, icon places, volume icon) is native/dmg/.
+    # dmgbuild writes Finder's view settings straight into the image, so there is no
+    # Finder scripting, which needs Automation permission and races the mount.
     # ULFO (lzfse) over UDZO (zlib): measured on the ad-hoc build, UDZO 24 MB vs
     # ULFO 21 MB vs ULMO (lzma) 16 MB. ULMO's extra few MB cost nearly 3x the copy
     # time out of the mounted image (lzma has no cheap random-access decompression)
     # and 4-6x the build time; ULFO copies and mounts the same as UDZO for less
     # size, with no downside worth paying for. lzfse has worked in hdiutil since
-    # OS X 10.11, well under this app's macOS 13 floor.
-    hdiutil create -volname "MicMic" -srcfolder "$STAGE" -ov -format ULFO \
-      -fs HFS+ "$DIST/MicMic.dmg" >/dev/null
-    rm -rf "$STAGE"
+    # OS X 10.11, well under this app's macOS 13 floor. Format and HFS+ are set in
+    # dmg/dmgbuild-settings.py.
+    uvx --from dmgbuild==1.6.7 dmgbuild -s "$HERE/dmg/dmgbuild-settings.py" \
+      -D app="$RAPP" "MicMic" "$DIST/MicMic.dmg" >/dev/null
+    # dmgbuild copies the app in with ditto and exits 0 even when that copy fails
+    # (seen: "Operation not permitted" on /Volumes/MicMic 1/MicMic.app), leaving an
+    # image with no app that Apple would notarize all the same. Open it somewhere
+    # private and check the app is in it, whole and still validly signed.
+    MNT="$(mktemp -d)"
+    hdiutil attach -nobrowse -readonly -mountpoint "$MNT" "$DIST/MicMic.dmg" >/dev/null
+    dmg_ok=1
+    codesign --verify --deep --strict "$MNT/MicMic.app" 2>&1 | sed 's/^/    /' || dmg_ok=0
+    [ -L "$MNT/Applications" ] && [ -f "$MNT/.background.tiff" ] || dmg_ok=0
+    hdiutil detach "$MNT" >/dev/null && rmdir "$MNT"
+    [ "$dmg_ok" = 1 ] || { echo "  FAILED: the disk image does not hold a valid MicMic.app, Applications and its background"; exit 1; }
+    echo "  disk image holds the signed app"
     codesign --force --sign "$IDENTITY" --timestamp "$DIST/MicMic.dmg"
     notarize "$DIST/MicMic.dmg"
     xcrun stapler staple "$DIST/MicMic.dmg" || { echo "  FAILED: stapling the disk image"; exit 1; }
