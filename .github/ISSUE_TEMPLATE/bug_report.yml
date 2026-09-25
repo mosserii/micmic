@@ -1,0 +1,64 @@
+name: Bug report
+description: MicMic did the wrong thing, or nothing.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. Please do not include message contents, contact names or anything else private. Security problems go to SECURITY.md, not here.
+  - type: textarea
+    id: said
+    attributes:
+      label: What you said
+      description: The exact words, in the language you said them.
+      placeholder: Remind me in ten minutes to call Mom
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+      description: What the bar showed and what MicMic did. A screenshot of the bar helps.
+    validations:
+      required: true
+  - type: dropdown
+    id: language
+    attributes:
+      label: Language
+      options: [English, Hebrew, Arabic, Russian, Other]
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you run MicMic
+      options:
+        - The downloaded app
+        - Built from source, MicMic cloud
+        - Built from source, my own keys
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: MicMic version or commit
+      placeholder: 1.0.0, or a commit hash
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and Mac
+      placeholder: macOS 15.2, MacBook Air M2
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log lines
+      description: From native/micmic-listener.log or native/micmic-server.log, around the request. Remove anything private.
+      render: text

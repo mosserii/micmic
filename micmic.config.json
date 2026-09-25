@@ -1,0 +1,21 @@
+{
+  "name": "MicMic",
+  "language_hint": "en-US",
+  "activation": "push",
+  "wake_words": [
+    "מיקמיק",
+    "מיק מיק",
+    "micmic",
+    "mic mic",
+    "hey micmic"
+  ],
+  "listen_seconds": 12,
+  "llm": {
+    "enabled": "auto",
+    "model": "gemini-3.5-flash-lite",
+    "note": "auto means: use it when GEMINI_API_KEY exists, otherwise fall back to the keyless path. Set to false to never use it. Only two jobs go here: splitting compound requests, and answering knowledge questions. The clock and the weather never do."
+  },
+  "_activation_note": "push = press the orb or the spacebar. wake = always listening, acts only after a wake word. always = acts on everything it hears.",
+  "pinned_contacts": [],
+  "_contacts_note": "Contacts come from WhatsApp and fall back to the macOS Contacts app. Put a name in pinned_contacts only to force it to the top of the shortlist."
+}

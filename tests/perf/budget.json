@@ -1,0 +1,164 @@
+{
+ "clock_en#0": {
+  "jev": 1,
+  "gemini": 0,
+  "depth": 1,
+  "store": 1
+ },
+ "clock_he#0": {
+  "jev": 1,
+  "gemini": 0,
+  "depth": 1,
+  "store": 0
+ },
+ "clock_ar#0": {
+  "jev": 1,
+  "gemini": 0,
+  "depth": 1,
+  "store": 0
+ },
+ "clock_zone_en#0": {
+  "jev": 1,
+  "gemini": 1,
+  "depth": 2,
+  "store": 0
+ },
+ "weather_en#0": {
+  "jev": 1,
+  "gemini": 0,
+  "depth": 1,
+  "store": 0
+ },
+ "weather_he#0": {
+  "jev": 2,
+  "gemini": 0,
+  "depth": 2,
+  "store": 0
+ },
+ "weather_ru#0": {
+  "jev": 1,
+  "gemini": 0,
+  "depth": 1,
+  "store": 0
+ },
+ "joke_en#0": {
+  "jev": 1,
+  "gemini": 1,
+  "depth": 2,
+  "store": 0
+ },
+ "joke_ar#0": {
+  "jev": 1,
+  "gemini": 1,
+  "depth": 2,
+  "store": 0
+ },
+ "joke_ru#0": {
+  "jev": 1,
+  "gemini": 1,
+  "depth": 2,
+  "store": 0
+ },
+ "open_app_en#0": {
+  "jev": 2,
+  "gemini": 0,
+  "depth": 2,
+  "store": 0
+ },
+ "open_app_he#0": {
+  "jev": 2,
+  "gemini": 0,
+  "depth": 2,
+  "store": 0
+ },
+ "music_en#0": {
+  "jev": 2,
+  "gemini": 0,
+  "depth": 2,
+  "store": 0
+ },
+ "music_he#0": {
+  "jev": 2,
+  "gemini": 0,
+  "depth": 2,
+  "store": 0
+ },
+ "music_ar#0": {
+  "jev": 2,
+  "gemini": 0,
+  "depth": 2,
+  "store": 0
+ },
+ "message_en#0": {
+  "jev": 3,
+  "gemini": 0,
+  "depth": 2,
+  "store": 0
+ },
+ "message_he#0": {
+  "jev": 3,
+  "gemini": 0,
+  "depth": 2,
+  "store": 0
+ },
+ "message_ru#0": {
+  "jev": 3,
+  "gemini": 0,
+  "depth": 2,
+  "store": 0
+ },
+ "screen_en#0": {
+  "jev": 1,
+  "gemini": 1,
+  "depth": 2,
+  "store": 0
+ },
+ "screen_he#0": {
+  "jev": 1,
+  "gemini": 1,
+  "depth": 2,
+  "store": 0
+ },
+ "knowledge_he#0": {
+  "jev": 2,
+  "gemini": 1,
+  "depth": 3,
+  "store": 0
+ },
+ "undo_en#0": {
+  "jev": 1,
+  "gemini": 0,
+  "depth": 1,
+  "store": 0
+ },
+ "undo_en#1": {
+  "jev": 1,
+  "gemini": 0,
+  "depth": 1,
+  "store": 0
+ },
+ "undo_he#0": {
+  "jev": 1,
+  "gemini": 0,
+  "depth": 1,
+  "store": 0
+ },
+ "undo_he#1": {
+  "jev": 1,
+  "gemini": 0,
+  "depth": 1,
+  "store": 0
+ },
+ "followup_en#0": {
+  "jev": 2,
+  "gemini": 1,
+  "depth": 3,
+  "store": 0
+ },
+ "followup_en#1": {
+  "jev": 2,
+  "gemini": 1,
+  "depth": 3,
+  "store": 0
+ }
+}

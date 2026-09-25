@@ -1,0 +1,22 @@
+[project]
+name = "savta"
+version = "0.1.0"
+description = "Voice-first Mac assistant for someone who cannot type. Jev decides, code acts."
+requires-python = ">=3.11"
+dependencies = [
+    # Drives a real Chrome for the browser agent. Everything else MicMic does is the
+    # standard library, AppleScript, or an HTTPS call it makes itself.
+    "playwright>=1.63",
+    # Reads the controls of other Mac apps through the accessibility API, which is how
+    # the agent works inside applications that have no scripting interface.
+    "pyobjc-core>=11.0",
+    "pyobjc-framework-Cocoa>=11.0",
+    "pyobjc-framework-ApplicationServices>=11.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["savta"]

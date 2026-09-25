@@ -1,0 +1,30 @@
+name: Feature request
+description: Something you would like to be able to say.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: say
+    attributes:
+      label: What you would say
+      description: The sentence, as you would really say it.
+      placeholder: Move this email to the Travel folder
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: What should happen
+      description: What MicMic should do, and what it should say back.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it matters to you
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: The rules that do not bend
+      options:
+        - label: It does not need MicMic to delete anything, or to send anything without a read-back.
+          required: true

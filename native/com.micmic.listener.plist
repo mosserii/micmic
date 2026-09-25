@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Launch-at-login for the MicMic listener.
+
+  This is a template. It does nothing where it sits. To use it, from the repo root:
+
+      sed "s#__MICMIC_NATIVE__#$PWD/native#g" native/com.micmic.listener.plist \
+          > ~/Library/LaunchAgents/com.micmic.listener.plist
+      launchctl load -w ~/Library/LaunchAgents/com.micmic.listener.plist
+
+  To stop it starting at login:
+
+      launchctl unload -w ~/Library/LaunchAgents/com.micmic.listener.plist
+
+  Note it runs the app's own executable, not the .app through `open`. Both work; this
+  way launchd can restart it if it ever dies. If macOS ever forgets the microphone
+  permission after switching to launchd, quit it, launch MicMic.app by hand once with
+  `open`, re-grant, and load the agent again.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.micmic.listener</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__MICMIC_NATIVE__/MicMic.app/Contents/MacOS/MicMic</string>
+  </array>
+
+  <!-- Tells the app it was started by launchd at login, not by a person double-clicking
+       it. A person opening an app expects a window; a login item must not steal focus. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MICMIC_AUTOSTART</key>
+    <string>1</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__MICMIC_NATIVE__/micmic-launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>__MICMIC_NATIVE__/micmic-launchd.log</string>
+
+  <key>ProcessType</key>
+  <string>Interactive</string>
+</dict>
+</plist>

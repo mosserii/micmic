@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MicMic link preview</title>
+<style>
+/* The link-preview card (1200x630). Same font, colours and glow as the landing page
+   in dark mode; the name and what it does, the way the Introducer card does it. */
+@font-face { font-family: "Rubik"; src: url("../../proxy/web/static/fonts/rubik-latin-wght-normal.woff2") format("woff2");
+  font-weight: 300 900; }
+:root { --bg: #12110e; --ink: #f6f2ec; --muted: #a79f93; --accent: #57c69d;
+  --blob-a: #a8722c; --blob-b: #9c4f47; --blob-c: #2f6b56; }
+:root[data-theme="light"] { --bg: #f7f5f1; --ink: #15130f; --muted: #7a7266; --accent: #2d8b6b;
+  --blob-a: #f0b06a; --blob-b: #df8d84; --blob-c: #7cb79a; }
+* { margin: 0; box-sizing: border-box; }
+html, body { width: 1200px; height: 630px; background: var(--bg); overflow: hidden; }
+body { font-family: "Rubik", system-ui, sans-serif; color: var(--ink); position: relative;
+  display: grid; place-items: center; }
+.field { position: absolute; inset: -10%; opacity: .8; filter: blur(8px);
+  background:
+    radial-gradient(30% 40% at 30% 44%, color-mix(in oklab, var(--blob-a) 60%, transparent), transparent 100%),
+    radial-gradient(28% 38% at 72% 52%, color-mix(in oklab, var(--blob-b) 50%, transparent), transparent 100%),
+    radial-gradient(30% 36% at 52% 64%, color-mix(in oklab, var(--blob-c) 55%, transparent), transparent 100%); }
+.card { position: relative; display: flex; flex-direction: column; align-items: center; gap: 46px;
+  transform: translateY(-6px); }
+.lockup { display: flex; align-items: center; gap: 40px; }
+.icon { width: 168px; height: 168px; border-radius: 38px;
+  box-shadow: 0 18px 40px -14px rgba(0,0,0,.55), 0 2px 0 rgba(255,255,255,.06) inset; }
+.name { font-size: 190px; font-weight: 700; letter-spacing: -.04em; line-height: .9; }
+/* A round dot, not Rubik's squared full stop: the accent in one mark. */
+.name .dot { display: inline-block; width: .19em; height: .19em; margin-left: .05em;
+  border-radius: 50%; background: var(--accent); vertical-align: baseline; }
+.tag { font-size: 26px; font-weight: 600; letter-spacing: .32em; text-transform: uppercase;
+  color: var(--muted); padding-left: .32em; }
+</style>
+</head>
+<body>
+  <div class="field" aria-hidden="true"></div>
+  <div class="card">
+    <div class="lockup">
+      <img class="icon" src="../../brand/micmic-icon.png" alt="">
+      <div class="name">MicMic<span class="dot"></span></div>
+    </div>
+    <div class="tag">Talk to your Mac</div>
+  </div>
+</body>
+</html>

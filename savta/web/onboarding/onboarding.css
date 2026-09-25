@@ -1,0 +1,350 @@
+/* ---- first-run onboarding ---------------------------------------------------
+   Three screens inside MicMic.app's window (?panel=1, 380x560), shown once on a Mac
+   nobody has been set up on. onboarding.js loads this sheet only then. Every rule is
+   scoped to .ob or body.onboarding, so once the overlay is gone nothing here matches
+   and the page is exactly the page without it. The materials are the page's own:
+   its tokens, its glass, its orb, its drifting colour. */
+
+/* The stage steps aside; the drifting colour behind it stays, and is what the
+   onboarding sits on. */
+body.onboarding .stage,body.onboarding .gear,body.onboarding .newchat{visibility:hidden}
+body.onboarding .lang{z-index:60;right:12px}
+body.onboarding.panel .field{opacity:calc(var(--blob-alpha) * .8)}
+
+.ob{--ob-dx:28px;--ob-ease:cubic-bezier(.22,1,.36,1);
+  --ob-key:linear-gradient(180deg,#fefdfc,#f0ece7);--ob-key-ink:#4d463f;
+  --ob-key-edge:rgba(40,28,16,.09);
+  --ob-key-shadow:0 1px 0 rgba(40,28,16,.10),0 3px 5px -2px rgba(70,50,30,.28),inset 0 1px 0 #fff;
+  --ob-deck:linear-gradient(180deg,rgba(86,66,44,.07),rgba(86,66,44,.13));
+  --ob-cta:#26805f;--ob-cta-ink:#fff;--ob-tick-ink:#fff;
+  position:fixed;inset:0;z-index:50;display:flex;flex-direction:column;
+  padding:10px 20px 16px;text-align:center;color:var(--ink);
+  opacity:0;transition:opacity .55s var(--ob-ease)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .ob{
+  --ob-key:linear-gradient(180deg,#3b3632,#2d2926);--ob-key-ink:#ece4da;
+  --ob-key-edge:rgba(255,255,255,.07);
+  --ob-key-shadow:0 1px 0 rgba(0,0,0,.55),0 3px 6px -2px rgba(0,0,0,.7),inset 0 1px 0 rgba(255,255,255,.08);
+  --ob-deck:linear-gradient(180deg,rgba(0,0,0,.18),rgba(0,0,0,.30));
+  --ob-cta:#57c69d;--ob-cta-ink:#062b1e;--ob-tick-ink:#062b1e}}
+:root[data-theme="dark"] .ob{
+  --ob-key:linear-gradient(180deg,#3b3632,#2d2926);--ob-key-ink:#ece4da;
+  --ob-key-edge:rgba(255,255,255,.07);
+  --ob-key-shadow:0 1px 0 rgba(0,0,0,.55),0 3px 6px -2px rgba(0,0,0,.7),inset 0 1px 0 rgba(255,255,255,.08);
+  --ob-deck:linear-gradient(180deg,rgba(0,0,0,.18),rgba(0,0,0,.30));
+  --ob-cta:#57c69d;--ob-cta-ink:#062b1e;--ob-tick-ink:#062b1e}
+[dir="rtl"] .ob{--ob-dx:-28px}
+.ob.in{opacity:1}
+.ob.out{opacity:0;transform:scale(1.015);pointer-events:none;
+  transition:opacity .45s ease,transform .45s var(--ob-ease)}
+.ob button{font-family:Rubik,-apple-system,BlinkMacSystemFont,"SF Hebrew",system-ui,sans-serif;
+  -webkit-tap-highlight-color:transparent}
+.ob button:focus{outline:none}
+.ob button:focus-visible{outline:2px solid color-mix(in oklab,var(--live) 70%,transparent);outline-offset:3px}
+/* the headline takes focus only so a screen reader starts at the top of a new screen */
+.ob-title:focus,.ob:focus{outline:none}
+.ob [hidden]{display:none!important}
+.ob-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+
+/* ---- progress: three short strokes, centred between the window buttons and the
+   language pill */
+.ob-top{flex:none;height:34px;display:flex;align-items:center;justify-content:center}
+.ob-prog{display:flex;gap:6px;direction:ltr}
+[dir="rtl"] .ob-prog{flex-direction:row-reverse}
+.ob-prog i{display:block;width:14px;height:4px;border-radius:99px;
+  background:color-mix(in oklab,var(--ink) 14%,transparent);
+  transition:width .55s var(--ob-ease),background-color .45s ease}
+.ob-prog i.done{background:color-mix(in oklab,var(--live) 45%,transparent)}
+.ob-prog i.on{width:30px;background:var(--live)}
+
+/* ---- the three screens share one frame: picture, headline, one line, footer, so
+   nothing but the content moves between them */
+.ob-steps{position:relative;flex:1;min-height:0}
+.ob-step{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;padding-bottom:10px;opacity:0;visibility:hidden;transform:translateX(var(--ob-dx));
+  transition:opacity .4s ease,transform .6s var(--ob-ease),visibility 0s linear .6s}
+.ob-step.past{transform:translateX(calc(var(--ob-dx) * -1))}
+.ob-step.on{opacity:1;visibility:visible;transform:none;
+  transition:opacity .5s ease .08s,transform .7s var(--ob-ease) .04s,visibility 0s}
+/* a floor, not a ceiling: a long language wraps the permission rows taller */
+.ob-hero{position:relative;flex:none;width:100%;min-height:240px;padding:8px 0;display:grid;place-items:center}
+/* a pool of the brand's green under whatever the picture is */
+.ob-hero::before{content:"";position:absolute;left:50%;top:50%;width:300px;height:220px;
+  transform:translate(-50%,-50%);border-radius:50%;pointer-events:none;
+  background:radial-gradient(closest-side,color-mix(in oklab,var(--live) 16%,transparent),transparent);
+  filter:blur(8px)}
+.ob-title{margin-top:8px;max-width:17ch;font-size:26px;font-weight:500;line-height:1.14;
+  letter-spacing:-.022em;text-wrap:balance}
+.ob-sub{margin-top:9px;max-width:30ch;font-size:15px;line-height:1.45;color:var(--muted);
+  text-wrap:balance}
+.ob-hint{margin-top:5px;max-width:32ch;font-size:13px;line-height:1.4;color:var(--muted);
+  opacity:.78;text-wrap:balance}
+
+/* ---- footer: skip on the reading side, the one action on the other ---------- */
+.ob-foot{flex:none;height:52px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+.ob-skip{font-size:15px;font-weight:500;line-height:1;color:var(--muted);background:none;border:0;
+  padding:12px 10px;margin-inline-start:-10px;border-radius:12px;cursor:pointer;
+  transition:color .2s ease,opacity .3s ease}
+.ob-skip:hover{color:var(--ink)}
+.ob-act{display:grid;justify-items:end}
+.ob-act>*{grid-area:1/1}
+.ob-next{font-size:16px;font-weight:500;line-height:1;color:var(--ob-cta-ink);
+  padding:14px 26px;border-radius:999px;border:0;cursor:pointer;white-space:nowrap;
+  background:
+    linear-gradient(180deg,rgba(255,255,255,.22),rgba(255,255,255,0) 55%),
+    var(--ob-cta);
+  box-shadow:0 14px 28px -14px color-mix(in oklab,var(--ob-cta) 90%,transparent),
+    0 2px 6px -2px color-mix(in oklab,var(--ob-cta) 60%,transparent),
+    inset 0 1px 0 rgba(255,255,255,.34),inset 0 -1px 0 rgba(0,0,0,.14);
+  transition:transform .18s var(--ob-ease),filter .2s ease;animation:obIn .45s var(--ob-ease)}
+.ob-next:hover{filter:brightness(1.06);transform:translateY(-1px)}
+.ob-next:active{transform:scale(.97)}
+.ob-ghost{font-size:15px;font-weight:500;line-height:1;color:var(--ink);white-space:nowrap;
+  padding:13px 22px;border-radius:999px;cursor:pointer;
+  background:var(--glass);border:1px solid var(--glass-line);
+  -webkit-backdrop-filter:blur(24px) saturate(190%);backdrop-filter:blur(24px) saturate(190%);
+  box-shadow:0 10px 24px -14px var(--shade),inset 0 1.5px 0 -0.5px var(--glass-edge);
+  transition:transform .18s var(--ob-ease),background .2s ease}
+.ob-ghost:hover{transform:translateY(-1px)}
+.ob-pill{display:inline-flex;align-items:center;gap:9px;white-space:nowrap;
+  font-size:14px;line-height:1;color:var(--muted);padding:12px 17px;border-radius:999px;
+  background:var(--glass);border:1px solid var(--glass-line);
+  -webkit-backdrop-filter:blur(24px) saturate(190%);backdrop-filter:blur(24px) saturate(190%);
+  box-shadow:0 10px 24px -14px var(--shade),inset 0 1.5px 0 -0.5px var(--glass-edge)}
+.ob-pill i{flex:none;width:8px;height:8px;border-radius:50%;background:var(--live);
+  animation:obPing 1.9s ease-out infinite}
+.ob-pill[data-live="thinking"] i{background:var(--warm);animation-duration:1s}
+.ob-pill span::first-letter{text-transform:uppercase}
+@keyframes obPing{0%{box-shadow:0 0 0 0 color-mix(in oklab,var(--live) 55%,transparent)}
+  80%,100%{box-shadow:0 0 0 9px color-mix(in oklab,var(--live) 0%,transparent)}}
+@keyframes obIn{from{opacity:0;transform:translateY(4px) scale(.97)}to{opacity:1;transform:none}}
+@keyframes obSpin{to{transform:rotate(360deg)}}
+
+/* ---- 1. the demo: the bar above, the keyboard below, and the right Option key
+   pressing, words arriving, letting go, an answer. Driven by onboarding.js through
+   data-p, one phase at a time, so it can be restarted and kept in step. ---------- */
+.ob-demo{position:relative;width:300px;display:flex;flex-direction:column;align-items:center;gap:20px}
+.ob-bar{position:relative;width:300px;height:66px;border-radius:21px;
+  display:flex;align-items:center;gap:12px;padding-inline:14px 16px;text-align:start;
+  background:color-mix(in srgb,var(--ground) 66%,transparent);
+  -webkit-backdrop-filter:blur(26px) saturate(190%);backdrop-filter:blur(26px) saturate(190%);
+  border:1px solid var(--glass-line);
+  box-shadow:0 22px 44px -20px var(--shade),0 2px 8px -4px rgba(0,0,0,.08),
+    inset 0 1.5px 0 -0.5px var(--glass-edge);
+  transition:opacity .6s ease,transform .6s var(--ob-ease)}
+.ob-demo[data-p="idle"] .ob-bar,.ob-demo[data-p="rest"] .ob-bar{opacity:.55;transform:scale(.965)}
+.ob-morb{position:relative;flex:none;width:36px;height:36px;border-radius:50%;
+  display:grid;place-items:center;background:var(--glass);border:1px solid var(--glass-line);
+  box-shadow:0 6px 14px -6px var(--shade),inset 0 1.5px 1px -1px var(--glass-edge),
+    inset 0 -10px 14px -12px rgba(0,0,0,.5)}
+.ob-morb::after{content:"";position:absolute;inset:0;border-radius:50%;pointer-events:none;
+  background:radial-gradient(40% 28% at 31% 19%,rgba(255,255,255,.95),rgba(255,255,255,0) 70%)}
+.ob-mcore{position:relative;width:16px;height:16px;color:var(--muted);opacity:.65;
+  transition:color .35s ease,opacity .35s ease,transform .35s var(--ob-ease)}
+.ob-mcore svg,.ob-ocore svg{width:100%;height:100%;fill:currentColor}
+.ob-mring,.ob-marc{position:absolute;inset:-4px;border-radius:50%;border:2px solid transparent;
+  opacity:0;transition:opacity .3s ease}
+.ob-mring{border-color:color-mix(in oklab,var(--live) 50%,transparent)}
+.ob-marc{border-color:color-mix(in oklab,var(--warm) 70%,transparent);
+  border-top-color:transparent;border-left-color:transparent}
+.ob-demo[data-p="press"] .ob-mcore{color:var(--live);opacity:1}
+.ob-demo[data-p="press"] .ob-mring{opacity:1;animation:obBreath 1.3s ease-in-out infinite}
+.ob-demo[data-p="work"] .ob-mcore{color:var(--warm);opacity:1;transform:scale(.8)}
+.ob-demo[data-p="work"] .ob-marc{opacity:1;animation:obSpin 1s linear infinite}
+.ob-demo[data-p="result"] .ob-mcore{color:var(--live);opacity:1}
+@keyframes obBreath{0%,100%{transform:scale(1)}50%{transform:scale(1.14)}}
+
+.ob-btext{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:3px}
+.ob-l1,.ob-l2{display:grid;min-width:0}
+.ob-l1>*,.ob-l2>*{grid-area:1/1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ob-l1{font-size:17px;line-height:22px;height:22px}
+.ob-l2{font-size:12.5px;line-height:16px;height:0;transition:height .35s var(--ob-ease)}
+.ob-demo[data-p="work"] .ob-l2,.ob-demo[data-p="result"] .ob-l2{height:16px}
+.ob-ph{color:var(--muted);opacity:0;transition:opacity .3s ease}
+.ob-demo[data-p="press"]:not([data-w]) .ob-ph{opacity:.8}
+.ob-words{transition:color .45s ease,opacity .45s ease;unicode-bidi:plaintext}
+.ob-words b{font-weight:400;display:inline-block;opacity:0;transform:translateY(6px);filter:blur(4px);
+  transition:opacity .38s ease,transform .5s var(--ob-ease),filter .45s ease}
+.ob-words b.in{opacity:1;transform:none;filter:none}
+.ob-demo[data-p="result"] .ob-words{color:var(--muted);font-size:13px}
+.ob-demo[data-p="rest"] .ob-words,.ob-demo[data-p="idle"] .ob-words{opacity:0}
+.ob-work{color:var(--warm);opacity:0;transition:opacity .25s ease}
+.ob-demo[data-p="work"] .ob-work{opacity:1}
+.ob-work::after{content:"...";display:inline-block;width:1.2em;text-align:start;
+  animation:obDots 1.2s steps(4,end) infinite}
+@keyframes obDots{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}}
+.ob-res{display:inline-flex;align-items:center;gap:5px;font-weight:500;color:var(--ink);
+  opacity:0;transform:translateY(4px);transition:opacity .4s ease,transform .5s var(--ob-ease)}
+.ob-res svg{flex:none;width:13px;height:13px;color:var(--live)}
+.ob-demo[data-p="result"] .ob-res{opacity:1;transform:none}
+/* when the answer is up it is the line that matters: it takes the big row */
+.ob-demo[data-p="result"] .ob-l1{height:17px;line-height:17px}
+.ob-demo[data-p="result"] .ob-l2{font-size:15px;line-height:20px;height:20px}
+.ob-demo[data-p="result"] .ob-res svg{width:15px;height:15px}
+
+/* the keyboard: a real Mac's bottom right corner, always left to right because the
+   keys do not move when the language does */
+.ob-kbd{position:relative;width:300px;height:70px;border-radius:17px;overflow:hidden;direction:ltr;
+  background:var(--ob-deck);
+  box-shadow:inset 0 1px 2px rgba(0,0,0,.10),inset 0 -1px 0 rgba(255,255,255,.28);
+  -webkit-mask-image:linear-gradient(90deg,transparent 0,#000 24%,#000 84%,transparent 100%);
+          mask-image:linear-gradient(90deg,transparent 0,#000 24%,#000 84%,transparent 100%)}
+.ob-row{position:absolute;top:10px;left:-96px;display:flex;gap:5px;align-items:flex-end}
+.ob-key{position:relative;flex:none;height:50px;border-radius:9px;
+  display:flex;flex-direction:column;justify-content:space-between;align-items:flex-start;
+  padding:7px 8px 6px;color:var(--ob-key-ink);
+  font:500 13px/1 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;
+  background:var(--ob-key);border:1px solid var(--ob-key-edge);box-shadow:var(--ob-key-shadow);
+  transition:transform .14s ease,color .14s ease}
+.ob-key em{position:relative;font-style:normal;font-size:15px;line-height:1}
+.ob-key small{position:relative;font-size:9.5px;line-height:1;letter-spacing:.02em;opacity:.8}
+.ob-space{width:160px}
+.ob-mod{width:62px}
+.ob-hot{width:56px;border-color:color-mix(in oklab,var(--live) 50%,transparent)}
+.ob-hot::before{content:"";position:absolute;inset:-1px;border-radius:inherit;opacity:0;
+  background:linear-gradient(180deg,color-mix(in oklab,var(--live) 70%,#fff),var(--live));
+  transition:opacity .14s ease}
+.ob-hot::after{content:"";position:absolute;inset:-1px;border-radius:inherit;opacity:0;
+  box-shadow:0 0 0 3px color-mix(in oklab,var(--live) 26%,transparent),
+    0 10px 26px -6px color-mix(in oklab,var(--live) 75%,transparent);
+  transition:opacity .2s ease}
+.ob-ripple{position:absolute;inset:-2px;border-radius:10px;border:2px solid var(--live);opacity:0}
+.ob-demo[data-p="press"] .ob-hot{transform:translateY(2px) scale(.975);color:#fff}
+.ob-demo[data-p="press"] .ob-hot::before,.ob-demo[data-p="press"] .ob-hot::after{opacity:1}
+.ob-demo[data-p="press"] .ob-ripple{animation:obRipple .9s ease-out}
+@keyframes obRipple{0%{opacity:.7;transform:scale(1)}100%{opacity:0;transform:scale(1.55,1.7)}}
+.ob-arrows{display:flex;gap:5px;align-items:flex-end}
+.ob-col{display:flex;flex-direction:column;gap:3px}
+.ob-col .ob-half{height:23.5px}
+.ob-half{width:34px;height:23.5px;border-radius:6px;padding:0;justify-content:center;align-items:center}
+.ob-half svg{width:7px;height:7px;fill:currentColor;opacity:.7}
+.ob-up svg{transform:rotate(90deg)}.ob-down svg{transform:rotate(-90deg)}.ob-right svg{transform:scaleX(-1)}
+
+/* ---- 2. what the Mac has granted, live ------------------------------------ */
+.ob-perms{position:relative;width:100%;max-width:340px;border-radius:24px;padding:4px 16px;
+  text-align:start;background:var(--glass);border:1px solid var(--glass-line);
+  -webkit-backdrop-filter:blur(30px) saturate(200%);backdrop-filter:blur(30px) saturate(200%);
+  box-shadow:0 30px 60px -28px var(--shade),0 2px 10px -4px rgba(0,0,0,.08),
+    inset 0 1.5px 0 -0.5px var(--glass-edge),inset 0 -24px 34px -32px rgba(0,0,0,.45);
+  transition:border-color .6s ease,box-shadow .6s ease}
+.ob-perms::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+  background:linear-gradient(148deg,rgba(255,255,255,.45) 0%,rgba(255,255,255,.08) 26%,rgba(255,255,255,0) 52%);
+  mix-blend-mode:screen;opacity:.7}
+.ob-perms[data-ready]{border-color:color-mix(in oklab,var(--live) 50%,transparent);
+  box-shadow:0 30px 60px -28px var(--shade),0 0 0 4px color-mix(in oklab,var(--live) 12%,transparent),
+    inset 0 1.5px 0 -0.5px var(--glass-edge)}
+.ob-perm{position:relative;z-index:1;display:flex;align-items:center;gap:13px;padding:13px 0;
+  border-bottom:1px solid var(--glass-line)}
+.ob-perm:last-child{border-bottom:0}
+.ob-ico{flex:none;width:38px;height:38px;border-radius:12px;display:grid;place-items:center;
+  color:var(--muted);background:color-mix(in oklab,var(--ink) 7%,transparent);
+  transition:background-color .45s ease,color .45s ease}
+.ob-ico svg{width:20px;height:20px;fill:currentColor}
+.ob-perm[data-s="granted"] .ob-ico{color:var(--live);background:color-mix(in oklab,var(--live) 15%,transparent)}
+.ob-pl{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.ob-pl b{font-size:15.5px;font-weight:500;line-height:1.25}
+.ob-pl small{font-size:12.5px;line-height:1.3;color:var(--muted)}
+.ob-perm[data-s="denied"] .ob-pl small{color:color-mix(in oklab,var(--warm) 80%,var(--muted))}
+.ob-ps{flex:none;display:grid;place-items:center;min-width:28px}
+.ob-ps>*{grid-area:1/1}
+.ob-tick{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;
+  color:var(--ob-tick-ink);background:var(--live);
+  box-shadow:0 6px 14px -6px color-mix(in oklab,var(--live) 80%,transparent);
+  opacity:0;transform:scale(.4);
+  transition:opacity .2s ease,transform .5s cubic-bezier(.34,1.7,.5,1)}
+.ob-tick svg{width:15px;height:15px}
+.ob-perm[data-s="granted"] .ob-tick{opacity:1;transform:none}
+.ob-perm[data-s="granted"] .ob-tick path{animation:obDraw .45s ease-out .12s backwards}
+.ob-spin{width:22px;height:22px;border-radius:50%;opacity:0;
+  border:2px solid color-mix(in oklab,var(--ink) 13%,transparent);
+  border-top-color:color-mix(in oklab,var(--live) 75%,transparent);
+  transition:opacity .25s ease}
+.ob-perm[data-s="checking"] .ob-spin,.ob-perm[data-s="not_asked"] .ob-spin{opacity:1;animation:obSpin 1.3s linear infinite}
+.ob-perm[data-s="unknown"] .ob-spin{opacity:.8;border-style:dashed;
+  border-color:color-mix(in oklab,var(--ink) 22%,transparent)}
+.ob-on{display:none;font-size:13px;font-weight:500;line-height:1;color:var(--ink);white-space:nowrap;
+  padding:8px 13px;border-radius:999px;cursor:pointer;
+  background:color-mix(in oklab,var(--live) 17%,transparent);
+  border:1px solid color-mix(in oklab,var(--live) 50%,transparent);
+  transition:background .18s ease,transform .15s ease}
+.ob-on:hover{background:color-mix(in oklab,var(--live) 27%,transparent)}
+.ob-on:active{transform:scale(.96)}
+.ob-perm[data-s="denied"] .ob-on{display:inline-flex;animation:obIn .35s var(--ob-ease)}
+@keyframes obDraw{from{stroke-dashoffset:24}to{stroke-dashoffset:0}}
+.ob svg .ck{fill:none;stroke:currentColor;stroke-width:2.7;stroke-linecap:round;
+  stroke-linejoin:round;stroke-dasharray:24;stroke-dashoffset:0}
+
+/* ---- 3. the real thing -------------------------------------------------- */
+.ob-orb{position:relative;width:128px;height:128px;border-radius:50%;border:0;padding:0;
+  background:none;cursor:pointer;display:grid;place-items:center;color:var(--muted)}
+.ob-orb>*{pointer-events:none}
+.ob-halo{position:absolute;inset:-40px;border-radius:50%;
+  background:radial-gradient(closest-side,color-mix(in oklab,var(--live) 26%,transparent),transparent);
+  opacity:.55;animation:obHalo 4.4s ease-in-out infinite;transition:opacity .6s ease}
+@keyframes obHalo{0%,100%{transform:scale(.94);opacity:.45}50%{transform:scale(1.06);opacity:.7}}
+.ob-shell{position:absolute;inset:0;border-radius:50%;background:var(--glass);
+  -webkit-backdrop-filter:blur(14px) saturate(210%);backdrop-filter:blur(14px) saturate(210%);
+  border:1px solid var(--glass-line);overflow:hidden;
+  box-shadow:0 26px 54px -14px var(--shade),inset 0 2px 1px -1px var(--glass-edge),
+    inset 0 -22px 34px -26px rgba(0,0,0,.55),inset 8px -10px 26px -22px rgba(0,0,0,.4);
+  transition:transform .45s var(--ob-ease)}
+.ob-shell::after{content:"";position:absolute;inset:0;border-radius:50%;
+  background:radial-gradient(38% 26% at 31% 19%,rgba(255,255,255,.98),rgba(255,255,255,0) 70%),
+    radial-gradient(70% 58% at 68% 88%,rgba(255,255,255,.34),rgba(255,255,255,0) 66%);opacity:.95}
+.ob-orb:hover .ob-shell{transform:scale(1.04)}
+.ob-orb:active .ob-shell{transform:scale(.97)}
+.ob-oring{position:absolute;inset:-4px;border-radius:50%;border:2px solid transparent;
+  transition:border-color .4s ease}
+.ob-ocore{position:relative;width:38%;height:38%;color:var(--muted);opacity:.6;
+  filter:drop-shadow(0 2px 5px rgba(0,0,0,.22));animation:obIdle 3.4s ease-in-out infinite;
+  transition:color .4s ease,opacity .4s ease,transform .5s var(--ob-ease)}
+@keyframes obIdle{0%,100%{transform:scale(1);opacity:.52}50%{transform:scale(1.06);opacity:.75}}
+.ob-orb[data-live="thinking"] .ob-ocore{color:var(--warm);opacity:1;animation:none;transform:scale(.74)}
+.ob-orb[data-live="thinking"] .ob-oring{border-color:color-mix(in oklab,var(--warm) 60%,transparent);
+  border-top-color:transparent;border-left-color:transparent;animation:obSpin 1.1s linear infinite}
+.ob-ocheck{position:absolute;width:42%;height:42%;color:var(--live);opacity:0;transform:scale(.5);
+  filter:drop-shadow(0 2px 6px color-mix(in oklab,var(--live) 45%,transparent));
+  transition:opacity .25s ease,transform .6s cubic-bezier(.34,1.6,.5,1)}
+.ob-ocheck svg{width:100%;height:100%}
+.ob-ocheck .ck{stroke-width:2.4}
+.ob-rip{position:absolute;inset:0;border-radius:50%;border:2px solid var(--live);opacity:0}
+.ob-sparks{position:absolute;left:50%;top:50%;width:0;height:0}
+.ob-sparks i{position:absolute;left:-4px;top:-4px;width:8px;height:8px;border-radius:50%;
+  background:var(--c);opacity:0}
+.ob-step.ok .ob-ocore{opacity:0;transform:scale(.4);animation:none}
+.ob-step.ok .ob-ocheck{opacity:1;transform:none}
+.ob-step.ok .ob-ocheck path{animation:obDraw .5s ease-out .15s backwards}
+.ob-step.ok .ob-oring{border-color:color-mix(in oklab,var(--live) 55%,transparent);animation:none}
+.ob-step.ok .ob-halo{opacity:1;animation:obHalo 2.6s ease-in-out infinite}
+.ob-step.ok .ob-rip{animation:obRip 1.2s cubic-bezier(.2,.7,.3,1) forwards}
+.ob-step.ok .ob-rip+.ob-rip{animation-delay:.2s}
+.ob-step.ok .ob-sparks i{animation:obSpark 1.05s cubic-bezier(.12,.8,.3,1) var(--t) forwards}
+@keyframes obRip{0%{opacity:.6;transform:scale(1)}100%{opacity:0;transform:scale(1.9)}}
+@keyframes obSpark{0%{opacity:0;transform:rotate(var(--a)) translateY(-52px) scale(.3)}
+  18%{opacity:1}
+  100%{opacity:0;transform:rotate(var(--a)) translateY(calc(-1 * var(--d))) scale(1)}}
+.ob-quote{margin-top:14px;display:inline-flex;align-items:center;gap:9px;max-width:100%;
+  padding:12px 20px;border-radius:18px;font-size:19px;line-height:1.3;color:var(--ink);
+  background:var(--glass);border:1px solid var(--glass-line);
+  -webkit-backdrop-filter:blur(26px) saturate(190%);backdrop-filter:blur(26px) saturate(190%);
+  box-shadow:0 16px 34px -18px var(--shade),inset 0 1.5px 0 -0.5px var(--glass-edge);
+  transition:border-color .5s ease}
+.ob-qtext{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;unicode-bidi:plaintext}
+.ob-qcheck{display:none;flex:none;width:18px;height:18px;color:var(--live)}
+.ob-step.ok .ob-quote{border-color:color-mix(in oklab,var(--live) 50%,transparent)}
+.ob-step.ok .ob-qcheck{display:block}
+.ob-step.ok .ob-qcheck path{animation:obDraw .45s ease-out .3s backwards}
+.ob-swap{animation:obIn .5s var(--ob-ease)}
+
+/* ---- short windows: the panel can be dragged smaller than 560 --------------- */
+@media (max-height:520px){
+  .ob-hero{min-height:212px}
+  .ob-demo{transform:scale(.9)}
+  .ob-title{font-size:23px}
+}
+
+@media (prefers-reduced-motion:reduce){
+  .ob,.ob.out,.ob-step,.ob-step.on{transition-duration:.01ms!important;transition-delay:0s!important}
+  .ob-step,.ob-step.past{transform:none}
+  .ob *,.ob *::before,.ob *::after{animation:none!important}
+  .ob-sparks,.ob-rip{display:none}
+}

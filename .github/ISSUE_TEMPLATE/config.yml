@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/mosserii/micmic/discussions
+    about: Ask a question, share an idea, or show what you built. Discussions is the place.
+  - name: Report a security problem
+    url: https://github.com/mosserii/micmic/blob/main/SECURITY.md
+    about: Please report vulnerabilities privately, not in an issue.

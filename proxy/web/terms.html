@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MicMic terms of use</title>
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/static/icon.png" type="image/png">
+<style>{{css}}</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap top-in">
+    <a class="brand" href="/"><img src="/static/icon.svg" alt="" width="30" height="30">MicMic</a>
+    <nav class="nav" aria-label="Pages">
+      <a href="/">Home</a>
+      <a href="/privacy">Privacy</a>
+      <a href="/terms">Terms</a>
+    </nav>
+  </div>
+</header>
+<main class="doc">
+  <p class="draft">First draft, for review by a lawyer before it is relied on.</p>
+  <h1>Terms of use</h1>
+  <p class="meta">Last updated {{updated}}. MicMic is made by {{operator}}.</p>
+
+  <h2>The service</h2>
+  <p>MicMic is a Mac app that acts on what you say. It can make mistakes: check what it did before you rely on it, especially for messages it sends for you.</p>
+
+  <h2>Plans and limits</h2>
+  <p>The free plan includes {{free_requests}} requests to try, in total rather than per day. MicMic Pro is {{pro_price}} and includes {{pro_requests}} requests a day; that count resets every day at midnight UTC. We may change plans, limits or prices; a price change for Pro applies from your next billing period after we tell you.</p>
+
+  <h2>Payment and cancelling</h2>
+  <p>Pro is billed monthly in advance through Stripe and renews until you cancel. You can cancel at any time from the app, which opens Stripe's billing page. Pro stays on until the end of the period you paid for. Payments are not refunded for part of a month, except where the law says otherwise.</p>
+
+  <h2>Fair use</h2>
+  <p>Use MicMic for yourself, through the app. Do not use it to get at the services behind it for other purposes, to overload it, or to create many devices to get around the limits. We may suspend a device that does.</p>
+
+  <h2>No warranty</h2>
+  <p>MicMic is provided as it is. To the extent the law allows, we are not liable for indirect or consequential loss, and our total liability is limited to what you paid us in the last twelve months.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about these terms: contact us{{contact_inline}}.</p>
+</main>
+<footer class="foot">
+  <div class="wrap foot-in">
+    <a class="brand" href="/"><img src="/static/icon.svg" alt="" width="24" height="24">MicMic</a>
+    <nav class="foot-nav" aria-label="Footer">
+      <a href="/">Home</a>
+      <a href="/privacy">Privacy</a>
+      <a href="/terms">Terms</a>
+      {{contact}}
+    </nav>
+    <p class="foot-op">Made by {{operator}}.</p>
+  </div>
+</footer>
+</body>
+</html>

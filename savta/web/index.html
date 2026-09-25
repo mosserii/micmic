@@ -1,0 +1,2168 @@
+<!doctype html>
+<html lang="he" dir="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>MicMic</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rubik:wght@300;400;500;600&display=swap">
+<style>
+:root{
+  --ground:#efeae3;
+  --ink:#120f0c;
+  --muted:#584e44;
+  --glass:rgba(255,255,255,.40);
+  --glass-edge:rgba(255,255,255,.95);
+  --glass-line:rgba(255,255,255,.55);
+  --shade:rgba(86,66,44,.13);
+  --live:#2d8b6b;
+  --warm:#bd7a17;
+  --blob-a:#f0b06a;
+  --blob-b:#df8d84;
+  --blob-c:#7cb79a;
+  --blob-alpha:.78;
+  /* Menus and popovers read as surfaces, not scenery: opaque enough that the
+     drifting colour behind them never competes with the words on top. */
+  --sheet:rgba(253,251,248,.93);
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --ground:#14110e;
+  --ink:#fbf7f2;
+  --muted:#bcb1a5;
+  --glass:rgba(56,50,44,.48);
+  --glass-edge:rgba(255,255,255,.16);
+  --glass-line:rgba(255,255,255,.10);
+  --shade:rgba(0,0,0,.45);
+  --live:#57c69d;
+  --warm:#e0a441;
+  --blob-a:#a8722c;
+  --blob-b:#9c4f47;
+  --blob-c:#2f6b56;
+  --blob-alpha:.75;
+  --sheet:rgba(38,33,29,.94);
+}}
+:root[data-theme="dark"]{
+  --ground:#14110e; --ink:#fbf7f2; --muted:#bcb1a5;
+  --glass:rgba(56,50,44,.48); --glass-edge:rgba(255,255,255,.16);
+  --glass-line:rgba(255,255,255,.10); --shade:rgba(0,0,0,.45);
+  --live:#57c69d; --warm:#e0a441;
+  --blob-a:#a8722c; --blob-b:#9c4f47; --blob-c:#2f6b56; --blob-alpha:.75;
+  --sheet:rgba(38,33,29,.94);
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{
+  background:var(--ground);color:var(--ink);
+  font:400 20px/1.45 Rubik,-apple-system,BlinkMacSystemFont,"SF Hebrew","Segoe UI",system-ui,sans-serif;
+  display:grid;place-items:center;text-align:center;
+  -webkit-font-smoothing:antialiased;user-select:none;cursor:default;
+}
+
+/* ---- what the glass refracts: slow drifting light behind everything ---- */
+.field{position:fixed;inset:-30%;z-index:0;filter:blur(100px);opacity:var(--blob-alpha);pointer-events:none}
+.field i{position:absolute;display:block;border-radius:50%;mix-blend-mode:multiply}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .field i{mix-blend-mode:screen}}
+:root[data-theme="dark"] .field i{mix-blend-mode:screen}
+.field i:nth-child(1){width:38vmax;height:38vmax;background:var(--blob-a);top:2%;left:6%;animation:driftA 42s ease-in-out infinite}
+.field i:nth-child(2){width:34vmax;height:34vmax;background:var(--blob-b);bottom:0%;right:4%;animation:driftB 55s ease-in-out infinite}
+.field i:nth-child(3){width:30vmax;height:30vmax;background:var(--blob-c);top:44%;left:48%;animation:driftC 48s ease-in-out infinite}
+@keyframes driftA{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(14vw,10vh) scale(1.14)}66%{transform:translate(-8vw,16vh) scale(.92)}}
+@keyframes driftB{0%,100%{transform:translate(0,0) scale(1)}40%{transform:translate(-16vw,-12vh) scale(1.18)}75%{transform:translate(6vw,-6vh) scale(.94)}}
+@keyframes driftC{0%,100%{transform:translate(-50%,-50%) scale(1)}50%{transform:translate(-62%,-38%) scale(1.22)}}
+
+.stage{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;
+  gap:0;padding:3vh 24px 7vh;width:min(760px,92vw);max-height:100vh}
+
+/* ---- the orb ---------------------------------------------------------- */
+.orb{position:relative;width:clamp(120px,17vmin,190px);aspect-ratio:1;flex:none;
+  display:grid;place-items:center;
+  transition:width .55s cubic-bezier(.22,1,.36,1),transform .55s cubic-bezier(.22,1,.36,1)}
+body.hascard .orb{width:clamp(78px,10vmin,104px)}
+.orb .shell{position:absolute;inset:0;border-radius:50%;
+  background:var(--glass);
+  -webkit-backdrop-filter:blur(14px) saturate(210%);backdrop-filter:blur(14px) saturate(210%);
+  border:1px solid var(--glass-line);
+  box-shadow:
+    0 26px 54px -14px var(--shade),
+    inset 0 2px 1px -1px var(--glass-edge),
+    inset 0 -22px 34px -26px rgba(0,0,0,.55),
+    inset 8px -10px 26px -22px rgba(0,0,0,.4);
+  overflow:hidden}
+/* the specular sweep is what reads as "glass" rather than "translucent grey" */
+.orb .shell::after{content:"";position:absolute;inset:0;border-radius:50%;
+  background:
+    radial-gradient(38% 26% at 31% 19%, rgba(255,255,255,.98), rgba(255,255,255,0) 70%),
+    radial-gradient(70% 58% at 68% 88%, rgba(255,255,255,.34), rgba(255,255,255,0) 66%);
+  opacity:.95}
+.orb .ring{position:absolute;inset:-3px;border-radius:50%;border:2px solid transparent;
+  transition:border-color .5s ease,transform .18s ease-out,opacity .5s}
+.orb .core{position:relative;width:38%;aspect-ratio:1;display:grid;place-items:center;
+  color:var(--muted);opacity:.55;
+  transition:color .5s ease,opacity .5s ease,transform .5s cubic-bezier(.22,1,.36,1)}
+.orb .core svg{width:100%;height:100%;fill:currentColor;
+  filter:drop-shadow(0 2px 5px rgba(0,0,0,.22))}
+
+body.idle .orb{cursor:pointer}
+body.idle .orb .shell{transition:transform .4s cubic-bezier(.22,1,.36,1),box-shadow .4s}
+body.idle .orb:hover .shell{transform:scale(1.045)}
+body.idle .orb:active .shell{transform:scale(.97)}
+body.idle .orb .core{color:var(--muted);opacity:.6;animation:idlepulse 3.4s ease-in-out infinite}
+@keyframes idlepulse{0%,100%{transform:scale(1);opacity:.5}50%{transform:scale(1.05);opacity:.72}}
+body.listening .orb .core{color:var(--live);opacity:1;animation:breathe 4.2s ease-in-out infinite}
+body.listening .orb .ring{border-color:color-mix(in oklab,var(--live) 42%,transparent)}
+body.thinking .orb .core{color:var(--warm);opacity:1;animation:none;transform:scale(.72)}
+body.thinking .orb .ring{border-color:color-mix(in oklab,var(--warm) 55%,transparent);
+  animation:orbit 1.15s linear infinite;border-top-color:transparent;border-left-color:transparent}
+body.acting .orb .core{color:var(--warm);opacity:1;animation:breathe 2.2s ease-in-out infinite}
+body.acting .orb .ring{border-color:color-mix(in oklab,var(--warm) 45%,transparent)}
+/* The server is unreachable and she can hear nothing else - this must not read as
+   "listening" or "thinking", it must read as broken. */
+body.error .orb .core{color:#b5544a;opacity:1;animation:none}
+body.error .orb .ring{border-color:color-mix(in oklab,#b5544a 55%,transparent)}
+@keyframes breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.11)}}
+@keyframes orbit{to{transform:rotate(360deg)}}
+
+/* ---- type ------------------------------------------------------------- */
+.state{margin-top:22px;font-size:16px;font-weight:500;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--muted);min-height:24px;
+  transition:opacity .4s;opacity:1}
+.heard{margin-top:13px;font-size:clamp(28px,4.6vw,46px);font-weight:400;line-height:1.2;
+  letter-spacing:-.015em;max-width:15ch;min-height:1.2em;text-wrap:balance;
+  transition:opacity .35s ease,font-size .5s cubic-bezier(.22,1,.36,1)}
+body.hascard .heard{font-size:clamp(20px,2.5vw,28px);opacity:.68;max-width:26ch}
+.heard.fade{opacity:.34}
+.reply{margin-top:11px;font-size:21px;font-weight:400;color:var(--muted);
+  max-width:28ch;min-height:1.4em}
+body.hascard .reply{min-height:0;margin-top:8px}
+
+/* ---- typing, for anyone at a desk --------------------------------------
+   Voice is the point, but a person working at their computer often cannot say a
+   thing out loud — an office, a call, someone asleep next door — and typing is
+   faster than speaking for an address or a product code. */
+.typerow{display:flex;align-items:center;gap:8px;margin-top:20px;
+  width:min(430px,84vw);opacity:0;transform:translateY(6px);pointer-events:none;
+  transition:opacity .28s ease, transform .28s ease}
+.typerow.on{opacity:1;transform:none;pointer-events:auto}
+#typebox{flex:1;min-width:0;font:400 18px/1.4 Rubik,-apple-system,system-ui,sans-serif;
+  color:var(--ink);padding:13px 18px;border-radius:999px;
+  background:var(--glass);border:1px solid var(--glass-line);
+  -webkit-backdrop-filter:blur(26px) saturate(190%);backdrop-filter:blur(26px) saturate(190%);
+  box-shadow:0 12px 28px -14px var(--shade), inset 0 1.5px 0 -0.5px var(--glass-edge)}
+#typebox::placeholder{color:var(--muted);opacity:.75}
+#typebox:focus{outline:2px solid color-mix(in oklab,var(--live) 50%,transparent);
+  outline-offset:2px}
+.tsend{flex:none;width:44px;height:44px;border-radius:50%;cursor:pointer;
+  display:grid;place-items:center;border:1px solid var(--glass-line);
+  background:color-mix(in oklab,var(--live) 24%,var(--glass));
+  box-shadow:0 12px 28px -14px var(--shade), inset 0 1.5px 0 -0.5px var(--glass-edge);
+  transition:transform .16s ease, background .2s ease}
+.tsend svg{width:20px;height:20px;fill:var(--ink);opacity:.85}
+/* Send points the way the language runs, or it reads as "back". */
+[dir="rtl"] .tsend svg{transform:scaleX(-1)}
+.tsend:hover{background:color-mix(in oklab,var(--live) 36%,var(--glass));transform:translateY(-1px)}
+.tsend:active{transform:scale(.95)}
+
+/* ---- start again ------------------------------------------------------
+   The same reason a chat product has one: talking about music and then about
+   flights should not leave the flight request reasoning about music. */
+.newchat{position:fixed;top:18px;inset-inline-start:18px;z-index:40;cursor:pointer;
+  display:inline-flex;align-items:center;gap:8px;
+  font:500 15px/1 Rubik,-apple-system,system-ui,sans-serif;color:var(--ink);
+  padding:10px 16px 10px 12px;border-radius:999px;
+  background:var(--glass);border:1px solid var(--glass-line);
+  -webkit-backdrop-filter:blur(26px) saturate(190%);backdrop-filter:blur(26px) saturate(190%);
+  box-shadow:0 10px 26px -14px var(--shade), inset 0 1.5px 0 -0.5px var(--glass-edge);
+  opacity:.55;transition:opacity .2s ease, transform .16s ease}
+.newchat svg{width:18px;height:18px;fill:var(--ink);opacity:.8}
+.newchat:hover{opacity:1;transform:translateY(-1px)}
+.newchat:active{transform:scale(.97)}
+
+/* ---- language ---------------------------------------------------------
+   Sits opposite "new conversation" using logical insets, so in Hebrew and
+   Arabic the pair swaps sides with the text instead of pinning to the left. */
+.lang{position:fixed;top:18px;inset-inline-end:18px;z-index:41}
+.langbtn{cursor:pointer;display:inline-flex;align-items:center;gap:7px;
+  font:500 15px/1 Rubik,-apple-system,system-ui,sans-serif;color:var(--ink);
+  padding:10px 12px;border-radius:999px;
+  background:var(--glass);border:1px solid var(--glass-line);
+  -webkit-backdrop-filter:blur(26px) saturate(190%);backdrop-filter:blur(26px) saturate(190%);
+  box-shadow:0 10px 26px -14px var(--shade), inset 0 1.5px 0 -0.5px var(--glass-edge);
+  opacity:.55;transition:opacity .2s ease, transform .16s ease}
+.langbtn svg{width:16px;height:16px;fill:var(--ink);opacity:.75}
+.langbtn .chev{width:12px;height:12px;transition:transform .2s ease}
+.lang[data-open="1"] .langbtn{opacity:1}
+.lang[data-open="1"] .chev{transform:rotate(180deg)}
+.langbtn:hover{opacity:1;transform:translateY(-1px)}
+.langbtn:active{transform:scale(.97)}
+.langmenu{position:absolute;top:calc(100% + 8px);inset-inline-end:0;min-width:190px;
+  border-radius:18px;overflow:hidden;padding:6px;
+  background:var(--sheet);border:1px solid var(--glass-line);
+  -webkit-backdrop-filter:blur(30px) saturate(190%);backdrop-filter:blur(30px) saturate(190%);
+  box-shadow:0 22px 48px -20px var(--shade), inset 0 1.5px 0 -0.5px var(--glass-edge);
+  opacity:0;transform:translateY(-6px) scale(.97);pointer-events:none;
+  transform-origin:top var(--menu-origin,right);
+  transition:opacity .16s ease, transform .16s ease}
+.lang[data-open="1"] .langmenu{opacity:1;transform:none;pointer-events:auto}
+.langmenu button{display:flex;width:100%;align-items:center;gap:10px;cursor:pointer;
+  background:none;border:0;border-radius:13px;padding:11px 12px;
+  font:400 16px/1.2 Rubik,-apple-system,system-ui,sans-serif;color:var(--ink);
+  text-align:start;transition:background .14s ease}
+.langmenu button:hover{background:rgba(0,0,0,.06)}
+:root[data-theme="dark"] .langmenu button:hover,
+:root:not([data-theme="light"]) .langmenu button:hover{background:rgba(255,255,255,.09)}
+.langmenu button .tick{margin-inline-start:auto;width:15px;height:15px;fill:var(--live);opacity:0}
+.langmenu button[aria-checked="true"] .tick{opacity:1}
+.langmenu button[aria-checked="true"]{font-weight:500}
+
+
+/* ---- what was said before ---------------------------------------------
+   A voice assistant that shows only the latest exchange gives you no way to
+   tell "it forgot what I said" from "it never heard me". Past turns stay on
+   screen, deliberately quiet: small, muted, and scrollable, so the current
+   question keeps every bit of the visual weight it had before. */
+.thread{width:min(430px,84vw);max-height:30vh;overflow-y:auto;overscroll-behavior:contain;
+  margin-top:16px;display:none;flex-direction:column;gap:10px;
+  text-align:start;scrollbar-width:thin}
+/* The fade says "there is more above". Painting it unconditionally just clipped the
+   first line of a transcript that was not scrolled at all. */
+.thread.over{-webkit-mask-image:linear-gradient(to bottom,transparent,#000 26px);
+                     mask-image:linear-gradient(to bottom,transparent,#000 26px)}
+body.hasthread .thread{display:flex}
+.turn{display:flex;flex-direction:column;gap:3px;opacity:.62;
+  transition:opacity .2s ease;font-size:15px;line-height:1.4}
+.turn:hover{opacity:.95}
+.turn .who{font-size:11px;font-weight:500;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--muted)}
+.turn .said{color:var(--ink)}
+.turn .said.back{color:var(--muted)}
+
+/* ---- the one card ----------------------------------------------------- */
+.card{position:relative;margin-top:22px;width:min(430px,84vw);border-radius:26px;overflow:hidden;
+  background:var(--glass);
+  -webkit-backdrop-filter:blur(30px) saturate(200%);backdrop-filter:blur(30px) saturate(200%);
+  border:1px solid var(--glass-line);
+  box-shadow:
+    0 30px 70px -22px var(--shade),
+    0 2px 10px -4px rgba(0,0,0,.10),
+    inset 0 1.5px 0 -0.5px var(--glass-edge),
+    inset 0 -24px 34px -30px rgba(0,0,0,.5);
+  opacity:0;transform:translateY(16px) scale(.97);pointer-events:none;
+  transition:opacity .5s cubic-bezier(.22,1,.36,1),transform .5s cubic-bezier(.22,1,.36,1)}
+.card.show{opacity:1;transform:none}
+/* Something did NOT happen that she asked for. Warm amber, not alarm red — nothing is
+   broken, a switch is off — but clearly not the same as a card that says "done". */
+/* A booking is ready and only the payment is left. Calm and confident, not a warning:
+   nothing has gone wrong, she just has the last word — as she always should. */
+.card.pay{border-color:color-mix(in oklab,var(--live) 55%,transparent);
+  box-shadow:0 30px 70px -22px var(--shade),
+             0 0 0 1px color-mix(in oklab,var(--live) 32%,transparent),
+             inset 0 1.5px 0 -0.5px var(--glass-edge)}
+.card.warn{border-color:color-mix(in oklab,var(--warm) 55%,transparent);
+  box-shadow:0 30px 70px -22px var(--shade),
+             0 0 0 1px color-mix(in oklab,var(--warm) 30%,transparent),
+             inset 0 1.5px 0 -0.5px var(--glass-edge)}
+/* the sheen is what separates "glass" from "translucent panel" */
+.card::after{content:"";position:absolute;inset:0;pointer-events:none;border-radius:inherit;
+  background:linear-gradient(148deg,rgba(255,255,255,.55) 0%,rgba(255,255,255,.10) 26%,
+    rgba(255,255,255,0) 52%);mix-blend-mode:screen;opacity:.85}
+.card .thumb{width:100%;aspect-ratio:16/9;object-fit:cover;display:none;background:rgba(0,0,0,.08)}
+.card.compact .thumb{aspect-ratio:2.4/1}
+.card .thumb.on{display:block}
+.card .body{padding:17px 22px 19px}
+.card .t{font-size:20px;font-weight:500;line-height:1.3;text-wrap:balance;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.card .m{font-size:16px;color:var(--muted);margin-top:8px;font-variant-numeric:tabular-nums}
+
+.msg{display:flex;flex-direction:column;gap:3px;padding:11px 0;
+  border-bottom:1px solid var(--glass-line);text-align:start}
+.msg:last-child{border-bottom:none}
+.msg b{font-size:16px;font-weight:600;color:var(--ink)}
+.msg span{font-size:17px;line-height:1.4}
+.step{font-size:17px;padding:7px 0;text-align:start;border-bottom:1px solid var(--glass-line)}
+.step:last-child{border-bottom:none}
+.bar{height:7px;border-radius:99px;background:rgba(0,0,0,.10);margin-top:18px;overflow:hidden}
+:root[data-theme="dark"] .bar,
+:root:not([data-theme="light"]) .bar{background:rgba(255,255,255,.12)}
+.bar i{display:block;height:100%;border-radius:99px;background:var(--warm);
+  width:100%;transform-origin:left;transition:transform linear}
+.cancel{margin-top:14px;font-size:19px;font-weight:500;color:var(--warm)}
+/* A spoken "say cancel" is not an escape hatch on its own when the mic may not be
+   heard in time - this is a real, pressable one next to it. */
+.cancelbtn{margin-top:12px;display:inline-flex;align-items:center;justify-content:center;
+  width:100%;font:500 18px/1 Rubik,-apple-system,system-ui,sans-serif;padding:13px 22px;
+  border-radius:999px;border:1px solid color-mix(in oklab,var(--warm) 45%,transparent);
+  background:color-mix(in oklab,var(--warm) 16%,transparent);color:var(--ink);
+  cursor:pointer;transition:transform .15s ease,background .2s ease}
+.cancelbtn:hover{background:color-mix(in oklab,var(--warm) 26%,transparent)}
+.cancelbtn:active{transform:scale(.97)}
+.cancelbtn:focus-visible{outline:3px solid var(--warm);outline-offset:3px}
+
+.err{margin-top:14px;font-size:17px;color:#b5544a;max-width:30ch;min-height:1.3em}
+.foot{position:fixed;bottom:22px;left:0;right:0;z-index:1;font-size:15px;
+  color:var(--muted);opacity:.55;letter-spacing:.02em}
+
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation:none!important;transition-duration:.01ms!important}
+}
+
+/* ---- engineer's panel, press d ---------------------------------------- */
+#dev{position:fixed;inset:0 0 auto auto;z-index:9;width:min(430px,44vw);max-height:100vh;
+  overflow:auto;background:rgba(14,17,20,.9);
+  -webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);
+  color:#c9d4de;font:12px/1.5 ui-monospace,Menlo,monospace;padding:14px 16px;
+  display:none;text-align:left;border-bottom-left-radius:16px}
+#dev.show{display:block}
+#dev b{color:#e2a43f}#dev .ok{color:#5cbfa2}#dev .no{color:#e08579}
+#dev pre{white-space:pre-wrap;word-break:break-word;margin:0 0 12px;
+  padding-bottom:10px;border-bottom:1px solid rgba(255,255,255,.08)}
+
+
+/* Volume HUD. Sits above the player (z-index 60 > 50) because the moment she
+   asks for the volume is almost always the moment a video is covering the screen. */
+#vol{position:fixed;left:50%;bottom:13vh;transform:translateX(-50%) translateY(14px);
+  z-index:60;display:flex;align-items:center;gap:14px;
+  padding:15px 26px;border-radius:30px;
+  background:var(--glass);backdrop-filter:blur(30px) saturate(200%);
+  -webkit-backdrop-filter:blur(30px) saturate(200%);
+  border:1px solid var(--glass-line);
+  box-shadow:0 22px 50px -18px var(--shade),
+             inset 0 1.5px 0 -0.5px var(--glass-edge),
+             inset 0 -20px 30px -28px rgba(0,0,0,.45);
+  opacity:0;pointer-events:none;transition:opacity .22s ease, transform .22s ease}
+#vol.on{opacity:1;transform:translateX(-50%) translateY(0)}
+#vol svg{width:28px;height:28px;flex:none;fill:var(--ink);opacity:.8}
+#volbar{width:190px;height:10px;border-radius:5px;overflow:hidden;
+  background:color-mix(in oklab,var(--ink) 16%,transparent)}
+#volfill{height:100%;width:50%;border-radius:5px;background:var(--warm);
+  transition:width .28s cubic-bezier(.2,.8,.3,1)}
+@media (prefers-reduced-motion: reduce){
+  #vol,#volfill{transition:none}
+}
+
+/* ---- settings ---------------------------------------------------------
+   One sheet, not a page: everything here is a choice about how MicMic starts
+   listening, which is the only thing a person actually wants to change. */
+.gear{position:fixed;top:18px;inset-inline-end:18px;z-index:41;cursor:pointer;
+  display:inline-flex;align-items:center;justify-content:center;
+  width:40px;height:40px;border-radius:999px;color:var(--ink);
+  background:var(--glass);border:1px solid var(--glass-line);
+  -webkit-backdrop-filter:blur(26px) saturate(190%);backdrop-filter:blur(26px) saturate(190%);
+  transition:transform .18s ease,background .2s ease}
+.gear svg{width:19px;height:19px;fill:currentColor;opacity:.75}
+.gear:hover{transform:rotate(22deg)}
+.gear:focus-visible{outline:3px solid var(--live);outline-offset:3px}
+/* the language pill moves inboard to make room for it */
+.lang{inset-inline-end:66px}
+
+#settings{position:fixed;inset:0;z-index:70;display:none;
+  align-items:center;justify-content:center;padding:18px;
+  background:rgba(12,10,8,.44);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
+#settings.on{display:flex;animation:fadein .28s cubic-bezier(.22,1,.36,1)}
+.sheet{width:min(430px,100%);max-height:88vh;overflow-y:auto;border-radius:24px;
+  padding:20px 22px 22px;text-align:start;
+  background:var(--sheet);border:1px solid var(--glass-line);
+  -webkit-backdrop-filter:blur(30px) saturate(200%);backdrop-filter:blur(30px) saturate(200%);
+  box-shadow:0 30px 70px -22px var(--shade),inset 0 1.5px 0 -0.5px var(--glass-edge)}
+.sheet h2{font-size:21px;font-weight:600;margin:0 0 4px}
+.srow{margin-top:20px}
+.slabel{font-size:13px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--muted);margin-bottom:9px}
+.shint{font-size:13px;color:var(--muted);margin-top:7px;line-height:1.45}
+.seg{display:flex;gap:7px;flex-wrap:wrap}
+.seg button{cursor:pointer;font:500 15px/1 Rubik,-apple-system,system-ui,sans-serif;
+  color:var(--ink);padding:10px 14px;border-radius:999px;
+  background:var(--glass);border:1px solid var(--glass-line);
+  transition:background .18s ease,border-color .18s ease}
+.seg button[aria-pressed="true"]{background:color-mix(in oklab,var(--live) 22%,transparent);
+  border-color:color-mix(in oklab,var(--live) 55%,transparent)}
+.seg button:focus-visible{outline:3px solid var(--live);outline-offset:2px}
+/* Not a .seg child, so it carries the pill styling itself — as class="seg" it got
+   none of it and rendered as a bare white system button in dark mode. */
+.hkbtn{width:100%;cursor:pointer;display:flex;align-items:center;justify-content:center;
+  font:500 17px/1 Rubik,-apple-system,system-ui,sans-serif;color:var(--ink);
+  letter-spacing:.04em;padding:15px 16px;border-radius:16px;
+  background:var(--glass);border:1px solid var(--glass-line);
+  transition:background .18s ease,border-color .18s ease}
+.hkbtn:hover{background:color-mix(in oklab,var(--live) 12%,var(--glass))}
+.hkbtn:focus-visible{outline:3px solid var(--live);outline-offset:2px}
+.hkpicks{margin-top:9px}
+.hkpicks button{font-size:14px;padding:8px 12px}
+.hkbtn.recording{background:color-mix(in oklab,var(--warm) 22%,transparent);
+  border-color:color-mix(in oklab,var(--warm) 60%,transparent)}
+.srange{display:flex;align-items:center;gap:12px}
+.srange input[type=range]{flex:1;accent-color:var(--live)}
+.srange b{font-weight:600;font-variant-numeric:tabular-nums;min-width:5.5ch}
+.stext{width:100%;font:400 16px/1.4 Rubik,-apple-system,system-ui,sans-serif;
+  color:var(--ink);padding:11px 14px;border-radius:14px;
+  background:var(--glass);border:1px solid var(--glass-line)}
+.stext:focus{outline:2px solid color-mix(in oklab,var(--live) 50%,transparent)}
+.sfoot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:24px}
+.sdone{cursor:pointer;font:500 17px/1 Rubik,-apple-system,system-ui,sans-serif;
+  padding:12px 24px;border-radius:999px;color:var(--ink);
+  background:color-mix(in oklab,var(--live) 20%,transparent);
+  border:1px solid color-mix(in oklab,var(--live) 50%,transparent)}
+.ssaved{font-size:14px;color:var(--live);opacity:0;transition:opacity .25s ease}
+.ssaved.on{opacity:1}
+/* Account: the plan, today's usage and the way to Pro. No element here has an id, so
+   the rest of the page's layout checks cannot see it exists. */
+.acct-top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:9px}
+.acct-top .slabel{margin-bottom:0}
+.acct-badge{font:600 12px/1 Rubik,-apple-system,system-ui,sans-serif;letter-spacing:.06em;
+  padding:6px 11px;border-radius:999px;color:var(--ink);
+  background:var(--glass);border:1px solid var(--glass-line)}
+.acct-badge[data-plan="pro"]{background:color-mix(in oklab,var(--live) 22%,transparent);
+  border-color:color-mix(in oklab,var(--live) 55%,transparent)}
+.acct-use{font-size:15px;font-variant-numeric:tabular-nums}
+.acct-bar{height:4px;margin-top:8px;border-radius:999px;overflow:hidden;
+  background:color-mix(in oklab,var(--muted) 22%,transparent)}
+.acct-bar>i{display:block;height:100%;width:0;border-radius:inherit;background:var(--live);
+  transition:width .3s ease}
+.acct-bar[data-full]>i{background:var(--warm)}
+.acct-btn{width:100%;margin-top:12px;cursor:pointer;
+  font:500 16px/1 Rubik,-apple-system,system-ui,sans-serif;color:var(--ink);
+  padding:13px 16px;border-radius:16px;
+  background:color-mix(in oklab,var(--live) 20%,transparent);
+  border:1px solid color-mix(in oklab,var(--live) 50%,transparent);
+  transition:background .18s ease}
+.acct-btn:hover{background:color-mix(in oklab,var(--live) 30%,transparent)}
+.acct-btn:focus-visible{outline:3px solid var(--live);outline-offset:2px}
+.acct-btn:disabled{opacity:.55;cursor:default}
+@media (prefers-reduced-motion: reduce){ .acct-bar>i{transition:none} }
+/* In the app panel the sheet IS the window, so it loses its inset and corners — and
+   its translucency with them: at 380px the page behind showed through the controls
+   instead of reading as glass over a backdrop. */
+body.panel #settings{padding:0;background:none;-webkit-backdrop-filter:none;backdrop-filter:none}
+body.panel .sheet{width:100%;height:100vh;max-height:100vh;min-height:100vh;
+  border-radius:0;border:none;background:var(--ground);
+  -webkit-backdrop-filter:none;backdrop-filter:none;box-shadow:none;
+  padding-bottom:0}
+/* Done must stay reachable without scrolling to the end of a list that is taller than
+   the window. */
+body.panel .sfoot{position:sticky;bottom:0;margin-top:18px;padding:12px 0 14px;
+  background:linear-gradient(to top,var(--ground) 68%,transparent)}
+/* The window's own close button sits at the physical top LEFT in every language. The
+   controls were placed at inline-end, which in Hebrew and Arabic IS the left, so the
+   gear sat under the close button. In the panel they go physically right, in one
+   compact row, and the orb moves down out of the bar it was wedged into. */
+body.panel .gear,body.panel .lang,body.panel .newchat{top:12px;inset-inline:auto;left:auto}
+body.panel .gear{right:12px;width:32px;height:32px}
+body.panel .gear svg{width:17px;height:17px}
+body.panel .lang{right:52px}
+body.panel .langbtn{padding:7px 10px;font-size:13px;gap:5px}
+body.panel .langbtn svg{width:14px;height:14px}
+/* New chat keeps its icon and loses the words: the row has room for three buttons,
+   not for a sentence, and a "+" is understood without one. */
+body.panel .newchat{right:138px;width:32px;height:32px;padding:0;justify-content:center}
+body.panel #newchatw{display:none}
+/* The dropdown was anchored at inline-end too, so from a pill on the right it opened
+   past the window edge in right-to-left languages. */
+body.panel .langmenu{inset-inline:auto;right:0;left:auto}
+
+/* ---- panel ------------------------------------------------------------
+   The same page at 380x560 inside MicMic.app's own window. Everything here is
+   proportion, not redesign: the full-window layout assumes vertical room this
+   panel does not have, and without these the card ran off the bottom edge and
+   .foot (position:fixed) landed on top of the typing box. */
+body.panel .stage{padding:58px 14px 10px;width:100%;gap:0;
+  height:100vh;max-height:100vh;overflow-y:auto;overflow-x:hidden;
+  scrollbar-width:none}
+body.panel .stage::-webkit-scrollbar{width:0;height:0}
+/* .foot is pinned to the bottom of the viewport, so in a short window it sits over
+   the typing row rather than under it. There is no room for a hint line here and the
+   panel's own controls already say what to do. */
+body.panel .foot{display:none}
+/* Centred in the space that is left, instead of hugging the top above a void: with
+   the typing row also pushed by an auto margin, the free space splits evenly. When a
+   card or a transcript fills the column the margins simply collapse to nothing. */
+body.panel .orb{width:92px;margin-top:auto}
+body.panel.hascard .orb{width:58px}
+body.panel .state{margin-top:10px;font-size:12px;letter-spacing:.07em}
+body.panel .heard{margin-top:6px;font-size:19px;max-width:20ch}
+body.panel.hascard .heard{font-size:16px;max-width:24ch}
+/* A four-line answer above a card pushed the card clean off the bottom. Two lines,
+   and the card carries the detail. */
+body.panel .reply{margin-top:5px;font-size:13px;max-width:26ch;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+body.panel .thread{max-height:108px}
+body.panel .card{margin-top:10px;width:100%;flex:none}
+body.panel .card .thumb{aspect-ratio:2.4/1}
+body.panel .card .body{padding:11px 15px 13px}
+body.panel .card .t{font-size:15px}
+body.panel .card .m{font-size:12px;margin-top:4px}
+/* The one control that must never scroll out of reach, so it is pinned and carries a
+   fade so the card does not appear to run into it. */
+body.panel .typerow{position:sticky;bottom:0;width:100%;margin-top:auto;
+  padding:10px 0 2px;
+  background:linear-gradient(to top,var(--ground) 62%,transparent)}
+body.panel #typebox{font-size:15px;padding:10px 14px}
+/* A two-pixel ring at half strength reads as an alarm in a window this small. */
+body.panel #typebox:focus{outline:1px solid color-mix(in oklab,var(--live) 38%,transparent);
+  outline-offset:1px}
+/* Background, not foreground: smaller and softer than the full window wants, or they
+   read as objects sitting on top of the words. */
+body.panel .field{inset:-18%;filter:blur(64px);opacity:calc(var(--blob-alpha) * .62)}
+body.panel .field i:nth-child(1){width:46vmin;height:46vmin}
+body.panel .field i:nth-child(2){width:42vmin;height:42vmin}
+body.panel .field i:nth-child(3){width:38vmin;height:38vmin}
+
+/* ---- bar --------------------------------------------------------------
+   The same page as a slim strip near the top of the screen (?bar=1, native/bar.py):
+   orb, her words, the answer, Undo. Everything else the page has is hidden, not
+   restyled, because a two-second action has no room for it. The window is exactly as
+   tall as .stage (the page reports its height and native resizes), so nothing here may
+   depend on the viewport height. */
+.undo{display:none}
+html.barmode,html.barmode body{height:auto;min-height:100%;background:transparent}
+html.barmode body{display:block;min-height:100vh;text-align:start;border-radius:20px;
+  /* contain:paint makes the body the box the fixed .field is clipped to, so the
+     drifting colour stays inside the rounded strip instead of squaring its corners. */
+  contain:paint;
+  background:color-mix(in srgb,var(--ground) 80%,transparent);
+  box-shadow:inset 0 0 0 1px var(--glass-line),inset 0 1.5px 0 -0.5px var(--glass-edge)}
+html.barmode .field{inset:-120% -20%;filter:blur(46px);opacity:calc(var(--blob-alpha) * .42)}
+html.barmode .thread,html.barmode .card,html.barmode .err,html.barmode .typerow,html.barmode .newchat,
+html.barmode .gear,html.barmode .lang,html.barmode #vol,html.barmode #settings,html.barmode .foot,
+html.barmode #dev{display:none!important}
+html.barmode .stage{display:grid;width:100%;max-height:none;margin:0;
+  grid-template-columns:auto minmax(0,1fr) auto;
+  /* The empty 1fr rows above and below centre the text as a block against the orb,
+     whatever mix of placeholder, words and answer is showing. */
+  grid-template-rows:1fr auto auto auto 1fr;
+  grid-template-areas:"orb . act" "orb state act" "orb heard act" "orb reply act" "orb . act";
+  align-items:center;column-gap:14px;row-gap:0;
+  padding-block:12px;padding-inline:14px 16px;min-height:64px}
+/* No width or font-size transitions here: each animation frame is a new height, and
+   every one of them was a native window resize (measured: 20 height messages to go
+   from the page's default orb to this one). */
+html.barmode .orb{grid-area:orb;width:40px;align-self:center;cursor:default;transition:none}
+html.barmode .orb .shell{box-shadow:0 6px 14px -6px var(--shade),
+  inset 0 1.5px 1px -1px var(--glass-edge),inset 0 -10px 14px -12px rgba(0,0,0,.5)}
+html.barmode body.idle .orb:hover .shell{transform:none}
+/* The placeholder that sits where her words will appear, like Spotlight's. */
+html.barmode .state{grid-area:state;margin:0;min-height:0;font-size:20px;font-weight:400;
+  letter-spacing:0;text-transform:none;color:var(--muted);line-height:1.3;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+html.barmode.b-heard .state,html.barmode.b-result .state{display:none}
+/* Working on it. Her words stay up and this line sits under them, in the warm colour
+   the spinning ring uses, with the seconds once it has taken a while: without it the
+   bar looked exactly like it was still listening, and she pressed again. */
+.work{display:none}
+html.barmode .work{grid-area:reply;margin:2px 0 0;font-size:13px;line-height:1.35;
+  color:var(--warm);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+html.barmode:not(.b-result) body.thinking .work{display:block}
+html.barmode .work::after{content:"";display:inline-block;width:1.2em;text-align:start;
+  animation:workdots 1.2s steps(4,end) infinite}
+@keyframes workdots{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}}
+html.barmode .work[data-long="1"]::after{display:none}
+html.barmode body.thinking .heard{opacity:.78}
+/* Live words. Two lines at most, and when she keeps talking it is the NEWEST words
+   that stay in view: flex-end pushes the overflow off the top edge, not the bottom. */
+html.barmode .heard{grid-area:heard;display:none;transition:none;margin:0;max-width:none;min-height:0;
+  font-size:20px;font-weight:400;line-height:1.3;letter-spacing:-.005em;
+  /* Plain wrapping, not the page's balance: balance (and pretty) re-flow the lines
+     on every new word, so words she already said jumped between lines as she spoke. */
+  text-wrap:wrap;
+  max-height:2.6em;overflow:hidden;flex-direction:column;justify-content:flex-end}
+html.barmode.b-heard .heard{display:flex}
+/* The fade says "there is more before this", only when there is: painted always, it
+   dimmed the first line of a sentence that fitted. */
+html.barmode.b-heard:not(.b-result) .heard.over{
+  -webkit-mask-image:linear-gradient(to bottom,transparent,#000 .95em);
+          mask-image:linear-gradient(to bottom,transparent,#000 .95em)}
+/* Each line takes its reading order from its own words (plaintext), so a Hebrew answer
+   in an English UI, or an English error in a Hebrew one, does not render back to front
+   with its full stop on the wrong end. It still lines up on the UI's side, next to the
+   orb: dir="auto" aligned an English line to the far edge, away from everything else. */
+html.barmode .heard,html.barmode .reply{unicode-bidi:plaintext}
+html.barmode[dir="rtl"] .heard,html.barmode[dir="rtl"] .reply{text-align:right}
+html.barmode[dir="ltr"] .heard,html.barmode[dir="ltr"] .reply{text-align:left}
+/* Once there is an answer, what she said steps back to one quiet line above it. */
+html.barmode.b-result .heard{display:block;font-size:13px;line-height:1.35;color:var(--muted);
+  max-height:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:3px}
+html.barmode .reply{grid-area:reply;display:none;margin:0;max-width:none;min-height:0;
+  font-size:18px;line-height:1.38;color:var(--ink);text-wrap:wrap;text-wrap:pretty;
+  -webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;
+  animation:barIn .32s cubic-bezier(.22,1,.36,1)}
+html.barmode.b-result .reply{display:-webkit-box}
+html.barmode.b-err .reply{color:#b5544a}
+/* Something she asked to take back was NOT taken back. Warm amber like the page's
+   warning card: nothing is broken, but it must not read like the line that says done. */
+html.barmode.b-undofail .reply{color:var(--warm)}
+@keyframes barIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+html.barmode .undo:not([hidden]){grid-area:act;display:inline-flex;align-items:center;gap:7px;
+  align-self:center;max-width:190px;cursor:pointer;white-space:nowrap;
+  font:500 15px/1 Rubik,-apple-system,system-ui,sans-serif;color:var(--ink);
+  padding:9px 15px 9px 12px;border-radius:999px;
+  background:var(--glass);border:1px solid var(--glass-line);
+  box-shadow:0 8px 20px -12px var(--shade),inset 0 1.5px 0 -0.5px var(--glass-edge);
+  transition:background .18s ease,transform .15s ease,opacity .2s ease;
+  animation:barIn .32s cubic-bezier(.22,1,.36,1)}
+html.barmode .undo span{overflow:hidden;text-overflow:ellipsis}
+html.barmode .undo svg{flex:none;width:16px;height:16px;fill:currentColor;opacity:.78}
+/* The arrow curls back against the reading direction, or it reads as "redo". */
+[dir="rtl"] .undo svg{transform:scaleX(-1)}
+html.barmode .undo:hover{background:color-mix(in oklab,var(--warm) 16%,var(--glass))}
+html.barmode .undo:active{transform:scale(.97)}
+html.barmode .undo:focus-visible{outline:2px solid var(--live);outline-offset:2px}
+html.barmode .undo:disabled{opacity:.6;cursor:default;transform:none}
+</style>
+</head>
+<body>
+<div class="field" aria-hidden="true"><i></i><i></i><i></i></div>
+
+<main class="stage">
+  <div class="orb" id="orb">
+    <div class="shell"></div>
+    <div class="ring" id="ring"></div>
+    <div class="core" id="core">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/>
+        <path d="M6 11a1 1 0 0 0-2 0 8 8 0 0 0 7 7.94V21H9a1 1 0 0 0 0 2h6a1 1 0 0 0 0-2h-2v-2.06A8 8 0 0 0 20 11a1 1 0 0 0-2 0 6 6 0 0 1-12 0z"/>
+      </svg>
+    </div>
+  </div>
+  <div class="state" id="state"></div>
+  <div class="thread" id="thread" aria-live="off"></div>
+  <h1 class="heard" id="heard"></h1>
+  <p class="reply" id="reply"></p>
+  <p class="work" id="work" aria-live="polite"></p>
+  <!-- Only the bar shows this (?bar=1); display:none everywhere else. -->
+  <button class="undo" id="undo" type="button" hidden>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.7 5.3a1 1 0 0 1 0 1.4L7.4 9H14a6 6 0 0 1 0 12h-3a1 1 0 0 1 0-2h3a4 4 0 0 0 0-8H7.4l2.3 2.3a1 1 0 1 1-1.4 1.4l-4-4a1 1 0 0 1 0-1.4l4-4a1 1 0 0 1 1.4 0z"/></svg>
+    <span id="undow"></span>
+  </button>
+
+  <section class="card" id="card" aria-live="polite">
+    <img class="thumb" id="thumb" alt="">
+    <div class="body">
+      <div class="t" id="cardT"></div>
+      <div class="m" id="cardM"></div>
+      <div id="cardExtra"></div>
+    </div>
+  </section>
+
+  <p class="err" id="err"></p>
+
+  <form class="typerow" id="typerow" autocomplete="off">
+    <input id="typebox" type="text" enterkeyhint="send" spellcheck="false">
+    <button class="tsend" id="tsend" type="submit" aria-label="send">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.4 20.4 21 12 3.4 3.6 3.4 10l12.6 2-12.6 2z"/></svg>
+    </button>
+  </form>
+</main>
+
+<button class="newchat" id="newchat" type="button">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5a1 1 0 0 1 1 1v5h5a1 1 0 0 1 0 2h-5v5a1 1 0 0 1-2 0v-5H6a1 1 0 0 1 0-2h5V6a1 1 0 0 1 1-1z"/></svg>
+  <span id="newchatw"></span>
+</button>
+
+<button class="gear" id="gear" type="button" aria-haspopup="dialog" title="Settings">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm0 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4z"/><path d="M19.4 13a7.8 7.8 0 0 0 0-2l2-1.5a.5.5 0 0 0 .1-.6l-1.9-3.3a.5.5 0 0 0-.6-.2l-2.3.9a7.6 7.6 0 0 0-1.7-1l-.4-2.5a.5.5 0 0 0-.5-.4h-3.8a.5.5 0 0 0-.5.4l-.4 2.5a7.6 7.6 0 0 0-1.7 1l-2.3-.9a.5.5 0 0 0-.6.2L2.5 8.9a.5.5 0 0 0 .1.6L4.6 11a7.8 7.8 0 0 0 0 2l-2 1.5a.5.5 0 0 0-.1.6l1.9 3.3a.5.5 0 0 0 .6.2l2.3-.9a7.6 7.6 0 0 0 1.7 1l.4 2.5a.5.5 0 0 0 .5.4h3.8a.5.5 0 0 0 .5-.4l.4-2.5a7.6 7.6 0 0 0 1.7-1l2.3.9a.5.5 0 0 0 .6-.2l1.9-3.3a.5.5 0 0 0-.1-.6L19.4 13z" opacity=".45"/></svg>
+</button>
+
+<div class="lang" id="lang" data-open="0">
+  <button class="langbtn" id="langbtn" type="button" aria-haspopup="listbox" aria-expanded="false">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm6.9 6h-2.95a15.6 15.6 0 0 0-1.38-3.56A8.03 8.03 0 0 1 18.9 8zM12 4.04c.66.96 1.2 2.1 1.57 3.96h-3.14C10.8 6.14 11.34 5 12 4.04zM4.26 14a7.96 7.96 0 0 1 0-4h3.4a16.6 16.6 0 0 0 0 4h-3.4zm.84 2h2.95c.32 1.29.78 2.5 1.38 3.56A8.03 8.03 0 0 1 5.1 16zm2.95-8H5.1a8.03 8.03 0 0 1 4.33-3.56A15.6 15.6 0 0 0 8.05 8zM12 19.96c-.66-.96-1.2-2.1-1.57-3.96h3.14c-.37 1.86-.91 3-1.57 3.96zM14 14h-4a14.7 14.7 0 0 1 0-4h4a14.7 14.7 0 0 1 0 4zm.57 5.56c.6-1.06 1.06-2.27 1.38-3.56h2.95a8.03 8.03 0 0 1-4.33 3.56zM16.34 14a16.6 16.6 0 0 0 0-4h3.4a7.96 7.96 0 0 1 0 4h-3.4z"/></svg>
+    <span id="langnow"></span>
+    <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5z"/></svg>
+  </button>
+  <div class="langmenu" id="langmenu" role="listbox"></div>
+</div>
+
+<div id="vol" aria-hidden="true">
+  <svg id="volicon" viewBox="0 0 24 24"><path d="M4 9v6h4l5 5V4L8 9H4z"/></svg>
+  <div id="volbar"><div id="volfill"></div></div>
+</div>
+
+<section id="settings" role="dialog" aria-modal="true" aria-labelledby="sTitle">
+  <div class="sheet">
+    <h2 id="sTitle"></h2><template data-acct="tpl">
+    <!-- The Account row. A template, stamped in by paintAccount() the first time the
+         sheet opens: until then the page is exactly what it was without it. -->
+    <div class="srow" data-acct="row">
+      <div class="acct-top">
+        <div class="slabel" data-acct="label"></div>
+        <span class="acct-badge" data-acct="badge" hidden></span>
+      </div>
+      <div data-acct="usage" hidden>
+        <div class="acct-use" data-acct="usetext"></div>
+        <div class="acct-bar" data-acct="bar"><i></i></div>
+      </div>
+      <div class="shint" data-acct="note" hidden></div>
+      <button class="acct-btn" type="button" data-acct="action" hidden></button>
+    </div></template>
+
+    <div class="srow">
+      <div class="slabel" id="lHotkey"></div>
+      <button class="hkbtn" id="hotkeybtn" type="button"><span id="hotkeyw"></span></button>
+      <div class="seg hkpicks" id="segHotkey">
+        <button type="button" data-v="right-command" id="wRightCmd"></button>
+        <button type="button" data-v="right-option"  id="wRightOpt"></button>
+        <button type="button" data-v="fn-fn"         id="wFnTwice"></button>
+      </div>
+      <div class="shint" id="hHotkey"></div>
+    </div>
+
+    <div class="srow">
+      <div class="slabel" id="lStart"></div>
+      <div class="seg" id="segStart">
+        <button type="button" data-v="push"   id="wPush"></button>
+        <button type="button" data-v="wake"   id="wWake"></button>
+        <button type="button" data-v="always" id="wAlways"></button>
+      </div>
+    </div>
+
+    <div class="srow">
+      <div class="slabel" id="lDisplay"></div>
+      <div class="seg" id="segDisplay">
+        <button type="button" data-v="panel" id="wDispPanel"></button>
+        <button type="button" data-v="bar"   id="wDispBar"></button>
+        <button type="button" data-v="none"  id="wDispNone"></button>
+      </div>
+      <div class="shint" id="hDisplay"></div>
+    </div>
+
+    <div class="srow">
+      <div class="slabel" id="lSend"></div>
+      <div class="seg" id="segSend">
+        <button type="button" data-v="on"  id="wSendOn"></button>
+        <button type="button" data-v="off" id="wSendOff"></button>
+      </div>
+      <div class="shint" id="hSend"></div>
+    </div>
+
+    <div class="srow" id="rowWords" hidden>
+      <div class="slabel" id="lWords"></div>
+      <input class="stext" id="wordsBox" type="text" spellcheck="false">
+    </div>
+
+    <div class="srow">
+      <div class="slabel" id="lLang"></div>
+      <div class="seg" id="segLang">
+        <button type="button" data-v="he-IL">עברית</button>
+        <button type="button" data-v="en-US">English</button>
+        <button type="button" data-v="ar-SA">العربية</button>
+        <button type="button" data-v="ru-RU">Русский</button>
+      </div>
+    </div>
+
+    <div class="srow">
+      <div class="slabel" id="lListen"></div>
+      <div class="srange">
+        <input id="listenRange" type="range" min="4" max="60" step="1">
+        <b><span id="listenVal"></span> <span id="lSeconds"></span></b>
+      </div>
+    </div>
+
+    <div class="sfoot">
+      <span class="ssaved" id="savedw"></span>
+      <button class="sdone" id="sdone" type="button"></button>
+    </div>
+  </div>
+</section>
+
+<p class="foot" id="foot"></p>
+<div id="dev"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const COPY = {
+  // he_f is MicMic's own persona and the default: MicMic refers to itself in the
+  // feminine throughout ("מקשיבה", "שולחת") regardless of who is talking to it, same
+  // as the quoted commands she is told to say ("עצרי") address MicMic, not her - only
+  // the lines that instruct/describe HER (2nd person) need a masculine counterpart,
+  // held in he_m below as overrides so nothing has to be duplicated.
+  he_f:{
+      settings:"הגדרות", sHotkey:"מקש קיצור", sHotkeyHint:"מחזיקים את המקש ומדברים, ומשחררים כדי לשלוח. או הקשה אחת כדי להתחיל ועוד אחת כדי לשלוח. לשינוי: לוחצים על הכפתור ואז על מקש. Esc מבטל.", sRightCmd:"⌘ ימני", sRightOpt:"⌥ ימני", sFnTwice:"Fn פעמיים", sTap:"הקשה", sFn:"לחיצה כפולה על Fn", sPressNow:"מחכה לצירוף מקשים…", sStart:"איך מתחילים", sPush:"לחיצה", sWake:"מילת הפעלה", sAlways:"תמיד מקשיבה", sDisplay:"מה מופיע כשמדברים", sSend:"לשלוח הודעות בשבילי", sOn:"כן", sOff:"לא", hSend:"כל הודעה מוקראת לפני שהיא יוצאת, ואפשר להגיד לא כדי לעצור.", sDispPanel:"חלון מלא", sDispBar:"פס קטן", sDispNone:"כלום", hDisplay:"בלי כלום על המסך, MicMic פשוט עושה ואומר בקול מה עשתה.", sWords:"מילות הפעלה", sLang:"שפת הדיבור", sListen:"כמה זמן להקשיב", sSeconds:"שניות", sSaved:"נשמר", sDone:"סיום", sAccount:"חשבון", aFree:"חינם", aPro:"Pro", aUsage:"{n} מתוך {m} בקשות היום", aUsageTotal:"{n} מתוך {m} בקשות חינם לניסיון", aUpgrade:"שדרוג ל-Pro", aManage:"ניהול המנוי", aOwnKey:"משתמשים במפתח אישי", aOffline:"אין חיבור כרגע, אנסה שוב עוד מעט", aSetup:"מגדירה את החשבון…", aTooMany:"בחשבון הזה כבר יש יותר מדי מחשבים", aPayOff:"התשלום לא זמין כרגע, אפשר לנסות שוב מאוחר יותר", aOpenFail:"לא הצלחתי לפתוח את הדף, אפשר לנסות שוב",
+     ready:"מקשיבה", think:"רגע", working:"עובדת על זה", acting:"מיד", off:"געי כדי לדבר",
+      idle:"געי כדי לדבר", idlePanel:"מחזיקים את ⌥ הימני ומדברים", wake:"אמרי מיקמיק",
+      foot:"געי בעיגול או לחצי על מקש הרווח", footWake:"אמרי מיקמיק כדי להתחיל",
+      footAlways:"פשוט תדברי", mic:"תני הרשאה למיקרופון ואז רענני",
+      sent:"נשלח", cancelled:"בוטל", sending:"שולחת ל", joiner:"", say:'אמרי "ביטול" כדי לעצור',
+      cancelBtn:"ביטול", neterr:"לא מצליחה להתחבר למחשב, רגע",
+      timerPrefix:"אזכיר בעוד ", timerSuffix:" דקות", allDone:"עשיתי הכל",
+      typehere:"או פשוט לכתוב כאן", newchat:"שיחה חדשה", fresh:"מתחילים מחדש", youSaid:"ביקשת",
+      undo:"ביטול הפעולה", undoing:"מבטלת", undone:"בוטל", undoFailed:"לא הצלחתי לבטל את זה",
+      undoNone:"אי אפשר לבטל את זה כרגע", undoNet:"לא הצלחתי להתחבר למחשב, שום דבר לא בוטל",
+      obDialog:"ברוכים הבאים ל-MicMic", obStep:"שלב {n} מתוך 3", obSkip:"דילוג", obNext:"המשך", obLater:"אחר כך", obDone:"סיום",
+      ob1Title:"מחזיקים ⌥ ומדברים.", ob1Sub:"ה-⌥ שבצד ימין. משחררים כדי לשלוח.", ob1Tap:"או הקשה אחת כדי להתחיל ועוד אחת כדי לשלוח.",
+      obDemoSay:"תשימי קצת מוזיקה", obDemoDone:"מנגנת מוזיקה",
+      ob2Title:"מאפשרים ל-MicMic לעבוד על ה-Mac.", ob2Sub:"מאשרים פעם אחת, וזהו.",
+      obMic:"מיקרופון", obMicWhy:"כדי לשמוע אותך", obSpeech:"זיהוי דיבור", obSpeechWhy:"כדי להבין את המילים",
+      obAx:"נגישות", obAxWhy:"בשביל ⌥ בכל אפליקציה", obTurnOn:"הפעלה", obAsked:'לוחצים "אפשר" כש-macOS שואל',
+      obUnknown:"אי אפשר לבדוק את זה מכאן", obOn:"מופעל", obOff:"עוד לא",
+      ob3Title:"בואו ננסה.", ob3Sub:"מחזיקים ⌥ ואומרים", ob3Phrase:"מה השעה?", obWaiting:"מחכה לך",
+      obNoKey:"⌥ עוד לא עובד? לוחצים על העיגול.", obSetTitle:"הכל מוכן.", obSetSub:"MicMic שמעה אותך.", obListen:"להתחיל להקשיב"},
+  he_m:{off:"גע כדי לדבר", idle:"גע כדי לדבר", idlePanel:"מחזיקים את ⌥ הימני ומדברים", wake:"אמור מיקמיק",
+      foot:"גע בעיגול או לחץ על מקש הרווח", footWake:"אמור מיקמיק כדי להתחיל",
+      footAlways:"פשוט תדבר", mic:"תן הרשאה למיקרופון ואז רענן",
+      say:'אמור "ביטול" כדי לעצור',
+      typehere:"או פשוט לכתוב כאן"},
+  en:{
+      settings:"Settings", sHotkey:"Keyboard shortcut", sHotkeyHint:"Hold it and talk, release to send. Or tap once to start and again to send. To change it, click the button, then press a combination or tap one right-hand key. Esc cancels.", sRightCmd:"Right ⌘", sRightOpt:"Right ⌥", sFnTwice:"Fn twice", sTap:"tap", sFn:"double-tap Fn / Globe", sPressNow:"waiting for a combination…", sStart:"How it starts", sPush:"a press", sWake:"a wake word", sAlways:"always listening", sDisplay:"What appears when you talk", sSend:"Send messages for me", sOn:"on", sOff:"off", hSend:"Every message is read back before it goes, and saying no stops it.", sDispPanel:"full window", sDispBar:"small bar", sDispNone:"nothing", hDisplay:"With nothing on screen, MicMic just does it and says out loud what it did.", sWords:"Wake words", sLang:"Speech language", sListen:"How long to listen", sSeconds:"seconds", sSaved:"saved", sDone:"Done", sAccount:"Account", aFree:"Free", aPro:"Pro", aUsage:"{n} of {m} requests today", aUsageTotal:"{n} of {m} free requests used", aUpgrade:"Upgrade to Pro", aManage:"Manage subscription", aOwnKey:"Using your own key", aOffline:"Offline right now. I'll try again shortly.", aSetup:"Setting up your account…", aTooMany:"This account already has too many Macs.", aPayOff:"Payments aren't available right now. Try again later.", aOpenFail:"I couldn't open the page. Try again.",
+     ready:"listening", think:"one moment", working:"Working on it", acting:"here you go", off:"touch to speak",
+      idle:"touch to speak", idlePanel:"hold right ⌥ option and talk", wake:"say micmic",
+      foot:"touch the circle, or press the space bar", footWake:"say micmic to begin",
+      footAlways:"just talk", mic:"allow the microphone, then reload",
+      sent:"sent", cancelled:"cancelled", sending:"sending to", joiner:" ", say:'say "cancel" to stop',
+      cancelBtn:"Cancel", neterr:"I can't reach the computer, one moment",
+      timerPrefix:"In ", timerSuffix:" minutes", allDone:"All done",
+      typehere:"or just type here", newchat:"new conversation", fresh:"starting fresh", youSaid:"you asked",
+      undo:"Undo", undoing:"undoing", undone:"Undone", undoFailed:"I couldn't undo that",
+      undoNone:"Undo isn't available right now", undoNet:"I couldn't reach the computer, so nothing was undone",
+      obDialog:"Welcome to MicMic", obStep:"Step {n} of 3", obSkip:"Skip", obNext:"Continue", obLater:"Later", obDone:"Done",
+      ob1Title:"Hold ⌥ and talk.", ob1Sub:"The ⌥ on the right. Let go to send.", ob1Tap:"Or tap it once to start, and again to send.",
+      obDemoSay:"Play some music", obDemoDone:"Playing music",
+      ob2Title:"Let MicMic use your Mac.", ob2Sub:"Allow these once, and that's it.",
+      obMic:"Microphone", obMicWhy:"To hear you", obSpeech:"Speech Recognition", obSpeechWhy:"To understand your words",
+      obAx:"Accessibility", obAxWhy:"For ⌥ in every app", obTurnOn:"Turn on", obAsked:"Click Allow when macOS asks",
+      obUnknown:"Can't check this from here", obOn:"On", obOff:"Not yet",
+      ob3Title:"Try it.", ob3Sub:"Hold ⌥ and say", ob3Phrase:"What time is it?", obWaiting:"Waiting for you",
+      obNoKey:"No ⌥ yet? Click the circle.", obSetTitle:"You're set.", obSetSub:"MicMic heard you.", obListen:"Start listening"},
+  ar:{
+      settings:"الإعدادات", sHotkey:"اختصار لوحة المفاتيح", sHotkeyHint:"اضغط مطولاً واحكِ، واترك المفتاح للإرسال. أو نقرة للبدء ونقرة ثانية للإرسال. للتغيير: اضغط الزر ثم تركيبة مفاتيح أو مفتاح يمين واحد. Esc للإلغاء.", sRightCmd:"⌘ اليمين", sRightOpt:"⌥ اليمين", sFnTwice:"Fn مرتين", sTap:"نقرة", sFn:"نقرة مزدوجة على Fn", sPressNow:"بانتظار تركيبة مفاتيح…", sStart:"كيف يبدأ", sPush:"ضغطة", sWake:"كلمة تنبيه", sAlways:"يستمع دائماً", sDisplay:"شو بيظهر لما تحكي", sSend:"ابعت رسائل عني", sOn:"نعم", sOff:"لا", hSend:"كل رسالة بتنقرا قبل ما تنبعت، وإذا قلت لأ بتوقف.", sDispPanel:"نافذة كاملة", sDispBar:"شريط صغير", sDispNone:"ولا شي", hDisplay:"بدون شي عالشاشة، MicMic بيعمل الشغلة وبيقول بصوت عالي شو عمل.", sWords:"كلمات التنبيه", sLang:"لغة الكلام", sListen:"مدة الاستماع", sSeconds:"ثانية", sSaved:"تم الحفظ", sDone:"تم", sAccount:"الحساب", aFree:"مجاني", aPro:"Pro", aUsage:"{n} من {m} طلب اليوم", aUsageTotal:"{n} من {m} طلب مجاني للتجربة", aUpgrade:"الترقية إلى Pro", aManage:"إدارة الاشتراك", aOwnKey:"تستخدم مفتاحك الخاص", aOffline:"لا يوجد اتصال الآن، سأحاول مرة أخرى قريباً", aSetup:"جارٍ إعداد الحساب…", aTooMany:"هذا الحساب فيه أجهزة كثيرة أصلاً", aPayOff:"الدفع غير متاح الآن، حاول لاحقاً", aOpenFail:"لم أتمكن من فتح الصفحة، حاول مرة أخرى",
+     typehere:"أو اكتب هنا", newchat:"محادثة جديدة", fresh:"منبدأ من جديد", youSaid:"طلبت", ready:"أستمع", think:"لحظة", working:"عم أشتغل عليها", acting:"حالاً", off:"المس للتحدث",
+      idle:"المس للتحدث", idlePanel:"اضغط ⌥ اليمين مطولاً واحكِ", wake:"قل ميك ميك",
+      foot:"المس الدائرة أو اضغط على مسطرة المسافة", footWake:"قل ميك ميك للبدء",
+      footAlways:"فقط تحدث", mic:"اسمح بالميكروفون ثم أعد التحميل",
+      sent:"تم الإرسال", cancelled:"أُلغي", sending:"جارٍ الإرسال إلى", joiner:" ", say:'قل "إلغاء" للإيقاف',
+      cancelBtn:"إلغاء", neterr:"لا أستطيع الوصول إلى الكمبيوتر، لحظة من فضلك",
+      timerPrefix:"سأذكرك خلال ", timerSuffix:" دقيقة", allDone:"تم كل شيء",
+      undo:"تراجع", undoing:"جارٍ التراجع", undone:"تم التراجع", undoFailed:"لم أتمكن من التراجع عن ذلك",
+      undoNone:"التراجع غير متاح الآن", undoNet:"لم أتمكن من الوصول إلى الكمبيوتر، لم يتم التراجع عن أي شيء",
+      obDialog:"أهلاً بك في MicMic", obStep:"الخطوة {n} من 3", obSkip:"تخطٍّ", obNext:"متابعة", obLater:"لاحقاً", obDone:"تم",
+      ob1Title:"اضغط ⌥ مطولاً واحكِ.", ob1Sub:"مفتاح ⌥ اللي على اليمين. اتركه للإرسال.", ob1Tap:"أو نقرة للبدء ونقرة ثانية للإرسال.",
+      obDemoSay:"بدي أسمع موسيقى", obDemoDone:"عم شغّل موسيقى",
+      ob2Title:"اسمح لـ MicMic باستخدام جهازك.", ob2Sub:"وافق مرة وحدة بس.",
+      obMic:"الميكروفون", obMicWhy:"حتى يسمعك", obSpeech:"التعرّف على الكلام", obSpeechWhy:"حتى يفهم كلامك",
+      obAx:"إمكانية الوصول", obAxWhy:"لمفتاح ⌥ في كل التطبيقات", obTurnOn:"تشغيل", obAsked:'اضغط "السماح" لما يسألك macOS',
+      obUnknown:"ما منقدر نتحقق من هون", obOn:"مفعّل", obOff:"مش بعد",
+      ob3Title:"جرّبه.", ob3Sub:"اضغط ⌥ مطولاً وقل", ob3Phrase:"كم الساعة؟", obWaiting:"بانتظارك",
+      obNoKey:"⌥ لسا ما اشتغل؟ اضغط على الدائرة.", obSetTitle:"كل شي جاهز.", obSetSub:"MicMic سمعك.", obListen:"ابدأ الاستماع"},
+  ru:{
+      settings:"Настройки", sHotkey:"Сочетание клавиш", sHotkeyHint:"Удерживайте клавишу и говорите, отпустите, чтобы отправить. Или нажмите один раз, чтобы начать, и ещё раз, чтобы отправить. Чтобы сменить: нажмите кнопку, затем сочетание или правую клавишу. Esc отменяет.", sRightCmd:"Правый ⌘", sRightOpt:"Правый ⌥", sFnTwice:"Fn дважды", sTap:"нажатие", sFn:"двойное нажатие Fn / Globe", sPressNow:"ждём сочетание клавиш…", sStart:"Как начинать", sPush:"нажатие", sWake:"слово-активатор", sAlways:"всегда слушает", sDisplay:"Что показывать, когда вы говорите", sSend:"Отправлять сообщения за меня", sOn:"да", sOff:"нет", hSend:"Каждое сообщение зачитывается перед отправкой, и «нет» его останавливает.", sDispPanel:"всё окно", sDispBar:"узкая полоса", sDispNone:"ничего", hDisplay:"Без окна MicMic просто делает и вслух говорит, что сделал.", sWords:"Слова-активаторы", sLang:"Язык речи", sListen:"Сколько слушать", sSeconds:"секунд", sSaved:"сохранено", sDone:"Готово", sAccount:"Аккаунт", aFree:"Бесплатно", aPro:"Pro", aUsage:"{n} из {m} запросов сегодня", aUsageTotal:"{n} из {m} бесплатных запросов", aUpgrade:"Перейти на Pro", aManage:"Управлять подпиской", aOwnKey:"Используется ваш собственный ключ", aOffline:"Нет связи, попробую ещё раз чуть позже", aSetup:"Настраиваю аккаунт…", aTooMany:"На этом аккаунте уже слишком много устройств", aPayOff:"Оплата сейчас недоступна, попробуйте позже", aOpenFail:"Не удалось открыть страницу, попробуйте ещё раз",
+     typehere:"или просто напишите здесь", newchat:"новый разговор", fresh:"начинаем заново", youSaid:"вы просили", ready:"слушаю", think:"секунду", working:"Работаю над этим", acting:"сейчас", off:"нажмите, чтобы говорить",
+      idle:"нажмите, чтобы говорить", idlePanel:"удерживайте правый ⌥ и говорите", wake:"скажите микмик",
+      foot:"нажмите на круг или пробел", footWake:"скажите микмик, чтобы начать",
+      footAlways:"просто говорите", mic:"разрешите микрофон и обновите страницу",
+      sent:"отправлено", cancelled:"отменено", sending:"отправка ", joiner:" ", say:'скажите "отмена", чтобы остановить',
+      cancelBtn:"Отмена", neterr:"Не могу связаться с компьютером, секунду",
+      timerPrefix:"Напомню через ", timerSuffix:" минут", allDone:"Всё сделано",
+      undo:"Отменить", undoing:"отменяю", undone:"Отменено", undoFailed:"Не получилось отменить",
+      undoNone:"Отмена сейчас недоступна", undoNet:"Не удалось связаться с компьютером, ничего не отменено",
+      obDialog:"Добро пожаловать в MicMic", obStep:"Шаг {n} из 3", obSkip:"Пропустить", obNext:"Далее", obLater:"Позже", obDone:"Готово",
+      ob1Title:"Удерживайте ⌥ и говорите.", ob1Sub:"Та ⌥, что справа. Отпустите, чтобы отправить.", ob1Tap:"Или нажмите раз, чтобы начать, и ещё раз, чтобы отправить.",
+      obDemoSay:"Включи немного музыки", obDemoDone:"Включаю музыку",
+      ob2Title:"Разрешите MicMic работать с Mac.", ob2Sub:"Это нужно сделать один раз.",
+      obMic:"Микрофон", obMicWhy:"Чтобы слышать вас", obSpeech:"Распознавание речи", obSpeechWhy:"Чтобы понимать слова",
+      obAx:"Универсальный доступ", obAxWhy:"Для ⌥ во всех приложениях", obTurnOn:"Включить", obAsked:"Нажмите «Разрешить» в окне macOS",
+      obUnknown:"Отсюда это не проверить", obOn:"Включено", obOff:"Ещё нет",
+      ob3Title:"Попробуйте.", ob3Sub:"Удерживайте ⌥ и скажите", ob3Phrase:"Который час?", obWaiting:"Жду вас",
+      obNoKey:"⌥ пока не работает? Нажмите на круг.", obSetTitle:"Всё готово.", obSetSub:"Получилось.", obListen:"Начать слушать"},
+};
+// language_hint is one of four codes everywhere else in this system (router.py's own
+// taxonomy); collapsing ar/ru to "en" here was why an Arabic or Russian speaker saw
+// (and, for two router-side reply dicts, HEARD) English.
+function resolveLang(hint){
+  const h = String(hint||"he").toLowerCase();
+  if(h.startsWith("he")) return "he";
+  if(h.startsWith("ar")) return "ar";
+  if(h.startsWith("ru")) return "ru";
+  return "en";
+}
+let LANG="he", CFG={language_hint:"he-IL"}, busy=false, devOn=false, specCtrl=null;
+// goIdle() wanted to paint idle while a request was still running; send() settles it.
+let idleDeferred = false;
+// ?panel=1 — this page is being shown inside MicMic.app's own window. The native
+// listener already owns the microphone there, and two recognisers on one microphone
+// fight over it, so this page never opens one in panel mode. It still types, and it
+// mirrors the listener's state through the window.panel* hooks defined at the end.
+const PANEL = new URLSearchParams(location.search).has("panel");
+// ?bar=1 — the same page as a slim strip at the top of the screen (native/bar.py), for
+// the two-second "do this" that the 380x560 panel is too heavy for. Like the panel it
+// never opens a microphone and is driven entirely through the window.bar* hooks at the
+// end; unlike the panel it has no typing box, no thread and no settings, and it must
+// never take keyboard focus from the app she is working in.
+const BAR = new URLSearchParams(location.search).has("bar");
+// Defaults to MicMic's feminine persona until /api/config exposes the stored profile
+// gender (it does not yet - the client half of that is the he_m table above).
+let GENDER="f";
+// See send() below: this is a one-shot pairing, not a text blacklist.
+let lastHandledKey = null, lastHandledAt = 0;
+const t = k => {
+  if(LANG === "he"){
+    const m = GENDER === "m" ? COPY.he_m[k] : undefined;
+    return m !== undefined ? m : COPY.he_f[k];
+  }
+  return (COPY[LANG] && COPY[LANG][k] !== undefined) ? COPY[LANG][k] : COPY.en[k];
+};
+// The browser's only voice when the server can't be reached at all (bug: total
+// silence on a fetch failure) or when a client-only correction has to be truthful
+// about something the server already announced as done (video never actually played,
+// a seek it can't really perform). Never used for anything the server already speaks.
+function localSpeak(text){
+  try{
+    if(!text || !window.speechSynthesis) return;
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = CFG.language_hint || {he:"he-IL",ar:"ar-SA",ru:"ru-RU",en:"en-US"}[LANG] || "en-US";
+    speechSynthesis.cancel();
+    speechSynthesis.speak(u);
+  }catch(_){}
+}
+
+let STATE_KEY = null;
+// The body class doubles as the state machine AND as a set of independent flags
+// (a card is showing, there is a transcript, this is the app panel). Rewriting
+// className wholesale silently dropped any flag not listed here, which is how the
+// transcript disappeared the moment the next state was painted. Naming the flags in
+// one place means adding a new one cannot quietly break the ones already there.
+// "panel" says which window this page is in, not what MicMic is doing, so it has
+// to survive every setState() — which rewrites body.className wholesale.
+const STICKY = ["hascard", "hasthread", "panel"];
+function setState(cls, key){
+  const keep = STICKY.filter(c => document.body.classList.contains(c));
+  document.body.className = [cls, ...keep].join(" ");
+  // In the app's window the page has no microphone of its own; the key does it.
+  if(key === "idle" && PANEL) key = "idlePanel";
+  if(key){ STATE_KEY = key; $("state").textContent = t(key); }
+}
+// A fetch resolving, or a card's own countdown timer, must never paint "listening"
+// over a microphone goIdle() already closed - state is derived from whether she is
+// actually still armed, never written blind after an async completion.
+function paintReady(){ if(armed) setState("listening","ready"); }
+const norm = s => (s||"").toLowerCase().replace(/[^\p{L}\p{N} ]/gu,"").replace(/\s+/g," ").trim();
+
+/* ------------------------------------------------ talking to the server */
+async function send(text, speculative){
+  const key = norm(text);
+  const now = Date.now();
+  if(key.length < 2) return;
+  // This exists ONLY to stop a speculative fragment and the identical final that
+  // supersedes it (she paused and said nothing more) from double-firing the same
+  // side effect - it must never become "ignore this phrase for the rest of the
+  // session" (that swallowed every repeated "no", every second "cancel"). One-shot
+  // and consumed immediately, so a genuine repeat seconds (or moments) later is never
+  // blocked: only the specific pairing this instance just answered is skipped, once.
+  if(key === lastHandledKey && (now - lastHandledAt) < 4000){
+    lastHandledKey = null;
+    return;
+  }
+  if(speculative){
+    if(busy) return;                      // a request is already in flight; this guess is moot
+  } else if(specCtrl){
+    specCtrl.abort(); specCtrl = null;    // the final supersedes any speculative guess still in flight
+  }
+  busy = true;
+  let painted = false;
+  const ctrl = speculative ? new AbortController() : null;
+  if(speculative) specCtrl = ctrl;
+  if(!speculative) setState("thinking","think");
+  let errored = false, aborted = false;
+  try{
+    const res = await fetch("/api/utterance",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({text, speak:true, speculative:!!speculative}),
+      signal: ctrl ? ctrl.signal : undefined});
+    const d = await res.json();
+    dev(text,d,speculative);
+    if(d.did && !["ignored","waiting","empty","error"].includes(d.did)){
+      lastHandledKey = key; lastHandledAt = now;
+      // Speculative guesses are not turns: they are never spoken and never acted on,
+      // so putting them in the transcript would show the user words nobody said.
+      if(!speculative) threadAdd(text, d.say || "");
+      render(d); painted = true;
+    }
+  }catch(e){
+    if(e && e.name === "AbortError"){ aborted = true; }
+    else{
+      // All speech in this product is server-side mac.say; when the server itself
+      // cannot be reached there is otherwise zero audio output and only a red DOM
+      // string a non-reading user cannot use. The browser must own a fallback voice.
+      errored = true;
+      $("err").textContent = String(e);
+      localSpeak(t("neterr"));
+      clearTimeout(stateTimer); clearTimeout(cardTimer);
+      setState("error","neterr");
+    }
+  }
+  finally{
+    if(speculative && specCtrl === ctrl) specCtrl = null;
+    busy = false;
+    if(!errored && !aborted) paintReady();
+    // The mic closed mid-flight and goIdle() left the spinner up rather than painting
+    // over it. Settle what it deferred — but only when nothing else painted a state,
+    // or this would wipe the card that just arrived.
+    if(idleDeferred){
+      idleDeferred = false;
+      if(!painted && !errored && !aborted && !armed){
+        setState("idle", MODE === "wake" ? "wake" : "idle");
+      }
+    }
+    $("heard").classList.add("fade");
+  }
+}
+
+// The countdown card's cancel button - the same "cancel" word the card already tells
+// her to say, just also pressable, in case the mic did not catch it (or was not open).
+function cancelSend(){
+  clearTimeout(cardTimer); clearTimeout(stateTimer);
+  const word = {he:"ביטול", ar:"إلغاء", ru:"отмена", en:"cancel"}[LANG] || "cancel";
+  send(word, false);
+}
+
+function card(show){
+  $("card").classList.toggle("show", !!show);
+  document.body.classList.toggle("hascard", !!show);
+  // if the window is short, trim the poster rather than letting the card fall off
+  requestAnimationFrame(()=>{
+    const c = $("card");
+    c.classList.toggle("compact", c.getBoundingClientRect().bottom > innerHeight - 12);
+  });
+}
+
+let cardTimer = null, stateTimer = null;
+const esc = t => String(t==null?"":t).replace(/[&<>"]/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function render(d){
+  // a previous countdown must not rewrite the card that replaced it
+  clearTimeout(cardTimer); clearTimeout(stateTimer);
+  const _T = $("cardT");
+  _T.style.fontSize = ""; _T.style.fontWeight = ""; _T.style.lineHeight = "";
+  _T.style.webkitLineClamp = "";
+  $("reply").textContent = d.say || "";
+  const det = (d.detail && typeof d.detail === "object") ? d.detail : null;
+  const T=$("cardT"), M=$("cardM"), X=$("cardExtra"), IM=$("thumb");
+  X.innerHTML=""; IM.classList.remove("on"); IM.removeAttribute("src");
+  $("card").classList.remove("warn", "pay");
+
+  if(d.did === "playing" && det){
+    // Videos open in a real browser tab, which the server does for us. This page just
+    // shows what is playing: the thumbnail and the title, so someone who IS looking
+    // can see the right thing was found.
+    if(det.thumb){ IM.src = det.thumb; IM.classList.add("on"); }
+    T.textContent = det.title || "";
+    M.textContent = [det.length, det.views].filter(Boolean).join("  ·  ");
+    setState("acting","acting"); card(true);
+    stateTimer = setTimeout(paintReady, 2200);
+
+  } else if(d.did === "sending" && det){
+    const name = det.display || det.to || "";
+    // Hebrew and Arabic glue a bound one-letter preposition onto the next word; against
+    // a name that does not itself start with a Hebrew/Arabic letter that reads as one
+    // unreadable token ("שולחת לDavid"), so a maqaf goes in between instead.
+    const joiner = (LANG === "he" || LANG === "ar") && name && !/^[\u0590-\u05FF\u0600-\u06FF]/.test(name)
+      ? "-" : t("joiner");
+    T.textContent = t("sending") + joiner + name;
+    M.textContent = det.text || "";
+    const secs = det.countdown || 6;
+    X.innerHTML = '<div class="bar"><i id="bar"></i></div>'
+                + `<div class="cancel">${t("say")}</div>`
+                + `<button type="button" class="cancelbtn" id="cancelBtn">${t("cancelBtn")}</button>`;
+    setState("acting","acting"); card(true);
+    requestAnimationFrame(()=>{
+      const b = $("bar");
+      if(b){ b.style.transitionDuration = secs+"s"; b.style.transform = "scaleX(0)"; }
+    });
+    const cb = $("cancelBtn");
+    if(cb) cb.addEventListener("click", e=>{ e.stopPropagation(); cancelSend(); });
+    cardTimer = setTimeout(()=>{
+      // The true outcome (sent vs. failed) is decided and spoken by the server later
+      // (_fire_pending -> mac.say) on a channel this page cannot read at all. Claiming
+      // "sent" here regardless of what actually happened is exactly the "success line
+      // spoken after a possible failure" this product must never produce, so the card
+      // goes neutral and the spoken line stays the only source of truth.
+      card(false);
+      paintReady();
+    }, secs*1000);
+    // The countdown names a spoken escape hatch ("say cancel"), but push/wake mode
+    // had already closed the microphone 400ms after she finished the sentence that
+    // started this send - the escape hatch was asserted on screen with no mic open to
+    // hear it. Reopen it for exactly the countdown's length.
+    if(MODE !== "always") listen(true, secs*1000);
+
+  } else if(d.did === "answered"){
+    // She asked a question. The answer IS the content, so give it the big type.
+    T.textContent = d.say || "";
+    T.style.fontSize = "26px"; T.style.fontWeight = "400"; T.style.lineHeight = "1.42";
+    T.style.webkitLineClamp = "unset";
+    M.textContent = "";
+    $("reply").textContent = "";
+    setState("acting","acting"); card(true);
+    stateTimer = setTimeout(paintReady, 2400);
+
+  } else if((d.did === "read_messages" || d.did === "read_notes") && det){
+    T.textContent = ""; T.style.webkitLineClamp = "unset";
+    M.innerHTML = ((det.messages||det.notes)||[]).map(m =>
+      `<div class="msg"><b>${esc(m.who)}</b><span>${esc(m.text)}</span></div>`).join("");
+    $("reply").textContent = "";
+    setState("acting","acting"); card(true);
+    stateTimer = setTimeout(paintReady, 2400);
+
+  } else if(d.did === "timer_set" && det){
+    T.textContent = t("timerPrefix") + det.minutes + t("timerSuffix");
+    M.textContent = det.text || "";
+    setState("acting","acting"); card(true);
+    stateTimer = setTimeout(paintReady, 2400);
+
+  } else if(d.did === "emergency" || d.did === "checking_on_her"){
+    T.textContent = d.say || ""; T.style.fontSize = "24px"; T.style.webkitLineClamp = "unset";
+    M.textContent = "";
+    card(true);
+
+  } else if(d.did && d.did.startsWith("web_") && d.did !== "web_needs_payment" && det){
+    T.textContent = det.page || det.task || "";
+    M.innerHTML = (det.steps||[]).slice(-4).map(x => `<div class="step">${esc(x)}</div>`).join("");
+    setState("acting","acting"); card(true);
+    stateTimer = setTimeout(paintReady, 2600);
+
+  } else if(d.did === "did_several" && det){
+    T.textContent = t("allDone");
+    T.style.webkitLineClamp = "2";
+    M.innerHTML = (det.results||[]).map(r =>
+      `<div class="step">${esc(r.step)}</div>`).join("");
+    setState("acting","acting"); card(true);
+    stateTimer = setTimeout(paintReady, 2600);
+
+  } else if(d.did === "louder" || d.did === "quieter"){
+    // No card: she is watching something. A HUD over the video is the right weight,
+    // and the spoken line already confirms it.
+    if(det && typeof det.level === "number") showVolume(det.level);
+    else showVolume(volShown + (d.did === "louder" ? 18 : -18));
+    card(false);
+
+  } else if(d.did === "web_needs_payment" || d.did === "needs_payment"){
+    // The end of a booking: everything is filled in and the money is hers to approve.
+    // This is the moment the whole browser feature exists for, so it gets the clearest
+    // card on the screen and it does not time out from under her.
+    T.textContent = d.say || "";
+    T.style.fontSize = "19px"; T.style.fontWeight = "500"; T.style.lineHeight = "1.4";
+    M.textContent = (det && (det.waiting_on || det.page)) || "";
+    card(true); document.getElementById("card").classList.add("pay");
+    clearTimeout(cardTimer);
+
+  } else if(d.did === "too_late" || d.did === "emergency_cancelled"
+            || d.did === "call_failed"){
+    // Things she may need to check or act on: a message that went out a moment before
+    // she said stop, a call she just called off, a call that did not connect. The
+    // spoken line is the answer, but these are the ones worth leaving on the screen.
+    T.textContent = d.say || "";
+    T.style.fontSize = "19px"; T.style.fontWeight = "400"; T.style.lineHeight = "1.4";
+    M.textContent = (det && (det.was_calling || det.to)) || "";
+    card(true);
+    if(d.did !== "emergency_cancelled") document.getElementById("card").classList.add("warn");
+    cardTimer = setTimeout(()=>card(false), 9000);
+
+  } else if(d.did === "emergency_contact_set"){
+    // Who she will be calling for is worth showing back, because getting it wrong is
+    // the difference between reaching her son and reaching a work colleague.
+    T.textContent = d.say || "";
+    T.style.fontSize = "19px"; T.style.fontWeight = "500";
+    M.textContent = (det && det.emergency_contact) || "";
+    card(true); document.getElementById("card").classList.add("pay");
+    cardTimer = setTimeout(()=>card(false), 7000);
+
+  } else if(d.did === "send_disabled" || d.did === "call_disabled"){
+    // Important enough that it must not read as an ordinary grey aside: the whole point
+    // is that she should NOT believe the message went out.
+    T.textContent = d.say || "";
+    T.style.fontSize = "19px"; T.style.fontWeight = "400"; T.style.lineHeight = "1.4";
+    M.textContent = det && det.text ? det.text : "";
+    card(true); document.getElementById("card").classList.add("warn");
+    cardTimer = setTimeout(()=>card(false), 9000);
+
+  } else if(d.did === "cancelled"){
+    T.textContent = t("cancelled"); M.textContent = ""; card(true);
+    cardTimer = setTimeout(()=>card(false), 2600);
+
+  } else if(["need_who","need_what","asked_back"].includes(d.did)){
+    card(false);
+  } else {
+    card(false);
+  }
+
+  // The spoken line and the card headline are often the same sentence, and seeing it
+  // twice on one screen reads as a stutter. The card is the richer of the two, so
+  // when they agree the loose line goes.
+  const rep = $("reply");
+  if(document.body.classList.contains("hascard")
+     && rep.textContent.trim()
+     && rep.textContent.trim() === $("cardT").textContent.trim()){
+    rep.textContent = "";
+  }
+}
+
+
+/* ------------------------------------------------ the volume HUD */
+const MUTED_PATH = "M4 9v6h4l5 5V4L8 9H4zm15.5 3l2.5-2.5-1-1L18.5 11 16 8.5l-1 1 2.5 2.5L15 14.5l1 1 2.5-2.5 2.5 2.5 1-1L19.5 12z";
+const LOUD_PATH  = "M4 9v6h4l5 5V4L8 9H4zm11.5 3a4 4 0 00-2-3.5v7A4 4 0 0015.5 12zm-2-7.7v2.1a5.8 5.8 0 010 11.2v2.1a7.9 7.9 0 000-15.4z";
+let volTimer = null, volShown = 50;
+
+function showVolume(level){
+  volShown = Math.max(0, Math.min(100, level));
+  $("volfill").style.width = volShown + "%";
+  $("volicon").firstElementChild.setAttribute(
+    "d", volShown === 0 ? MUTED_PATH : LOUD_PATH);
+  const v = $("vol");
+  v.classList.add("on");
+  clearTimeout(volTimer);
+  volTimer = setTimeout(()=>v.classList.remove("on"), 1700);
+}
+
+/* ------------------------------------------------ the player */
+/* ------------------------------------------------ mic level -> the ring */
+let audioCtx=null, analyser=null, levelData=null;
+async function meter(stream){
+  try{
+    audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+    const src = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512; analyser.smoothingTimeConstant = .82;
+    src.connect(analyser);
+    levelData = new Uint8Array(analyser.frequencyBinCount);
+    const ring = $("ring");
+    (function tick(){
+      requestAnimationFrame(tick);
+      if(!analyser) return;
+      analyser.getByteFrequencyData(levelData);
+      let sum=0; for(let i=0;i<40;i++) sum += levelData[i];
+      const lvl = Math.min(1, (sum/40)/95);
+      ring.style.transform = `scale(${1 + lvl*0.26})`;
+      ring.style.opacity = String(0.35 + lvl*0.65);
+    })();
+  }catch(_){}
+}
+
+/* ------------------------------------------------ speech */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec=null, interimTimer=null, lastFrag="", armed=false, stopTimer=null, MODE="push";
+let stopping=false, lastPoke=0;
+
+function stripWake(text){
+  const words = (CFG.wake_words||[]).slice().sort((a,b)=>b.length-a.length);
+  let t = text, hit = false;
+  for(const w of words){
+    const i = t.toLowerCase().indexOf(String(w).toLowerCase());
+    if(i !== -1){ hit = true; t = (t.slice(0,i) + " " + t.slice(i+String(w).length)).trim(); break; }
+  }
+  return {hit, rest:t};
+}
+
+function goIdle(){
+  armed = false;
+  unduck();
+  // A card's own countdown, or a stale "she's still listening" paint, must never be
+  // able to overwrite idle after the mic actually closes.
+  clearTimeout(stopTimer); clearTimeout(interimTimer);
+  clearTimeout(stateTimer); clearTimeout(cardTimer);
+  if(MODE === "push"){
+    stopping = true;                       // tell onend this stop was deliberate
+    try{ rec && rec.stop(); }catch(_){}
+    setTimeout(()=>{ stopping = false; }, 350);
+  }
+  // Closing the microphone is not the same as having nothing left to do. Both voice
+  // paths close it on a 300-400ms timer the moment she stops talking, while the
+  // request she just made is still in flight — that is the normal case, not an edge
+  // case. Painting idle here wiped the "thinking" ring, so roughly 90% of every wait
+  // showed "touch to speak" with no sign the machine was working (measured: thinking
+  // at 0.00s, idle at 0.31s, answer at 2.96s). paintReady() already refuses to paint
+  // "listening" after the mic closed; this is the same rule pointed the other way.
+  if(busy){ idleDeferred = true; return; }
+  idleDeferred = false;
+  setState("idle", MODE === "wake" ? "wake" : "idle");
+}
+
+// keepUI lets a caller (the send countdown) reopen the mic without resetting the card
+// or heard-text it is showing; holdMs overrides how long the mic stays open before
+// goIdle closes it again (default: the configured listen window).
+/* A song MicMic started plays out of the speakers into this microphone. Chrome only
+   finalises a sentence on silence and a song is never silent, so her words showed up
+   as they came, never finished, and the window expired with nothing sent. The
+   embedded player used to pause itself here; a browser tab cannot be paused from a
+   page, so the server lowers the volume for as long as the microphone is open. */
+let ducked = false, pendingInterim = "";
+function duck(){
+  if(ducked) return; ducked = true;
+  fetch("/api/duck", {method:"POST", body:"{}"}).catch(()=>{});
+}
+function unduck(){
+  if(!ducked) return; ducked = false;
+  fetch("/api/unduck", {method:"POST", body:"{}"}).catch(()=>{});
+}
+
+/* The window ran out with her words still on screen as unfinished text. Dropping them
+   is what "nothing happened" looked like. Send what was heard: the server's own
+   is_complete check decides whether it is enough, and answers "I only caught part of
+   that" when it is not, which is at least an answer. */
+function listenTimedOut(){
+  const text = (pendingInterim || "").trim();
+  pendingInterim = "";
+  if(text && armed){
+    $("heard").textContent = text;
+    send(text, false);
+  }
+  goIdle();
+}
+
+function listen(keepUI, holdMs){
+  if(!rec) return;
+  armed = true; lastFrag = ""; pendingInterim = "";
+  if(!keepUI){
+    $("heard").textContent = ""; $("heard").classList.remove("fade");
+    // The previous answer too. Left in place, her new words streamed in right on top
+    // of it and the screen showed two turns at once.
+    $("reply").textContent = "";
+    $("err").textContent = "";
+    card(false);
+    setState("listening","ready");
+  }
+  if(MODE === "push"){
+    try{ rec.start(); }catch(_){}
+    duck();
+    clearTimeout(stopTimer);
+    stopTimer = setTimeout(listenTimedOut, holdMs || (CFG.listen_seconds || 12) * 1000);
+  }
+  if(audioCtx?.state === "suspended") audioCtx.resume();
+}
+
+function start(){
+  // In the app's panel the microphone belongs to the native listener. Returning here
+  // leaves rec null, which is the same state the page is in before anyone clicks, so
+  // every listen()/goIdle() path below already handles it.
+  // The bar is in the same position for the same reason: the listener hears her.
+  if(PANEL || BAR) return;
+  if(!SR){ $("err").textContent = "Chrome is needed for the microphone."; return; }
+  rec = new SR();
+  rec.lang = CFG.language_hint || "he-IL";
+  rec.continuous = true;   // never let Chrome end the session on its own
+  rec.interimResults = true;
+  rec.maxAlternatives = 1;
+
+  rec.onstart = ()=>{ $("err").textContent=""; };
+  rec.onerror = e =>{
+    if(e.error === "not-allowed"){
+      $("err").textContent = t("mic");
+      armed = false; stopping = true;      // do not keep retrying into a denied mic
+      setState("idle","idle");
+    } else if(e.error !== "no-speech" && e.error !== "aborted"){
+      $("err").textContent = "mic: "+e.error;
+    }
+  };
+  rec.onend = ()=>{
+    // Chrome ends a session on its own after a silence. In push mode that used to drop
+    // her straight back to idle, which looked like the orb flickering. Restart quietly
+    // and stay armed until she speaks or the timer runs out.
+    if(MODE === "push"){
+      if(armed && !stopping){ try{ rec.start(); }catch(_){} }
+      return;
+    }
+    try{ rec.start(); }catch(_){ setTimeout(()=>{try{rec.start()}catch(_){}} ,400); }
+  };
+
+  rec.onresult = ev=>{
+    let interim="", final="";
+    for(let i=ev.resultIndex;i<ev.results.length;i++){
+      const r = ev.results[i];
+      if(r.isFinal) final += r[0].transcript; else interim += r[0].transcript;
+    }
+
+    // A video's own dialogue must never be able to trigger MicMic - not just wake
+    if(MODE === "wake"){
+      const src = (final || interim).trim();
+      if(!src) return;
+      if(!armed){
+        const {hit, rest} = stripWake(src);
+        if(!hit) return;                       // not addressed to us: stay quiet
+        armed = true;
+        setState("listening","ready");
+        clearTimeout(stopTimer);
+        stopTimer = setTimeout(goIdle, (CFG.listen_seconds || 12) * 1000);
+        if(rest.split(/\s+/).filter(Boolean).length >= 2 && final){
+          $("heard").textContent = rest; send(rest, false); armed = false;
+          clearTimeout(stopTimer); setTimeout(goIdle, 300);
+        }
+        return;
+      }
+    }
+
+    if(MODE === "push" && !armed) return;
+
+    if(interim){
+      pendingInterim = interim;
+      $("heard").textContent = interim;
+      $("heard").classList.remove("fade");
+      clearTimeout(interimTimer);
+      const frag = interim.trim();
+      // Fire early on a pause, so the action starts before she finishes the sentence.
+      // Jev's is_complete question is what makes that safe.
+      if(frag.split(/\s+/).length >= 4 && frag !== lastFrag){
+        interimTimer = setTimeout(()=>{ lastFrag = frag; send(frag, true); }, 700);
+      }
+    }
+    if(final){
+      clearTimeout(interimTimer);
+      pendingInterim = "";
+      const text = final.trim();
+      $("heard").textContent = text;
+      $("heard").classList.remove("fade");
+      send(text, false);
+      if(MODE !== "always"){ armed = false; clearTimeout(stopTimer); setTimeout(goIdle, 400); }
+    }
+  };
+
+  if(MODE === "push"){ goIdle(); }
+  else { try{ rec.start(); }catch(_){}
+         setState(MODE === "wake" ? "idle" : "listening", MODE === "wake" ? "wake" : "ready"); }
+  navigator.mediaDevices?.getUserMedia({audio:true}).then(meter).catch(()=>{});
+}
+
+/* ------------------------------------------------ dev panel */
+function dev(text,d,spec){
+  if(!devOn) return;
+  const u = d.understanding || {};
+  const f = (k,v,good)=> `<b>${k}</b> <span class="${good===undefined?'':good?'ok':'no'}">${v}</span>`;
+  const rows = [
+    `${spec?"[speculative] ":""}"${text}"`,
+    `${f("did",d.did)}   ${f("ms",d.ms??"?")}   ${f("calls",d.jev_calls??"?")}   $${d.cost_usd??0}`,
+    u.intent ? f("intent", `${u.intent} @${(u.intent_confidence||0).toFixed(2)}`, (u.intent_confidence||0)>0.55) : "",
+    u.language ? `${f("lang",u.language)}  ${f("complete",(u.is_complete||0).toFixed(2),(u.is_complete||0)>0.35)}  ${f("noise",(u.noise||0).toFixed(2),(u.noise||0)<0.6)}` : "",
+    u.media_kind && u.media_kind!=="not_applicable" ? f("media", `${u.media_kind} full=${(u.wants_full_length||0).toFixed(2)}`) : "",
+    (u.contact && u.contact!=="nobody") ? f("contact", `${u.contact} @${(u.contact_confidence||0).toFixed(2)}`) : "",
+    (u.distress>1) ? f("DISTRESS", u.distress.toFixed(2), false) : "",
+    d.detail ? JSON.stringify(d.detail,null,1) : "",
+  ].filter(Boolean).join("\n");
+  $("dev").innerHTML = `<pre>${rows}</pre>` + $("dev").innerHTML.slice(0, 5000);
+}
+
+addEventListener("keydown", e=>{
+  if(BAR) return;                          // the bar has its own, much smaller, key map
+  if(e.target && (e.target.id === "typebox" || e.target.id === "wordsBox")) return;
+  if($("settings").classList.contains("on")) return;
+  if(e.key==="d"||e.key==="D"){ devOn=!devOn; $("dev").classList.toggle("show",devOn); }
+});
+function poke(){
+  // A click anywhere in the bar is a click on its Undo button or nothing; it must never
+  // arm a microphone or post "listen" into a handler the bar window does not have.
+  if(BAR) return;
+  const now = performance.now();
+  if(now - lastPoke < 350) return;         // one press, one toggle
+  lastPoke = now;
+  // In the app's own window this page has no microphone (the listener owns it), so a
+  // click here used to reach start(), which returns at once in panel mode, and nothing
+  // happened at all. Hand the press to the listener instead.
+  if(PANEL){
+    try{ window.webkit.messageHandlers.micmic.postMessage("listen"); }catch(_){}
+    return;
+  }
+  if(!rec){ start(); return; }
+  if(MODE === "push"){ armed ? goIdle() : listen(); }
+  else if(audioCtx?.state === "suspended") audioCtx.resume();
+}
+// ---- typing, and starting again -------------------------------------------
+// Voice is the point, but someone in an office, on a call, or next to a sleeping
+// child cannot say it out loud — and an address or a product code is faster typed.
+$("typebox").placeholder = "";
+function showTyping(on){
+  $("typerow").classList.toggle("on", on);
+  if(on) $("typebox").focus();
+}
+$("typerow").addEventListener("submit", e=>{
+  e.preventDefault();
+  const text = $("typebox").value.trim();
+  if(!text) return;
+  $("typebox").value = "";
+  $("heard").textContent = text;
+  $("heard").classList.remove("fade");
+  send(text);                     // exactly the path the microphone uses
+});
+// Clicking the typing row must not be read as a press on the orb.
+$("typerow").addEventListener("click", e=>e.stopPropagation());
+
+$("newchat").addEventListener("click", e=>{
+  e.stopPropagation();
+  fetch("/api/new_conversation",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:"{}"}).catch(()=>{});
+  // Clear what is on screen too, or the last conversation is still sitting there
+  // looking like part of this one.
+  card(false); goIdle();
+  threadClear();
+  $("heard").textContent = ""; $("reply").textContent = ""; $("err").textContent = "";
+  $("typebox").value = "";
+  setState("idle","fresh");
+  clearTimeout(stateTimer);
+  stateTimer = setTimeout(paintReady, 1800);
+});
+
+$("orb").addEventListener("click", e=>{ e.stopPropagation(); poke(); });
+addEventListener("click", poke);
+addEventListener("keydown", e=>{
+  // In the bar, Enter and Space belong to the focused Undo button; this handler's
+  // preventDefault() would swallow them. Escape there means "go away", handled below.
+  if(BAR) return;
+  // Space, Enter and Escape drive the microphone. While Settings is open they belong
+  // to the sheet — Space in particular would otherwise open the mic behind it.
+  if($("settings").classList.contains("on")) return;
+  // Typing in the box must never be read as commands to the page.
+  if(e.target && e.target.id === "typebox"){
+    if(e.key === "Escape"){ e.target.blur(); }
+    return;
+  }
+  if(e.key === " " || e.key === "Enter"){ e.preventDefault(); poke(); }
+  if(e.key === "Escape"){ goIdle(); }
+});
+
+
+// ---- the visible thread ----------------------------------------------------
+// One turn is appended per answered request, from the single place a request is
+// answered, so the transcript cannot drift from what actually happened. It holds
+// only what is already on screen — no new state, nothing the server has to send.
+const THREAD = [];
+const THREAD_KEEP = 40;
+
+function threadAdd(asked, answered){
+  if(!asked && !answered) return;
+  THREAD.push({asked, answered});
+  while(THREAD.length > THREAD_KEEP) THREAD.shift();
+  paintThread();
+}
+
+function paintThread(){
+  const box = $("thread");
+  box.innerHTML = "";
+  // The newest turn is the big one at the bottom of the stage, so the thread shows
+  // everything before it. One turn in means nothing to look back at yet.
+  const past = THREAD.slice(0, -1);
+  document.body.classList.toggle("hasthread", past.length > 0);
+  for(const turn of past){
+    const el = document.createElement("div");
+    el.className = "turn";
+    if(turn.asked){
+      const who = document.createElement("div"); who.className = "who";
+      who.textContent = t("youSaid"); el.appendChild(who);
+      const said = document.createElement("div"); said.className = "said";
+      said.textContent = turn.asked; el.appendChild(said);
+    }
+    if(turn.answered){
+      const said = document.createElement("div"); said.className = "said back";
+      said.textContent = turn.answered; el.appendChild(said);
+    }
+    box.appendChild(el);
+  }
+  box.scrollTop = box.scrollHeight;
+  box.classList.toggle("over", box.scrollHeight > box.clientHeight + 1);
+}
+
+function threadClear(){ THREAD.length = 0; paintThread(); }
+
+// ---- language --------------------------------------------------------------
+// Every string on screen comes from t(), so switching is a matter of re-running
+// the handful of places that wrote text once at startup. Doing that in ONE
+// function is the point: a second place that paints copy is a second place to
+// forget when a language is added.
+const LANGS = [
+  {code:"he", name:"עברית",    tag:"HE", speech:"he-IL"},
+  {code:"en", name:"English",  tag:"EN", speech:"en-US"},
+  {code:"ar", name:"العربية",  tag:"AR", speech:"ar-SA"},
+  {code:"ru", name:"Русский",  tag:"RU", speech:"ru-RU"},
+];
+const RTL = new Set(["he","ar"]);
+
+function applyLanguage(code, {remember=true}={}){
+  const pick = LANGS.find(l => l.code === code) || LANGS[0];
+  LANG = pick.code;
+  if(remember){ try{ localStorage.setItem("micmic.lang", LANG); }catch(_){} }
+
+  document.documentElement.lang = LANG;
+  const rtl = RTL.has(LANG);
+  document.documentElement.dir = rtl ? "rtl" : "ltr";
+  document.documentElement.style.setProperty("--menu-origin", rtl ? "left" : "right");
+
+  // Dictation has to follow, or she switches to English and the microphone keeps
+  // transcribing Hebrew phonemes into nonsense.
+  CFG.language_hint = pick.speech;
+  if(rec) try{ rec.lang = pick.speech; }catch(_){}
+
+  $("langnow").textContent = pick.tag;
+  $("typebox").placeholder = t("typehere");
+  $("newchatw").textContent = t("newchat");
+  paintSettingsCopy();
+  $("foot").textContent = MODE === "wake" ? t("footWake")
+                        : MODE === "always" ? t("footAlways") : t("foot");
+  // Replay the word that is actually showing, in the new language. setState()
+  // remembers the key, so this cannot drift from what the user is looking at.
+  if(STATE_KEY) $("state").textContent = t(STATE_KEY);
+  paintThread();
+  paintBarCopy();
+  if(window.onboardingLanguage) window.onboardingLanguage();
+
+  for(const b of $("langmenu").children){
+    b.setAttribute("aria-checked", b.dataset.code === LANG ? "true" : "false");
+  }
+}
+
+
+/* ---------------------------------------------------------------- settings
+   Everything here is about how MicMic starts listening, which is the only thing
+   people actually want to change. It writes to /api/settings, which validates and
+   stores them outside the app bundle (a signed .app cannot write to itself), and the
+   listener picks the change up on its next health poll — no restart, no relaunch. */
+let recordingHotkey = false, pendingTap = null;
+// Browser key codes for the right-hand modifiers, and the spec each one saves as.
+// Must match TAP_KEYS in native/listener.py and the validator in savta/server.py.
+const TAP_CODES = {MetaRight:"right-command", AltRight:"right-option",
+                   ControlRight:"right-control", ShiftRight:"right-shift"};
+
+function paintSettingsCopy(){
+  if(!$("sTitle")) return;
+  $("sTitle").textContent   = t("settings");
+  $("lHotkey").textContent  = t("sHotkey");
+  $("hHotkey").textContent  = t("sHotkeyHint");
+  $("lStart").textContent   = t("sStart");
+  $("wPush").textContent    = t("sPush");
+  $("lDisplay").textContent   = t("sDisplay");
+  $("lSend").textContent      = t("sSend");
+  $("wSendOn").textContent    = t("sOn");
+  $("wSendOff").textContent   = t("sOff");
+  $("hSend").textContent      = t("hSend");
+  $("wDispPanel").textContent = t("sDispPanel");
+  $("wDispBar").textContent   = t("sDispBar");
+  $("wDispNone").textContent  = t("sDispNone");
+  $("hDisplay").textContent   = t("hDisplay");
+  $("wWake").textContent    = t("sWake");
+  $("wAlways").textContent  = t("sAlways");
+  $("lWords").textContent   = t("sWords");
+  $("lLang").textContent    = t("sLang");
+  $("lListen").textContent  = t("sListen");
+  $("lSeconds").textContent = t("sSeconds");
+  $("savedw").textContent   = t("sSaved");
+  $("sdone").textContent    = t("sDone");
+  $("wRightCmd").textContent = t("sRightCmd");
+  $("wRightOpt").textContent = t("sRightOpt");
+  $("wFnTwice").textContent  = t("sFnTwice");
+  paintAccount();
+  if(!recordingHotkey) paintHotkey(SETTINGS.hotkey || "fn-fn");
+}
+
+let SETTINGS = {};
+
+/* ---------------------------------------------------------------- account
+   The plan, today's usage and the way to Pro, from /api/account (which never carries
+   the device token). Refreshed when the sheet opens, and again, uncached, when the
+   window comes back into focus after she was sent to checkout or the billing portal. */
+const acct = k => document.querySelector(`[data-acct="${k}"]`);
+let ACCOUNT = null, acctNote = "", acctAway = false;
+const ACCT_ERR = {payments_unavailable:"aPayOff", could_not_open:"aOpenFail",
+                  offline:"aOffline", too_many_devices:"aTooMany"};
+
+function paintAccount(){
+  if(!ACCOUNT) return;                       // nothing to show before the first load
+  if(!acct("row")){
+    const tpl = acct("tpl");
+    if(!tpl) return;
+    tpl.after(tpl.content.cloneNode(true));
+    acct("action").addEventListener("click", e=>{ e.stopPropagation(); accountAction(); });
+  }
+  acct("label").textContent = t("sAccount");
+  const a = ACCOUNT || {};
+  const live = a.mode === "proxy" && a.online;
+  let note = "";
+  if(a.mode === "own_key") note = t("aOwnKey");
+  else if(a.mode === "proxy" && !a.online) note = t("aOffline");
+  else if(a.mode === "none") note = t(a.error === "too_many_devices" ? "aTooMany"
+                                      : a.error ? "aOffline" : "aSetup");
+  else if(ACCOUNT && a.mode !== "proxy") note = t("aOffline");      // server unreachable
+  if(live && acctNote) note = t(acctNote);
+  acct("note").textContent = note;
+  acct("note").hidden = !note;
+
+  const pro = a.plan === "pro";
+  acct("badge").hidden = !live;
+  acct("badge").textContent = t(pro ? "aPro" : "aFree");
+  acct("badge").dataset.plan = pro ? "pro" : "free";
+
+  // Requests, the unit the landing page sells; older servers only send Jev calls,
+  // about three to a spoken request.
+  const u = live && a.usage && (a.usage.requests
+            || (a.usage.jev && {used: Math.ceil((a.usage.jev.used || 0) / 3),
+                                limit: Math.floor((a.usage.jev.limit || 0) / 3)}));
+  acct("usage").hidden = !u;
+  if(u){
+    const used = Number(u.used) || 0, lim = Number(u.limit) || 0;
+    acct("usetext").textContent = t(a.scope === "total" ? "aUsageTotal" : "aUsage")
+      .replace("{n}", used).replace("{m}", lim);
+    const pct = lim > 0 ? Math.min(100, used / lim * 100) : 0;
+    acct("bar").firstElementChild.style.width = pct + "%";
+    if(lim > 0 && used >= lim) acct("bar").dataset.full = ""; else delete acct("bar").dataset.full;
+  }
+  acct("action").hidden = !live;
+  acct("action").textContent = t(pro ? "aManage" : "aUpgrade");
+}
+
+async function loadAccount(fresh){
+  try{
+    ACCOUNT = await (await fetch("/api/account" + (fresh ? "?fresh=1" : ""))).json();
+  }catch(_){ ACCOUNT = {mode:"unreachable", online:false}; }
+  paintAccount();
+}
+
+async function accountAction(){
+  const btn = acct("action");
+  const which = (ACCOUNT && ACCOUNT.plan === "pro") ? "manage" : "upgrade";
+  btn.disabled = true;
+  acctNote = "";
+  try{
+    const d = await (await fetch("/api/" + which, {method:"POST",
+      headers:{"Content-Type":"application/json"}, body:"{}"})).json();
+    if(d.ok) acctAway = true;
+    else if(d.error === "already_pro" || d.error === "no_subscription") await loadAccount(true);
+    else acctNote = ACCT_ERR[d.error] || "aOpenFail";
+  }catch(_){ acctNote = "aOffline"; }
+  btn.disabled = false;
+  paintAccount();
+}
+// Back from the browser: the plan may have just changed, so skip the server's cache.
+window.addEventListener("focus", ()=>{
+  if(!$("settings").classList.contains("on") && !acctAway) return;
+  const fresh = acctAway;
+  acctAway = false;
+  loadAccount(fresh);
+});
+
+const TAP_LABEL = {"right-command":"sRightCmd", "right-option":"sRightOpt"};
+function paintHotkey(spec){
+  let label;
+  if(spec === "fn-fn" || !spec) label = t("sFn");
+  else if(TAP_LABEL[spec]) label = `${t(TAP_LABEL[spec])} · ${t("sTap")}`;
+  else if(spec === "right-control") label = `Right ⌃ · ${t("sTap")}`;
+  else if(spec === "right-shift")   label = `Right ⇧ · ${t("sTap")}`;
+  else label = spec.replace(/\+/g, " + ");
+  $("hotkeyw").textContent = label;
+  if($("segHotkey")) seg("segHotkey", spec || "fn-fn");
+}
+
+function seg(id, value){
+  for(const b of $(id).children){
+    b.setAttribute("aria-pressed", b.dataset.v === value ? "true" : "false");
+  }
+}
+
+function paintSettingsValues(){
+  seg("segStart", SETTINGS.activation || "push");
+  seg("segDisplay", SETTINGS.display || "bar");
+  seg("segSend", SETTINGS.allow_send === false ? "off" : "on");
+  seg("segLang", SETTINGS.language_hint || "he-IL");
+  const n = SETTINGS.listen_seconds || 12;
+  $("listenRange").value = n;
+  $("listenVal").textContent = n;
+  $("wordsBox").value = (SETTINGS.wake_words || []).join(", ");
+  // Wake words only mean anything when a wake word is what starts it.
+  $("rowWords").hidden = (SETTINGS.activation || "push") !== "wake";
+  paintHotkey(SETTINGS.hotkey || "fn-fn");
+}
+
+function flashSaved(){
+  $("savedw").classList.add("on");
+  clearTimeout(flashSaved._t);
+  flashSaved._t = setTimeout(()=>$("savedw").classList.remove("on"), 1400);
+}
+
+async function saveSettings(changes){
+  try{
+    const r = await fetch("/api/settings", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify(changes)});
+    const d = await r.json();
+    // Trust the server's echo, never the local guess: a value it rejected must not
+    // keep showing as if it had been accepted.
+    SETTINGS = d.settings || SETTINGS;
+    paintSettingsValues();
+    if((d.saved || []).length) flashSaved();
+    if((d.rejected || []).length) $("err").textContent = "could not save: " + d.rejected.join(", ");
+  }catch(e){ $("err").textContent = String(e); }
+}
+
+async function openSettings(){
+  try{
+    const d = await (await fetch("/api/config")).json();
+    SETTINGS = {activation: d.activation, language_hint: d.language_hint,
+                listen_seconds: d.listen_seconds, wake_words: d.wake_words,
+                hotkey: d.hotkey, display: d.display, allow_send: d.allow_send};
+  }catch(_){}
+  paintSettingsCopy();
+  paintSettingsValues();
+  $("settings").classList.add("on");
+  loadAccount(false);
+}
+function closeSettings(){
+  recordingHotkey = false;
+  $("hotkeybtn").classList.remove("recording");
+  $("settings").classList.remove("on");
+  paintHotkey(SETTINGS.hotkey || "fn-fn");
+}
+
+/* e.code, not e.key: Option+M on a Mac produces "µ", and a hotkey recorded from the
+   character rather than the physical key is one the listener can never match. */
+function specFromEvent(e){
+  const mods = [];
+  if(e.metaKey)  mods.push("cmd");
+  if(e.ctrlKey)  mods.push("ctrl");
+  if(e.altKey)   mods.push("alt");
+  if(e.shiftKey) mods.push("shift");
+  if(!mods.length) return null;              // a bare key would fire while typing
+  const m = /^Key([A-Z])$/.exec(e.code) || /^Digit([0-9])$/.exec(e.code);
+  if(!m) return null;
+  return mods.join("+") + "+" + m[1].toLowerCase();
+}
+
+$("gear").addEventListener("click", e=>{ e.stopPropagation(); openSettings(); });
+$("sdone").addEventListener("click", e=>{ e.stopPropagation(); closeSettings(); });
+$("settings").addEventListener("click", e=>{
+  e.stopPropagation();
+  if(e.target === $("settings")) closeSettings();       // the dark surround only
+});
+
+$("hotkeybtn").addEventListener("click", e=>{
+  e.stopPropagation();
+  recordingHotkey = true;
+  $("hotkeybtn").classList.add("recording");
+  $("hotkeyw").textContent = t("sPressNow");
+});
+
+$("segStart").addEventListener("click", e=>{
+  const b = e.target.closest("button"); if(!b) return;
+  e.stopPropagation();
+  SETTINGS.activation = b.dataset.v;
+  paintSettingsValues();
+  saveSettings({activation: b.dataset.v});
+});
+$("segSend").addEventListener("click", e=>{
+  const b = e.target.closest("button"); if(!b) return;
+  e.stopPropagation();
+  SETTINGS.allow_send = b.dataset.v === "on";
+  paintSettingsValues();
+  saveSettings({allow_send: SETTINGS.allow_send});
+});
+$("segDisplay").addEventListener("click", e=>{
+  const b = e.target.closest("button"); if(!b) return;
+  e.stopPropagation();
+  SETTINGS.display = b.dataset.v;
+  paintSettingsValues();
+  saveSettings({display: b.dataset.v});
+});
+$("segHotkey").addEventListener("click", e=>{
+  const b = e.target.closest("button"); if(!b) return;
+  e.stopPropagation();
+  recordingHotkey = false; $("hotkeybtn").classList.remove("recording");
+  saveSettings({hotkey: b.dataset.v});
+});
+$("segLang").addEventListener("click", e=>{
+  const b = e.target.closest("button"); if(!b) return;
+  e.stopPropagation();
+  saveSettings({language_hint: b.dataset.v});
+});
+$("listenRange").addEventListener("input", e=>{
+  $("listenVal").textContent = e.target.value;
+});
+$("listenRange").addEventListener("change", e=>{
+  saveSettings({listen_seconds: Number(e.target.value)});
+});
+$("wordsBox").addEventListener("change", e=>{
+  const words = e.target.value.split(",").map(w=>w.trim()).filter(Boolean);
+  if(words.length) saveSettings({wake_words: words});
+});
+// Typing in the settings sheet must never reach the page's own key handling.
+$("settings").addEventListener("keydown", e=>e.stopPropagation());
+
+function buildLangMenu(){
+  const menu = $("langmenu");
+  menu.innerHTML = "";
+  for(const l of LANGS){
+    const b = document.createElement("button");
+    b.type = "button"; b.role = "option"; b.dataset.code = l.code;
+    b.setAttribute("aria-checked", l.code === LANG ? "true" : "false");
+    b.innerHTML = `<span>${l.name}</span>`
+      + `<svg class="tick" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg>`;
+    b.addEventListener("click", ()=>{ applyLanguage(l.code); closeLang(); });
+    menu.appendChild(b);
+  }
+}
+function openLang(){ $("lang").dataset.open = "1"; $("langbtn").setAttribute("aria-expanded","true"); }
+function closeLang(){ $("lang").dataset.open = "0"; $("langbtn").setAttribute("aria-expanded","false"); }
+
+$("langbtn").addEventListener("click", e=>{
+  e.stopPropagation();
+  $("lang").dataset.open === "1" ? closeLang() : openLang();
+});
+// A dropdown that only closes on its own button is a trap on a touch screen.
+document.addEventListener("click", e=>{ if(!$("lang").contains(e.target)) closeLang(); });
+// Capture phase, and before anything else can act on it: the whole point is to take
+// a combination the browser or the page would otherwise treat as a command.
+document.addEventListener("keydown", e=>{
+  if(!recordingHotkey) return;
+  if(e.key === "Escape"){
+    recordingHotkey = false;
+    $("hotkeybtn").classList.remove("recording");
+    paintHotkey(SETTINGS.hotkey || "fn-fn");
+    e.preventDefault(); e.stopPropagation();
+    return;
+  }
+  // Modifier keys arrive on their own while the combination is still being formed —
+  // or they ARE the hotkey: a right-hand one tapped alone, the way Handy uses Right
+  // Option. Remember it; the keyup below decides which it was.
+  if(["Meta","Control","Alt","Shift","CapsLock"].includes(e.key)){
+    pendingTap = TAP_CODES[e.code] ? e.code : null;
+    return;
+  }
+  pendingTap = null;                       // an ordinary key: this is a combination
+  const spec = specFromEvent(e);
+  e.preventDefault(); e.stopPropagation();
+  if(!spec){
+    // A bare letter would fire every time she typed it. Say so rather than silently
+    // ignoring the press, which reads as a broken button.
+    $("hotkeyw").textContent = t("sPressNow");
+    return;
+  }
+  recordingHotkey = false;
+  $("hotkeybtn").classList.remove("recording");
+  paintHotkey(spec);
+  saveSettings({hotkey: spec});
+}, true);
+
+// Released with nothing pressed in between: a lone tap, recorded as that key.
+document.addEventListener("keyup", e=>{
+  if(!recordingHotkey || !pendingTap || e.code !== pendingTap) return;
+  const spec = TAP_CODES[pendingTap];
+  pendingTap = null;
+  e.preventDefault(); e.stopPropagation();
+  recordingHotkey = false;
+  $("hotkeybtn").classList.remove("recording");
+  paintHotkey(spec);
+  saveSettings({hotkey: spec});
+}, true);
+
+document.addEventListener("keydown", e=>{ if(e.key === "Escape") closeLang(); }, true);
+
+(async ()=>{
+  try{
+    CFG = await (await fetch("/api/config")).json();
+    LANG = resolveLang(CFG.language_hint);
+    // /api/config does not send the stored profile gender yet - this stays "f" (the
+    // default MicMic already assumed everywhere) until it does; see the he_m table.
+    // The server sends the word the profile stores — "masculine" / "feminine" — not "m".
+  GENDER = (CFG.gender || "").startsWith("m") ? "m" : "f";
+    MODE = CFG.activation || "push";
+  }catch(_){
+    // The rest of the app still has usable defaults (Hebrew, push mode) on this
+    // failure, but she gets no indication anything went wrong and no voice at all -
+    // exactly the silent-failure this product must never allow.
+    $("err").textContent = t("neterr");
+    localSpeak(t("neterr"));
+  }
+  // A language the user picked by hand outranks the profile's hint — that choice
+  // is the whole reason the switcher exists, and it has to survive a reload.
+  let chosen = null;
+  try{ chosen = localStorage.getItem("micmic.lang"); }catch(_){}
+  buildLangMenu();
+  applyLanguage(LANGS.some(l => l.code === chosen) ? chosen : LANG, {remember:false});
+  // The bar has no typing box to focus, and by the time this fetch resolves native may
+  // already have painted "listening"; an idle painted over it here would wipe that.
+  if(!BAR){
+    showTyping(true);
+    setState("idle", MODE === "wake" ? "wake" : "idle");
+  }
+  start();
+  // A Mac nobody has been set up on: three short screens in the app's own window
+  // (web/onboarding/). Fetched only here, so every other launch pays nothing for it.
+  if(PANEL && CFG.first_run){
+    const ob = document.createElement("script");
+    ob.src = "/onboarding/onboarding.js";
+    document.head.appendChild(ob);
+  }
+})();
+
+/* ---------------------------------------------------------------- panel bridge
+   MicMic.app drives these from listener.py so the orb in its window shows what the
+   native listener is doing. Without them the panel would sit at "touch to speak"
+   while the wake word was busy — the exact blindness the window exists to remove. */
+if(PANEL){
+  document.body.classList.add("panel");
+  window.panelState = (state, text) => {
+    setState(["idle","listening","thinking","acting","error"].includes(state) ? state : "idle");
+    if(text) $("state").textContent = text;
+  };
+  window.panelHeard = t => {
+    $("heard").textContent = t || "";
+    $("heard").classList.remove("fade");
+    $("reply").textContent = "";
+  };
+  window.panelReply = t => { $("reply").textContent = t || ""; };
+}
+
+/* ---------------------------------------------------------------- bar bridge
+   native/bar.py drives these. The contract is deliberately small, because the listener
+   calls it from the middle of recognition: barState(state, text), barHeard(text) many
+   times a second, barResult(say, undoLabel). The page talks back through the
+   "micmicbar" message handler with "dismiss", "height:<px>" and "touch" (she did
+   something here, so do not fade out from under her). */
+function paintBarCopy(){
+  if(!BAR) return;
+  const u = $("undo");
+  if(!u.hidden && !u.disabled) $("undow").textContent = BAR_UNDO_LABEL || t("undo");
+}
+let BAR_UNDO_LABEL = null;
+if(BAR){
+  const root = document.documentElement;
+  root.classList.add("barmode");
+  const post = m => {
+    try{ window.webkit.messageHandlers.micmicbar.postMessage(m); }catch(_){}
+  };
+  const stage = document.querySelector(".stage");
+  let lastH = 0;
+  const report = () => {
+    const h = Math.ceil(stage.getBoundingClientRect().height);
+    if(h > 0 && h !== lastH){ lastH = h; post("height:" + h); }
+  };
+  new ResizeObserver(report).observe(stage);
+
+  const flags = () => {
+    root.classList.toggle("b-heard", !!$("heard").textContent);
+    root.classList.toggle("b-result", !!$("reply").textContent);
+  };
+  const clearTurn = () => {
+    if(typeof stopWork === "function") stopWork();
+    $("heard").textContent = ""; $("reply").textContent = "";
+    root.classList.remove("b-err", "b-undofail");
+    $("undo").hidden = true; $("undo").disabled = false;
+    BAR_UNDO_LABEL = null;
+  };
+
+  let WORK_T0 = 0, WORK_TIMER = null;
+  const paintWork = () => {
+    const sec = Math.round((Date.now() - WORK_T0) / 1000);
+    $("work").textContent = t("working") + (sec >= 3 ? ` · ${sec}s` : "");
+    $("work").dataset.long = sec >= 3 ? "1" : "";
+  };
+  const stopWork = () => { clearInterval(WORK_TIMER); WORK_TIMER = null; $("work").textContent = ""; };
+
+  window.barState = (state, text) => {
+    const s = ["idle","listening","thinking","acting","error"].includes(state) ? state : "idle";
+    if(s === "thinking"){
+      if(!WORK_TIMER){ WORK_T0 = Date.now(); paintWork(); WORK_TIMER = setInterval(paintWork, 500); }
+    } else stopWork();
+    // "listening" and "idle" begin a new turn (or end all of them). Whatever the last
+    // one said must not still be on screen while she says the next thing.
+    if(s === "listening" || s === "idle") clearTurn();
+    const key = {listening:"ready", thinking:"think", acting:"acting"}[s];
+    setState(s, key);
+    if(s === "idle"){ STATE_KEY = null; $("state").textContent = ""; }
+    if(text){ STATE_KEY = null; $("state").textContent = text; }
+    if(s === "error"){
+      // Broken must read as broken: the reason goes where the answer would have been,
+      // in the error colour, not as a quiet placeholder.
+      $("reply").textContent = text || t("neterr");
+      root.classList.add("b-err");
+      $("undo").hidden = true;
+    } else {
+      root.classList.remove("b-err");
+    }
+    flags();
+  };
+
+  window.barHeard = text => {
+    text = String(text || "");
+    if(text === $("heard").textContent) return;     // the recogniser repeats itself
+    // New words while an answer is up mean she has started the next request, so the
+    // orb goes back to listening too: "acting" from the last answer outlived it.
+    if($("reply").textContent){ clearTurn(); setState("listening", "ready"); }
+    $("heard").textContent = text;
+    flags();
+    // Measured once a frame, not once a call: the recogniser can call this hundreds
+    // of times a second and each measurement forces a layout.
+    if(!overPending){
+      overPending = true;
+      requestAnimationFrame(() => {
+        overPending = false;
+        const h = $("heard"), n = h.firstChild;
+        let over = false;
+        if(n){ const r = document.createRange(); r.selectNodeContents(h);
+               over = r.getBoundingClientRect().height > h.clientHeight + 1; }
+        h.classList.toggle("over", over);
+      });
+    }
+  };
+  let overPending = false;
+
+  window.barResult = (say, undoLabel) => {
+    stopWork();
+    $("reply").textContent = String(say || "");
+    root.classList.remove("b-err", "b-undofail");
+    const u = $("undo");
+    if(undoLabel === null || undoLabel === undefined){
+      BAR_UNDO_LABEL = null; u.hidden = true;
+    } else {
+      // An empty label still means "this can be undone"; it just gets the plain word.
+      BAR_UNDO_LABEL = String(undoLabel) || null;
+      u.disabled = false; u.hidden = false;
+      $("undow").textContent = BAR_UNDO_LABEL || t("undo");
+    }
+    setState("acting");
+    flags();
+  };
+
+  // Undo is the page's own job: native only shows the button. The server contract is
+  // POST /api/undo -> {undone, did, say}. Anything short of undone === true is shown
+  // as not done, because telling her something was reversed when it was not is worse
+  // than no Undo button at all.
+  async function barUndo(){
+    const u = $("undo");
+    if(u.hidden || u.disabled) return;
+    u.disabled = true;                       // one press, one undo
+    $("undow").textContent = t("undoing");
+    post("touch");
+    let line = "", ok = false, r = null;
+    try{
+      r = await fetch("/api/undo", {method:"POST",
+        headers:{"Content-Type":"application/json"}, body:"{}"});
+    }catch(_){
+      line = t("undoNet");                   // never reached the server at all
+    }
+    if(r){
+      if(r.status === 404) line = t("undoNone");
+      else if(!r.ok) line = t("undoFailed");
+      else{
+        // The server answered but not in the contract's shape: it may or may not have
+        // done something, and "couldn't undo" is the claim that is safe to make.
+        let d = null;
+        try{ d = await r.json(); }catch(_){}
+        ok = !!d && d.undone === true;
+        line = (d && typeof d.say === "string" && d.say.trim()) ? d.say
+             : (ok ? t("undone") : t("undoFailed"));
+      }
+    }
+    u.hidden = true;
+    $("reply").textContent = line;
+    root.classList.toggle("b-undofail", !ok);
+    flags();
+    post("touch");
+  }
+  $("undo").addEventListener("click", e => { e.stopPropagation(); barUndo(); });
+
+  addEventListener("keydown", e => {
+    if(e.key === "Escape"){ e.preventDefault(); post("dismiss"); return; }
+    // The shortcut every Mac user already has in their fingers for "take that back".
+    if((e.metaKey || e.ctrlKey) && !e.altKey && e.code === "KeyZ" && !$("undo").hidden){
+      e.preventDefault(); barUndo();
+    }
+  });
+  // The panel's language menu writes this; the bar is a separate page in the same
+  // origin and would otherwise keep the old language until it next reloaded.
+  addEventListener("storage", e => {
+    if(e.key === "micmic.lang" && e.newValue) applyLanguage(e.newValue, {remember:false});
+  });
+  setState("idle");
+  flags();
+}
+</script>
+</body>
+</html>

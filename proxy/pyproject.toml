@@ -1,0 +1,20 @@
+[project]
+name = "micmic-proxy"
+version = "0.1.0"
+description = "Holds MicMic's upstream keys and meters Jev and Gemini calls per device token."
+requires-python = ">=3.11"
+# Only the Stripe SDK: http.server, http.client and sqlite3 cover everything else, and
+# a server holding paid API keys is better off with as little third-party code as it can.
+dependencies = [
+    "stripe>=15.3.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

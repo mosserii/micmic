@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MicMic privacy policy</title>
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/static/icon.png" type="image/png">
+<style>{{css}}</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap top-in">
+    <a class="brand" href="/"><img src="/static/icon.svg" alt="" width="30" height="30">MicMic</a>
+    <nav class="nav" aria-label="Pages">
+      <a href="/">Home</a>
+      <a href="/privacy">Privacy</a>
+      <a href="/terms">Terms</a>
+    </nav>
+  </div>
+</header>
+<main class="doc">
+  <p class="draft">First draft, for review by a lawyer before it is relied on.</p>
+  <h1>Privacy policy</h1>
+  <p class="meta">Last updated {{updated}}. MicMic is made by {{operator}}.</p>
+
+  <h2>The short version</h2>
+  <p>MicMic sends what it needs to answer you, and we keep none of it. We keep a count of how many requests each device made each day, and, if you pay, the Stripe references for your subscription. No recordings, no transcripts, no screenshots, no advertising, no selling of data.</p>
+
+  <h2>What reaches our servers</h2>
+  <p>When you speak to MicMic, your Mac turns your voice into text. That text, and a short description of what MicMic is doing, is sent to our server to work out what you asked for. When you ask about your screen, the text on the screen, and for some questions a picture of the window in front, is sent too.</p>
+  <p>Our server passes each request on to the service that answers it and hands the answer back. It does not write the request or the answer to disk, and it does not put them in logs.</p>
+
+  <h2>Who else processes it</h2>
+  <ul>
+    <li><strong>TypeSafe AI (Jev)</strong> works out what you asked for from the words you said.</li>
+    <li><strong>Google (Gemini API)</strong> answers questions about your screen.</li>
+    <li><strong>Stripe</strong> takes payment for MicMic Pro. Your card details go to Stripe, never to us.</li>
+    <li><strong>Railway</strong> hosts our server.</li>
+  </ul>
+  <p>Each handles the data under its own terms.</p>
+
+  <h2>What we store</h2>
+  <ul>
+    <li>For each device: a random device id, a one-way fingerprint of its access token (not the token itself), the device name and app version the app reports, when it was set up, and its plan.</li>
+    <li>How many requests each device made on each day.</li>
+    <li>To stop abuse of free sign-ups: a one-way fingerprint of the internet address a device signed up from, with a count for that day. It is cleared once the day is over.</li>
+    <li>If you subscribe: your Stripe customer and subscription ids, the subscription's status and renewal date. Stripe holds your name, email and payment details.</li>
+    <li>Server logs: the time, the kind of request, its result and a short prefix of the device fingerprint. No request content and no internet address.</li>
+  </ul>
+
+  <h2>Using your own key</h2>
+  <p>If you give MicMic your own API keys, it talks to those services directly and none of your requests pass through our server.</p>
+
+  <h2>Your choices</h2>
+  <p>You can stop using MicMic at any time. To have a device's records removed, or for any question about your data, contact us{{contact_inline}}.</p>
+</main>
+<footer class="foot">
+  <div class="wrap foot-in">
+    <a class="brand" href="/"><img src="/static/icon.svg" alt="" width="24" height="24">MicMic</a>
+    <nav class="foot-nav" aria-label="Footer">
+      <a href="/">Home</a>
+      <a href="/privacy">Privacy</a>
+      <a href="/terms">Terms</a>
+      {{contact}}
+    </nav>
+    <p class="foot-op">Made by {{operator}}.</p>
+    <p class="foot-op foot-tm">Jev is a trademark of TypeSafe AI. MicMic is an independent product, not affiliated with or endorsed by TypeSafe.</p>
+  </div>
+</footer>
+</body>
+</html>

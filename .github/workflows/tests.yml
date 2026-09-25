@@ -1,0 +1,49 @@
+name: tests
+
+# Everything here runs with no API key and touches nothing outside the runner: the
+# screen-reading logic, the account client against a fake cloud, and the whole cloud
+# suite against fake upstreams and a fake Stripe. The regression suite, the latency
+# bench and anything else that needs real Jev runs locally (see CONTRIBUTING.md).
+# The round-trip budget is not here: it replays a recording made on a developer's
+# machine, and a check that cannot run is not a pass.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    name: assistant (keyless)
+    runs-on: macos-14
+    timeout-minutes: 20
+    env:
+      MICMIC_MODE: proxy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked
+      - name: Screen reading, pure logic
+        run: uv run python tests/test_screen.py
+      - name: Account and cloud client, fake cloud
+        run: uv run python tests/test_account.py
+
+  cloud:
+    name: cloud (proxy/)
+    runs-on: macos-14
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: proxy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked
+      - run: uv run python -m pytest -q

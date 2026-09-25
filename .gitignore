@@ -1,0 +1,48 @@
+# ---- her data. Never committed: it is personal, and it is state, not source.
+profile.json
+profile.json.bak
+memory.json
+settings.json
+trace.jsonl
+unembeddable.json
+notes.txt
+listener.lock
+.env.local
+.env*
+
+# ---- environments and build output
+.venv/
+native/.venv/
+native/dist/
+native/MicMic.app/
+__pycache__/
+*.pyc
+*.log
+.DS_Store
+
+# ---- generated logo candidates (the chosen mark lives in brand/)
+brand/candidates/
+
+# ---- UI screenshots taken from her real account: real contacts, real messages
+shots/
+
+# ---- the metering proxy: device-token hashes and usage, plus any local key file.
+# A token hash is not a secret on its own, but the usage table says who used what when.
+proxy/data/
+proxy/.env
+proxy/.venv/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+# A device token for the proxy. In a checkout the state dir is the project root.
+credentials.json
+
+# ---- latency runs and recordings: machine-specific, made by tests/perf/bench.py
+tests/perf/runs/
+tests/perf/replay.json
+
+# ---- research notes and README review shots for maintainers, not published
+docs/research/
+# Baked in by the release build; empty in a checkout.
+savta/cloud_url.txt

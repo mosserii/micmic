@@ -1,0 +1,72 @@
+<!doctype html>
+<!-- The README hero and the GitHub social preview. render.py drives the real bar
+     (savta/web/index.html?bar=1, served by a local MicMic) and places each frame of it
+     here. Nothing here is a mock of the bar: only the backdrop, the name and the key
+     hint are drawn by this page. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<style>
+@font-face { font-family: "Rubik"; font-weight: 300 900;
+  src: url(../../proxy/web/static/fonts/rubik-latin-wght-normal.woff2) format("woff2"); }
+:root {
+  --bg: #f7f5f1; --ink: #15130f; --muted: #5a544b; --accent: #2d8b6b; --accent-ink: #1f6b51;
+  --blob-a: #f0b06a; --blob-b: #df8d84; --blob-c: #7cb79a; --field: 1;
+  --key: #fbfaf7; --key-edge: #d8d2c7; --shade: rgba(86, 66, 44, .16);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12110e; --ink: #f6f2ec; --muted: #b8afa3; --accent: #57c69d; --accent-ink: #7fd6b3;
+    --blob-a: #a8722c; --blob-b: #9c4f47; --blob-c: #2f6b56; --field: .75;
+    --key: #2a2723; --key-edge: #3b3731; --shade: rgba(0, 0, 0, .5);
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; margin: 0; }
+/* --page, when render.py sets it, is the colour of the page the image will sit on
+   (GitHub's, for the README), so the picture has no visible edge there. */
+html, body { background: var(--page, var(--bg)); color: var(--ink); overflow: hidden;
+  font-family: "Rubik", -apple-system, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+.stage { position: relative; width: var(--w, 960px); height: var(--h, 500px); display: flex;
+  flex-direction: column; align-items: center; justify-content: center; isolation: isolate; }
+.field { position: absolute; inset: 0; z-index: -1; opacity: var(--field);
+  background:
+    radial-gradient(30% 36% at 36% 50%, color-mix(in oklab, var(--blob-a) 55%, transparent), transparent 100%),
+    radial-gradient(28% 34% at 66% 58%, color-mix(in oklab, var(--blob-b) 45%, transparent), transparent 100%),
+    radial-gradient(26% 32% at 50% 68%, color-mix(in oklab, var(--blob-c) 50%, transparent), transparent 100%); }
+.brand { display: flex; align-items: center; gap: 14px; }
+.brand img { width: 58px; height: 58px; border-radius: 14px;
+  box-shadow: 0 14px 30px -14px rgba(20, 80, 60, .55); }
+.brand span { font-size: 34px; font-weight: 700; letter-spacing: -.02em; }
+h1 { font-size: 66px; line-height: 1; font-weight: 700; letter-spacing: -.035em; margin: 26px 0 38px; }
+/* A fixed height, the tallest the bar gets here, so nothing around it moves while it
+   grows and shrinks between states. */
+.barwrap { width: calc(640px * var(--s, 1.2)); height: calc(88px * var(--s, 1.2));
+  display: flex; align-items: center; }
+/* The bar is a screenshot of the real bar page taken at this size (render.py), placed
+   pixel for pixel, so its text is as sharp as the headline. */
+.barwrap img { display: block; width: 100%; height: auto; }
+.hint { margin-top: 26px; color: var(--muted); font-size: 17px; }
+.key { display: inline-block; font-size: 15px; padding: 2px 9px; border-radius: 7px; margin: 0 3px;
+  background: var(--key); border: 1px solid var(--key-edge); border-bottom-width: 2px; color: var(--ink);
+  transition: none; }
+.held .key { color: var(--accent-ink); border-color: var(--accent); transform: translateY(1px);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 25%, transparent),
+              0 0 22px color-mix(in oklab, var(--accent) 35%, transparent); }
+.sub { margin-top: 14px; font-size: 16px; color: var(--muted); }
+.sub b { color: var(--ink); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+  <div class="field"></div>
+  <div class="brand"><img src="../../proxy/web/static/icon.png" alt=""><span>MicMic</span></div>
+  <h1>Talk to your Mac.</h1>
+  <div class="barwrap"><img id="bar" alt=""></div>
+  <p class="hint">Hold right <span class="key">&#8997; option</span> and say it.</p>
+  <p class="sub" id="sub" hidden>Open source &middot; macOS 13+ &middot; Apple silicon &middot; Understands you with <b>Jev</b>, by TypeSafe</p>
+</div>
+</body>
+</html>
