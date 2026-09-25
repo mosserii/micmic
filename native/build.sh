@@ -106,10 +106,16 @@ release_build() {
   # 3. the app's own code ------------------------------------------------------
   cp -R "$PROJECT/savta" "$RES/app/savta"
   cp "$PROJECT/LICENSE" "$PROJECT/THIRD_PARTY_NOTICES.md" "$RES/"
-  # The cloud this build signs devices up on. Only a release built here knows it; a
-  # checkout or fork has none and runs on its own keys (savta/account.py).
-  printf '%s\n' "${MICMIC_CLOUD_URL:-https://cloud-production-f42c.up.railway.app}" \
-    > "$RES/app/savta/cloud_url.txt"
+  # The cloud this build signs devices up on (free requests, then Pro). Only the
+  # official release passes one; any other build has none and runs on the builder's
+  # own keys (savta/account.py), never on someone else's metered cloud.
+  printf '%s\n' "${MICMIC_CLOUD_URL:-}" > "$RES/app/savta/cloud_url.txt"
+  if [ -n "${MICMIC_CLOUD_URL:-}" ]; then
+    echo "  cloud:       $MICMIC_CLOUD_URL"
+  else
+    echo "  cloud:       none. This build uses its own keys (TYPESAFE_API_KEY, GEMINI_API_KEY)."
+    echo "               The official release sets MICMIC_CLOUD_URL."
+  fi
   cp "$HERE/listener.py" "$RES/app/listener.py"
   cp "$HERE/panel.py"    "$RES/app/panel.py"
   cp "$HERE/bar.py"      "$RES/app/bar.py"

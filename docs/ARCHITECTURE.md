@@ -37,8 +37,9 @@ flowchart LR
   every decision; the actions own every side effect.
 - **`proxy/`** is the MicMic cloud. A downloaded MicMic has no API keys, so it registers
   an anonymous device token here, and the proxy forwards its Jev and Gemini calls and
-  counts them per device per day. If you run MicMic with your own keys, the proxy is
-  never contacted.
+  counts them per device: 100 free requests in total, then MicMic Pro's daily
+  allowance. Only the official release knows the cloud's address; a build from source
+  runs on your own keys and never contacts the proxy.
 
 ## Jev decides, Gemini composes, code acts
 

@@ -118,8 +118,8 @@ Under the bar, two models do two different jobs, and neither ever touches your M
 - **Code acts.** Every side effect is plain Python you can read.
 
 The downloaded app reaches Jev and Gemini through the MicMic cloud ([`proxy/`](proxy/)),
-which holds the keys and counts requests per device. Build it yourself with your own
-keys and it talks to them directly. The full map is in
+which holds the keys and counts requests per device: 100 free, then MicMic Pro. Build
+it yourself and it talks to Jev and Gemini directly, with your own keys. The full map is in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Privacy in plain words
@@ -168,8 +168,8 @@ native/build.sh           # builds native/MicMic.app
 open native/MicMic.app
 ```
 
-Without a key, a source build registers with the MicMic cloud like the download does.
-To use your own keys instead, put them in `.env.local` at the repo root:
+A build from source runs on your own keys. It never uses the MicMic cloud, so it has no
+free-request limit and no subscription. Put the keys in `.env.local` at the repo root:
 
 ```bash
 TYPESAFE_API_KEY=...      # required: Jev, from TypeSafe
