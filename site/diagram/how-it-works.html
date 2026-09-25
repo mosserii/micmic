@@ -1,0 +1,168 @@
+<!doctype html>
+<!-- The README "How it works" diagram. render.py screenshots #stage in each colour
+     scheme into docs/assets/how-it-works-{dark,light}.png. The boxes are HTML, so
+     their text wraps instead of being clipped; the connectors are drawn from the
+     boxes' real positions by the script at the bottom. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<style>
+@font-face { font-family: "Rubik"; font-weight: 300 900;
+  src: url(../../proxy/web/static/fonts/rubik-latin-wght-normal.woff2) format("woff2"); }
+:root {
+  --bg: #f7f5f1; --ink: #15130f; --muted: #6a6358; --accent: #2d8b6b; --accent-ink: #1f6b51;
+  --card: #fffdf9; --edge: #e2dbcf; --line: #b9b0a2; --chip: #f1ede6;
+  --shade: rgba(86, 66, 44, .14);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12110e; --ink: #f6f2ec; --muted: #b0a79b; --accent: #57c69d; --accent-ink: #7fd6b3;
+    --card: #1d1b18; --edge: #34302a; --line: #5c554b; --chip: #2a2723;
+    --shade: rgba(0, 0, 0, .55);
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; margin: 0; }
+html, body { background: transparent; color: var(--ink);
+  font-family: "Rubik", -apple-system, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+body { padding: 0; }
+.stage { position: relative; width: 800px; padding: 32px 28px 34px; border-radius: 22px;
+  background: var(--bg); overflow: hidden; isolation: isolate; }
+#wires { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -1; overflow: visible; }
+
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); column-gap: 20px; }
+.row1 { align-items: center; }
+.cell { display: flex; justify-content: center; }
+.row2 { margin-top: 128px; align-items: stretch; }
+
+.node { background: var(--card); border: 1px solid var(--edge); border-radius: 16px;
+  box-shadow: 0 1px 2px var(--shade), 0 14px 30px -18px var(--shade);
+  display: flex; align-items: center; gap: 11px; padding: 13px 18px; }
+.node b { display: block; font-size: 16px; font-weight: 600; letter-spacing: -.01em; line-height: 1.2; }
+.node small { display: block; font-size: 13px; color: var(--muted); line-height: 1.3; margin-top: 2px; }
+.speak { border-radius: 999px; padding: 11px 20px 11px 12px; }
+.mic { width: 34px; height: 34px; border-radius: 50%; flex: none; display: grid; place-items: center;
+  background: color-mix(in oklab, var(--accent) 16%, var(--card)); color: var(--accent); }
+.mic svg, .glyph svg { width: 18px; height: 18px; }
+.glyph { width: 34px; height: 34px; border-radius: 10px; flex: none; display: grid; place-items: center;
+  background: var(--chip); color: var(--muted); }
+.logo { width: 38px; height: 38px; border-radius: 10px; flex: none;
+  box-shadow: 0 8px 18px -10px rgba(20, 80, 60, .6); }
+
+.card { background: var(--card); border: 1px solid var(--edge); border-radius: 18px;
+  box-shadow: 0 1px 2px var(--shade), 0 18px 36px -22px var(--shade);
+  padding: 18px 16px 17px 18px; display: flex; flex-direction: column; gap: 8px; }
+.card h3 { font-size: 20px; font-weight: 700; letter-spacing: -.02em; line-height: 1.15; }
+.card h3 span { font-size: 13px; font-weight: 500; color: var(--muted); letter-spacing: 0; margin-left: 4px; }
+.card p { font-size: 14px; color: var(--muted); line-height: 1.4; }
+.card .role { font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 1px; }
+.chips i { font-style: normal; font-size: 11.5px; line-height: 1; padding: 5px 7px; border-radius: 7px;
+  background: var(--chip); color: var(--ink); white-space: nowrap; }
+
+/* Jev is the core: it is the one that decides, so it carries the brand colour. */
+.jev { border: 1.5px solid var(--accent);
+  background: linear-gradient(160deg, color-mix(in oklab, var(--accent) 14%, var(--card)), var(--card) 70%);
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--accent) 14%, transparent),
+              0 20px 44px -18px color-mix(in oklab, var(--accent) 55%, transparent); }
+.jev .role { color: var(--accent-ink); }
+.jev .ms { align-self: flex-start; font-size: 12px; font-weight: 600; padding: 5px 9px; border-radius: 999px;
+  background: var(--accent); color: var(--card); }
+
+.label { position: absolute; transform: translate(-50%, -50%); white-space: nowrap;
+  font-size: 12.5px; font-weight: 500; color: var(--ink); padding: 5px 11px; border-radius: 999px;
+  background: var(--card); border: 1px solid var(--edge); box-shadow: 0 4px 12px -8px var(--shade); }
+.label.core { color: var(--accent-ink); border-color: color-mix(in oklab, var(--accent) 55%, var(--edge)); }
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+  <svg id="wires" aria-hidden="true"></svg>
+
+  <div class="grid row1">
+    <div class="cell"><div class="node speak" id="n-speak">
+      <span class="mic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+        stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/>
+        <path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg></span>
+      <b>You speak</b></div></div>
+    <div class="cell"><div class="node" id="n-asr">
+      <span class="glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+        stroke-linecap="round"><path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2"/></svg></span>
+      <span><b>Apple speech</b><small>recognition</small></span></div></div>
+    <div class="cell"><div class="node" id="n-server">
+      <img class="logo" src="../../proxy/web/static/icon.png" alt="">
+      <span><b>MicMic</b><small>local server</small></span></div></div>
+  </div>
+
+  <div class="grid row2">
+    <div class="card jev" id="c-jev">
+      <div class="role">Decides</div>
+      <h3>Jev<span>by TypeSafe</span></h3>
+      <p>Typed decisions</p>
+      <div class="ms">~300 ms</div>
+    </div>
+    <div class="card" id="c-gemini">
+      <div class="role">Composes</div>
+      <h3>Gemini</h3>
+      <p>Answers and screen questions</p>
+    </div>
+    <div class="card" id="c-code">
+      <div class="role">Acts</div>
+      <h3>Code</h3>
+      <div class="chips"><i>AppleScript</i><i>Accessibility</i><i>Spotlight</i><i>YouTube</i><i>a browser</i></div>
+    </div>
+  </div>
+</div>
+<script>
+// Connectors from the boxes' laid-out positions: the row of three left to right, then
+// the server fans down to the three cards, with each edge label sitting on its drop.
+window.draw = () => {
+  const stage = document.getElementById('stage'), svg = document.getElementById('wires');
+  const S = stage.getBoundingClientRect(), css = getComputedStyle(document.documentElement);
+  const line = css.getPropertyValue('--line').trim(), accent = css.getPropertyValue('--accent').trim();
+  const box = id => { const r = document.getElementById(id).getBoundingClientRect();
+    return {l: r.left - S.left, r: r.right - S.left, t: r.top - S.top, b: r.bottom - S.top,
+            cx: (r.left + r.right) / 2 - S.left, cy: (r.top + r.bottom) / 2 - S.top}; };
+  svg.setAttribute('viewBox', `0 0 ${S.width} ${S.height}`);
+  svg.innerHTML = '';
+  const NS = 'http://www.w3.org/2000/svg', GAP = 7, HEAD = 6;
+  const path = (d, color, w) => { const p = document.createElementNS(NS, 'path');
+    p.setAttribute('d', d); p.setAttribute('fill', 'none'); p.setAttribute('stroke', color);
+    p.setAttribute('stroke-width', w); p.setAttribute('stroke-linecap', 'round');
+    p.setAttribute('stroke-linejoin', 'round'); svg.appendChild(p); };
+  const headRight = (x, y, c) => path(`M${x - HEAD} ${y - HEAD} L${x} ${y} L${x - HEAD} ${y + HEAD}`, c, 2);
+  const headDown = (x, y, c) => path(`M${x - HEAD} ${y - HEAD} L${x} ${y} L${x + HEAD} ${y - HEAD}`, c, 2);
+
+  const speak = box('n-speak'), asr = box('n-asr'), server = box('n-server');
+  for (const [a, b] of [[speak, asr], [asr, server]]) {
+    const y = a.cy, x1 = a.r + GAP, x2 = b.l - GAP;
+    path(`M${x1} ${y} H${x2}`, line, 2); headRight(x2, y, line);
+  }
+
+  const cards = [['c-jev', 'what did you mean?', true], ['c-gemini', 'write a sentence', false], ['c-code', null, false]]
+    .map(([id, text, core]) => ({...box(id), text, core}));
+  const sx = server.cx, sy = server.b + GAP, busY = sy + 34, R = 14;
+  // Neutral branches first, then the branch into Jev in the brand colour over them.
+  for (const c of [...cards].sort((a, b) => a.core - b.core)) {
+    const ty = c.t - GAP, color = c.core ? accent : line, w = c.core ? 2.5 : 2;
+    const d = Math.abs(c.cx - sx) < 1 ? `M${sx} ${sy} V${ty}`
+      : `M${sx} ${sy} V${busY - R} Q${sx} ${busY} ${sx - R} ${busY} H${c.cx + R} Q${c.cx} ${busY} ${c.cx} ${busY + R} V${ty}`;
+    path(d, color, w); headDown(c.cx, ty, color);
+    if (c.text) {
+      const el = document.createElement('div');
+      el.className = 'label' + (c.core ? ' core' : '');
+      el.textContent = c.text;
+      el.style.left = c.cx + 'px'; el.style.top = (busY + ty) / 2 + 4 + 'px';
+      stage.appendChild(el);
+    }
+  }
+  const dot = document.createElementNS(NS, 'circle');
+  dot.setAttribute('cx', sx); dot.setAttribute('cy', sy); dot.setAttribute('r', 3.5);
+  dot.setAttribute('fill', accent); svg.appendChild(dot);
+};
+</script>
+</body>
+</html>

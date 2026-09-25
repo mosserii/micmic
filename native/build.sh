@@ -70,7 +70,8 @@ notarize() {
 release_build() {
   local PROJECT DIST RAPP RES PYSRC PYBIN TS
   PROJECT="$(cd "$HERE/.." && pwd)"
-  DIST="$HERE/dist"
+  # MICMIC_DIST: build somewhere else while a copy in dist/ is still running.
+  DIST="${MICMIC_DIST:-$HERE/dist}"
   RAPP="$DIST/MicMic.app"
   RES="$RAPP/Contents/Resources"
 

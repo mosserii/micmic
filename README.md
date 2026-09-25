@@ -107,14 +107,7 @@ Spotlight, and never takes focus from what you are doing.<br>
 
 Under the bar, two models do two different jobs, and neither ever touches your Mac:
 
-```mermaid
-flowchart LR
-    A(["You speak"]) --> B["Apple speech<br/>recognition"]
-    B --> C["MicMic<br/>local server"]
-    C -- "what did you mean?" --> D{{"Jev by TypeSafe<br/>typed decisions, ~300 ms"}}
-    C -- "write a sentence" --> E{{"Gemini<br/>answers and screen questions"}}
-    C --> F["Code acts<br/>AppleScript, Accessibility,<br/>Spotlight, YouTube, a browser"]
-```
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.png"><img src="docs/assets/how-it-works-light.png" width="800" alt="How MicMic works: you speak, Apple speech recognition turns it into text, and the MicMic local server sends it three ways. Jev by TypeSafe decides what you meant (typed decisions, about 300 ms), Gemini writes a sentence when one is needed (answers and screen questions), and code acts through AppleScript, Accessibility, Spotlight, YouTube or a browser."></picture></p>
 
 - **Jev decides.** MicMic understands you with [Jev](https://typesafe.ai), the
   typed-decision model by TypeSafe. Jev cannot write free text, so code lists what
