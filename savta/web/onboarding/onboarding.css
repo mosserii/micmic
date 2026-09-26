@@ -182,13 +182,13 @@ body.onboarding.panel .field{opacity:calc(var(--blob-alpha) * .8)}
 .ob-demo[data-p="result"] .ob-res svg{width:15px;height:15px}
 
 /* the keyboard: a real Mac's bottom right corner, always left to right because the
-   keys do not move when the language does */
-.ob-kbd{position:relative;width:300px;height:70px;border-radius:17px;overflow:hidden;direction:ltr;
+   keys do not move when the language does. Every key is whole: a space bar sliced off
+   by the edge and a right arrow half faded out read as a layout that did not fit. */
+.ob-kbd{position:relative;width:300px;height:70px;border-radius:17px;direction:ltr;
+  display:flex;align-items:center;justify-content:center;
   background:var(--ob-deck);
-  box-shadow:inset 0 1px 2px rgba(0,0,0,.10),inset 0 -1px 0 rgba(255,255,255,.28);
-  -webkit-mask-image:linear-gradient(90deg,transparent 0,#000 24%,#000 84%,transparent 100%);
-          mask-image:linear-gradient(90deg,transparent 0,#000 24%,#000 84%,transparent 100%)}
-.ob-row{position:absolute;top:10px;left:-96px;display:flex;gap:5px;align-items:flex-end}
+  box-shadow:inset 0 1px 2px rgba(0,0,0,.10),inset 0 -1px 0 rgba(255,255,255,.28)}
+.ob-row{position:relative;display:flex;gap:6px;align-items:flex-end}
 .ob-key{position:relative;flex:none;height:50px;border-radius:9px;
   display:flex;flex-direction:column;justify-content:space-between;align-items:flex-start;
   padding:7px 8px 6px;color:var(--ob-key-ink);
@@ -197,9 +197,11 @@ body.onboarding.panel .field{opacity:calc(var(--blob-alpha) * .8)}
   transition:transform .14s ease,color .14s ease}
 .ob-key em{position:relative;font-style:normal;font-size:15px;line-height:1}
 .ob-key small{position:relative;font-size:9.5px;line-height:1;letter-spacing:.02em;opacity:.8}
-.ob-space{width:160px}
-.ob-mod{width:62px}
-.ob-hot{width:56px;border-color:color-mix(in oklab,var(--live) 50%,transparent)}
+.ob-mod{width:70px}
+.ob-fn{width:56px}
+.ob-wide{width:110px}
+.ob-letter{width:50px}
+.ob-hot{border-color:color-mix(in oklab,var(--live) 50%,transparent)}
 .ob-hot::before{content:"";position:absolute;inset:-1px;border-radius:inherit;opacity:0;
   background:linear-gradient(180deg,color-mix(in oklab,var(--live) 70%,#fff),var(--live));
   transition:opacity .14s ease}
@@ -269,6 +271,8 @@ body.onboarding.panel .field{opacity:calc(var(--blob-alpha) * .8)}
 .ob-on:hover{background:color-mix(in oklab,var(--live) 27%,transparent)}
 .ob-on:active{transform:scale(.96)}
 .ob-perm[data-s="denied"] .ob-on{display:inline-flex;animation:obIn .35s var(--ob-ease)}
+/* step 3, without Accessibility: the way to turn it on sits with the line that says so */
+.ob-nokey .ob-axon{display:inline-flex;margin-inline-start:6px;vertical-align:middle;padding:6px 11px}
 @keyframes obDraw{from{stroke-dashoffset:24}to{stroke-dashoffset:0}}
 .ob svg .ck{fill:none;stroke:currentColor;stroke-width:2.7;stroke-linecap:round;
   stroke-linejoin:round;stroke-dasharray:24;stroke-dashoffset:0}

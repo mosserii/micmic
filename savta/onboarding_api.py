@@ -43,6 +43,25 @@ def _onboarded() -> bool:
     return bool(load_settings().get("onboarded"))
 
 
+def setup_done() -> bool:
+    """Is setup over, by voice or in the window? Finishing or skipping the window's
+    onboarding is the end of setup: the old spoken setup ("What should I call you?")
+    must not start again after it. A Mac left with onboarded true and setup_complete
+    false (the owner's 1.0.1) is resolved to done here."""
+    if _prof.load().get("setup_complete"):
+        return True
+    if _onboarded():
+        _prof.finish_setup()
+        return True
+    return False
+
+
+def in_progress() -> bool:
+    """Step 3 ("Try it") is waiting for her first real turn. The spoken setup keeps
+    out of it: the window is already doing the introducing."""
+    return bool(_armed_at)
+
+
 def status() -> dict:
     first_run = not _prof.load().get("setup_complete")
     done = _onboarded()
@@ -86,6 +105,7 @@ def act(action: str) -> tuple[int, dict]:
     if action in ("done", "skip"):
         from .router import save_settings
         save_settings({"onboarded": True})
+        _prof.finish_setup()
         with _lock:
             _armed_at, _turn = 0.0, None
         return 200, status()

@@ -31,6 +31,12 @@ SHOTS = Path(os.environ.get("BAR_SHOTS", tempfile.mkdtemp(prefix="adv-bar-page-s
 SHOTS.mkdir(parents=True, exist_ok=True)
 
 PASSED, FAILED = [], []
+# Jev and Gemini cost money: the server here is a proxy client pointed at a closed local
+# port, so it never reads the developer's keys from .env.local, never registers a device
+# with the cloud, and any model call fails at once, for free. Nothing here needs one.
+OFFLINE = {"MICMIC_MODE": "proxy", "MICMIC_PROXY_URL": "http://127.0.0.1:9",
+           "MICMIC_PROXY_TOKEN": "offline-test"}
+SPEECH = {"en": "en-US", "he": "he-IL", "ar": "ar-SA", "ru": "ru-RU"}
 
 
 def check(name, ok, detail=""):
@@ -58,7 +64,7 @@ def ensure_server():
         assert "window.barResult" in page, "something else is on 8802"
         return None
     env = dict(os.environ, MICMIC_PORT=str(PORT),
-               MICMIC_STATE_DIR=tempfile.mkdtemp(prefix="adv-bar-page-state-"))
+               MICMIC_STATE_DIR=tempfile.mkdtemp(prefix="adv-bar-page-state-"), **OFFLINE)
     env.pop("MICMIC_ALLOW_SEND", None)
     env.pop("MICMIC_ALLOW_CALL", None)
     proc = subprocess.Popen([str(ROOT / ".venv/bin/python3"), "-m", "savta.server"],
@@ -83,6 +89,15 @@ def open_bar(browser, lang="en", width=640, extra_init=""):
     ctx = browser.new_context(viewport={"width": width, "height": 64}, device_scale_factor=2,
                               reduced_motion="reduce")
     ctx.route("**/api/**", _guard)
+    # The page's language is the server's speech language (the browser's saved one only
+    # covers the moment before /api/config answers), so that is where the test picks it.
+    def config(route):
+        if route.request.method != "GET":
+            return _guard(route)
+        body = route.fetch().json()
+        body["language_hint"] = SPEECH[lang]
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+    ctx.route("**/api/config", config)
     ctx.add_init_script(INIT + f"try{{localStorage.setItem('micmic.lang', {json.dumps(lang)})}}catch(_){{}}"
                         + extra_init)
     page = ctx.new_page()
@@ -269,6 +284,14 @@ def main():
                         check(f"{t.__name__} ran to the end", False, repr(e)[:400])
             finally:
                 browser.close()
+        # The server's own count of paid Jev calls and their cost: both zero.
+        import urllib.request as _u
+        try:
+            h = json.loads(_u.urlopen(BASE + "/api/health", timeout=5).read())
+            check("the server reports no paid model calls (Jev calls and cost both zero)",
+                  not h.get("calls") and not h.get("cost_usd"), h)
+        except Exception as e:  # noqa: BLE001
+            check("the server reports no paid model calls", False, repr(e))
     finally:
         if proc is not None:
             proc.terminate()

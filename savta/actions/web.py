@@ -310,7 +310,7 @@ def act(page, el: dict, op: str, text: str = "") -> tuple[bool, str]:
                 if not node.evaluate("el => document.activeElement === el"):
                     node.evaluate("el => el.focus()")
                     if not node.evaluate("el => document.activeElement === el"):
-                        return False, ("could not put the cursor in that field — "
+                        return False, ("could not put the cursor in that field: "
                                        "something on the page is holding it")
                 try:
                     node.fill("", timeout=1500)
@@ -649,9 +649,12 @@ def date_candidates(days: int = 30, iso: bool = False,
         tags = []
         if when:
             tags.append(when)
-        elif i < 8:
-            tags.append(f"this coming {time.strftime('%A', t)}")
-        elif i < 15:
+        # "next Friday" means the coming one in everyday speech. Saying so on the row
+        # itself, including tomorrow's, stopped Jev from reaching past it: on a
+        # Saturday (2026-09-26) "next Friday" and "next Sunday" drifted to other rows.
+        if 0 < i < 8:
+            tags.append(f"this coming {time.strftime('%A', t)}, next {time.strftime('%A', t)}")
+        elif 8 <= i < 15:
             tags.append(f"the {time.strftime('%A', t)} after that")
         if weeks:
             tags.append(weeks)
@@ -1028,7 +1031,7 @@ def run(j, llm, goal: str, start_url: str, on_step=None, headless: bool = False,
                 except Exception:  # noqa: BLE001
                     pass
                 page.wait_for_timeout(700)
-                steps.append(f"only {len(snap['elements'])} things on the page — "
+                steps.append(f"only {len(snap['elements'])} things on the page, "
                              f"waiting for it to finish")
                 if on_step:
                     on_step(steps[-1])
@@ -1057,7 +1060,7 @@ def run(j, llm, goal: str, start_url: str, on_step=None, headless: bool = False,
                     page.keyboard.press("Escape")
                     page.wait_for_timeout(SETTLE_MS)
                     seen.clear()
-                    steps.append("nothing moving — closed whatever was on top")
+                    steps.append("nothing moving, closed whatever was on top")
                     if on_step:
                         on_step(steps[-1])
                     continue
@@ -1069,7 +1072,7 @@ def run(j, llm, goal: str, start_url: str, on_step=None, headless: bool = False,
                     page.mouse.wheel(0, -2000)
                     page.wait_for_timeout(SETTLE_MS)
                     seen.clear()
-                    steps.append("nothing moving — went back to the top of the page")
+                    steps.append("nothing moving, went back to the top of the page")
                     if on_step:
                         on_step(steps[-1])
                     continue
@@ -1392,3 +1395,78 @@ def run(j, llm, goal: str, start_url: str, on_step=None, headless: bool = False,
         except Exception as e:  # noqa: BLE001
             result["handoff_error"] = repr(e)[:120]
     return result
+
+
+# ---------------------------------------------------------------- what she sees
+# The card under the bar used to show the log above as it was: "nothing moving —
+# closed whatever was on top", "click Search flights  [changed nothing]", in English
+# whatever language she spoke. The log stays as it is, because the agent reads it back
+# as its own history. What she sees is this: short, plain, and in her language.
+_SHOWN = {
+    "wait":    {"hebrew": "מחכה שהדף ייטען", "arabic": "عم بستنى الصفحة تفتح",
+                "russian": "Жду, пока загрузится страница", "english": "Waiting for the page"},
+    "popup":   {"hebrew": "סגרתי חלון קופץ", "arabic": "سكّرت نافذة منبثقة",
+                "russian": "Закрыла всплывающее окно", "english": "Closed a pop-up"},
+    "cookies": {"hebrew": "עניתי על שאלת העוגיות", "arabic": "جاوبت على سؤال الكوكيز",
+                "russian": "Ответила на вопрос о cookie", "english": "Answered the cookie question"},
+    "top":     {"hebrew": "חזרתי לראש הדף", "arabic": "رجعت لراس الصفحة",
+                "russian": "Вернулась в начало страницы", "english": "Back to the top of the page"},
+    "scroll":  {"hebrew": "גוללת למטה", "arabic": "عم بنزل بالصفحة",
+                "russian": "Прокручиваю вниз", "english": "Scrolling down"},
+    "looking": {"hebrew": "עדיין מחפשת", "arabic": "لسا عم دوّر",
+                "russian": "Всё ещё ищу", "english": "Still looking"},
+    "no_read": {"hebrew": "לא הצלחתי לקרוא את הדף", "arabic": "ما قدرت أقرأ الصفحة",
+                "russian": "Не смогла прочитать страницу", "english": "Could not read the page"},
+    "timeout": {"hebrew": "לקח יותר מדי זמן, עצרתי", "arabic": "طوّلت كتير، فوقّفت",
+                "russian": "Заняло слишком много времени, остановилась",
+                "english": "Took too long, so I stopped"},
+    "pay":     {"hebrew": "עצרתי לפני התשלום", "arabic": "وقفت قبل الدفع",
+                "russian": "Остановилась перед оплатой", "english": "Stopped before paying"},
+    "click":   {"hebrew": "לחצתי על {x}", "arabic": "كبست على {x}",
+                "russian": "Нажала «{x}»", "english": "Pressed {x}"},
+    "type":    {"hebrew": "כתבתי {x}", "arabic": "كتبت {x}",
+                "russian": "Ввела {x}", "english": "Typed {x}"},
+    "select":  {"hebrew": "בחרתי {x}", "arabic": "اخترت {x}",
+                "russian": "Выбрала {x}", "english": "Chose {x}"},
+}
+_STEP_KIND = (
+    (re.compile(r"^out of time"), "timeout"),
+    (re.compile(r"^could not read the page"), "no_read"),
+    (re.compile(r"^(only \d+ things|nothing usable yet|waiting for the page|waited$)"), "wait"),
+    (re.compile(r"^(dismissed:|nothing moving, closed)"), "popup"),
+    (re.compile(r"^consent:"), "cookies"),
+    (re.compile(r"^nothing moving, went back"), "top"),
+    (re.compile(r"^scrolled$"), "scroll"),
+    (re.compile(r"^thought it was finished"), "looking"),
+)
+_ACT = re.compile(r"^(click|type|select) (.*?)(?: = (.*?))?(?:  \[.*)?$")
+
+
+def shown_steps(steps: list[str], lang: str) -> list[str]:
+    """The agent's log as she should see it: in her language, no developer words,
+    no dashes, nothing said twice in a row."""
+    def say(key: str, x: str = "") -> str:
+        t = _SHOWN[key]
+        return t.get(lang, t["english"]).format(x=x)
+    out: list[str] = []
+    for st in steps:
+        line = None
+        if "completes a purchase" in st or "password or payment" in st:
+            line = say("pay")
+        else:
+            for rx, key in _STEP_KIND:
+                if rx.search(st):
+                    line = say(key)
+                    break
+            else:
+                m = _ACT.match(st)
+                if m and not st.endswith(("no target", "nothing to enter")):
+                    op, label, text = m.group(1), m.group(2).strip(), (m.group(3) or "").strip()
+                    x = text if op in ("type", "select") and text else label
+                    x = re.sub(r"\s*[—–]\s*", ", ", x).strip(" ,")
+                    if x:
+                        line = say(op, x[:40])
+        if line and (not out or out[-1] != line):
+            out.append(line)
+    return out
+

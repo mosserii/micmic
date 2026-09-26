@@ -13,21 +13,40 @@ osascript bridge `_osa` itself. So even if a test accidentally reaches the real
 send_message, there is a second wall behind it: OSA collects the script instead
 of running it, and a test asserts that list stayed empty.
 
-The one thing that is real is Jev. The suite costs ~33 calls, well under a cent.
+The one real network call is Jev, plus a couple of Gemini calls; by default (see
+tests/replay.py) neither happens at all. The suite runs against a recording made
+once and replayed from tests/recordings/test_micmic.jsonl, so a normal run costs
+$0 and makes 0 live calls. See tests/replay.py for MICMIC_REPLAY=record/replay/off
+and how to re-record after a prompt or test question changes.
 """
 from __future__ import annotations
 
+import os
+import sys
+
+# Pinned before anything else runs, and only by restarting: PYTHONHASHSEED only takes
+# effect at interpreter start-up, so setting it after import would do nothing. With a
+# random seed, two `MICMIC_REPLAY=replay` runs against the same recording did not
+# agree with each other; with this pinned, they do, byte for byte, every time (see
+# tests/README.md). Contact-matching builds a `set` of name variants along the way,
+# and a `set`'s iteration order is exactly this seed, so it is the first suspect,
+# though pinning it did not close every gap between a live run and a replayed one
+# (also in the README) - it is kept because it is a real, verified source of drift
+# in its own right, not because it is the whole story.
+if os.environ.get("PYTHONHASHSEED") != "0":
+    os.environ["PYTHONHASHSEED"] = "0"
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
 import atexit
 import json
-import os
 import re
-import sys
 import time
 import traceback
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # ---------------------------------------------------------------- wall one
 # Refuse to run at all if real sending is armed. This check is deliberately the
@@ -64,6 +83,24 @@ from savta.actions import contacts as book    # noqa: E402
 from savta.actions import facts               # noqa: E402
 from savta.actions import mac                 # noqa: E402
 from savta.actions import youtube as yt       # noqa: E402
+
+# The other real network call, patched before anything in this file calls Jev.ask()
+# or LLM.text()/answer()/chat(): see tests/replay.py.
+import replay                                  # noqa: E402
+replay.install()
+
+# The daily briefing rides its own weather lookup and message-store read on a
+# background thread (router._in_parallel) that the turn which triggered it still
+# waits on, so it is not a leak past that one turn - but it fires at most once per
+# process, on whichever call happens to be the first with a fresh "never briefed
+# today" profile, which under this suite is effectively "whichever test runs
+# first". That is exactly the kind of question a recording cannot pin down: which
+# test that is depends on nothing this suite controls. Off by default, exactly as
+# scripted_turns already turns it off for its own scope; the two sections that
+# mean to exercise a real briefing (t_one_briefing_even_when_turns_fail,
+# t_weather_never_from_a_model) put the real one back for their own duration.
+REAL_DUE_BRIEFING = router.due_briefing
+router.due_briefing = lambda: False
 
 # ---------------------------------------------------------------- wall two
 # Keep honest references to the functions whose safety gate is under test,
@@ -219,8 +256,18 @@ FAKE_VIDEOS = [
 yt.search = lambda q, n=18: (YT_QUERIES.append(q), [dict(v) for v in FAKE_VIDEOS])[1]
 WEATHER_ASKED: list[str] = []
 FAKE_WEATHER = {"where": "Haifa", "desc": "Light rain", "code": 296, "temp": 17,
-                "feels": 16, "low": 14, "high": 19, "rain_pct": 70}
+                "feels": 16, "low": 14, "high": 19, "rain_pct": 70,
+                "lat": 32.8, "lon": 35.0,
+                "days": [{"date": "d0", "code": 296, "low": 14, "high": 19, "rain_pct": 70},
+                         {"date": "d1", "code": 113, "low": 21, "high": 28, "rain_pct": 5},
+                         {"date": "d2", "code": 119, "low": 12, "high": 15, "rain_pct": 20}]}
 facts.conditions = lambda place="": (WEATHER_ASKED.append(place), dict(FAKE_WEATHER))[1]
+# Places: every name is a real place at the fake weather's coordinates, unless a
+# section says otherwise.
+facts.geocode = lambda name, lang="en": (WEATHER_ASKED.append(name), [
+    {"name": name, "country": "", "country_code": "IL", "admin1": "", "lat": 32.8,
+     "lon": 35.0, "population": 1000}])[1]
+facts.conditions_at = lambda lat, lon: dict(FAKE_WEATHER)
 facts.forecast = lambda *a, **k: ""
 facts.weather = lambda *a, **k: ""
 facts.wiki = lambda *a, **k: ""
@@ -258,6 +305,8 @@ REAL_RECENT_CHATS = book.recent_chats
 book._CACHE.update(at=time.time() * 10, rows=list(FIXED_BOOK))
 book.all_contacts = lambda force=False, wait=None: list(FIXED_BOOK)
 book.recent_chats = lambda limit=30: [dict(r) for r in FIXED_BOOK[:limit]]
+REAL_UNREAD = book.unread_summary          # kept for the store-lock test; stubbed below
+REAL_READ_RECENT = book._read_recent
 book.unread_summary = lambda limit=8: []
 book.messages_from = lambda frag, limit=5: []
 
@@ -314,6 +363,7 @@ atexit.register(lambda: router._cancel_pending())
 
 # ---------------------------------------------------------------- harness
 PASSED = 0
+SKIPPED = 0
 FAILED: list[tuple[str, str]] = []
 
 
@@ -327,6 +377,19 @@ def check(name: str, ok, detail: str = "") -> bool:
         FAILED.append((name, detail))
         print(f"  FAIL  {name}" + (f"\n          {detail}" if detail else ""))
     return ok
+
+
+def check_latency(name: str, ok, detail: str = "") -> bool:
+    """A pure Jev/Gemini round-trip time assertion. Under MICMIC_REPLAY=replay
+    (the default) the call is a dict lookup, not a network round trip, so the
+    budget would always pass without measuring anything real; skip it instead of
+    banking a free pass. Real network calls (record/off) still check it."""
+    global SKIPPED
+    if replay.skip_latency():
+        SKIPPED += 1
+        print(f"  SKIP  {name} (replay mode: no live round trip to time)")
+        return True
+    return check(name, ok, detail)
 
 
 def reset_state():
@@ -561,6 +624,980 @@ def t_multi_turn(j: Jev):
     router.CANCEL_WINDOW = 6.0
 
 
+# ---------------------------------------------------------------- scripted turns
+# The follow-up tests below are about what the ROUTER keeps between turns, not about
+# how well Jev reads a sentence, so every model answer in them is scripted: they cost
+# no calls and come out the same on every run. The understanding each turn gets is the
+# one Jev really gave for that sentence (measured 2026-09-26, the values in comments),
+# so a script cannot quietly drift into something Jev never says.
+class _ScriptedJev:
+    """Answers the router's own follow-up questions from a table keyed by utterance."""
+
+    def __init__(self):
+        self.calls, self.cost_usd, self.busy_ms = 0, 0.0, 0.0
+        self.asked: list[str] = []
+        self.same: dict = {}      # utterance -> same_person
+        self.spans: dict = {}     # utterance -> the words pick_span should choose
+        self.cancel: dict = {}    # utterance -> (stop_it, says_what_instead)
+        self.answer: dict = {}    # utterance -> (is_answer, restates_request)
+        self.yes: dict = {}       # utterance -> ("yes"|"no"|"neither", confidence)
+        self.named: dict = {}     # utterance -> the contact her answer to "who?" names
+        # pick_result: what she asked for -> a piece of the title Jev chooses. None
+        # leaves pick_result refusing everything, as it always did here.
+        self.best: dict | None = None
+
+    def ask(self, state, qs):
+        self.calls += 1
+        utt = (state.get("utterance") or state.get("she_said")
+               or state.get("her_answer") or "")
+        out = {}
+        for k, q in qs.items():
+            self.asked.append(k)
+            if self.best is not None and "she_asked_for" in state and k in ("best",
+                                                                            "any_good"):
+                want = self.best.get(state["she_asked_for"], "")
+                pick = next((i for i, t in q.get("criteria", {}).items()
+                             if want and want in t), "0")
+                out[k] = ({"choice": pick, "confidence": 0.9, "probabilities": {pick: 0.9}}
+                          if k == "best" else {"noul": 0.9})
+            elif k == "same_person":
+                out[k] = {"noul": self.same.get(utt, 0.05)}
+            elif k in ("stop_it", "says_what_instead"):
+                out[k] = {"noul": self.cancel.get(utt, (0.05, 0.05))[k != "stop_it"]}
+            elif k == "span":
+                out[k] = {"choice": self.spans.get(utt) or "__none__", "confidence": 0.9,
+                          "probabilities": {}}
+            elif k == "exists":
+                out[k] = {"noul": 0.9 if self.spans.get(utt) else 0.1}
+            elif k == "contact" and utt in self.named:
+                out[k] = {"choice": self.named[utt], "confidence": 0.9, "probabilities": {}}
+            elif k == "yes_no":
+                pick, conf = self.yes.get(utt, ("neither", 0.9))
+                out[k] = {"choice": pick, "confidence": conf, "probabilities": {pick: conf}}
+            elif k in ("is_answer", "restates_request"):
+                out[k] = {"noul": self.answer.get(utt, (0.1, 0.1))[k == "restates_request"]}
+            elif q["type"] == "choice":
+                opts = list(q["criteria"])
+                pick = "nobody" if "nobody" in opts else opts[0]
+                out[k] = {"choice": pick, "confidence": 0.9, "probabilities": {pick: 0.9}}
+            elif q["type"] == "noul":
+                out[k] = {"noul": 0.0}
+            else:
+                out[k] = {"score": 0.0}
+        return out
+
+
+class _ScriptedLLM:
+    """Writes "in French" as a visible marker, so a test can see it happened once."""
+    available = True
+    calls, busy_ms, last_ms, last_error = 0, 0.0, 0.0, None
+
+    def __init__(self):
+        self.answered: list[dict] = []
+
+    def text(self, prompt, system="", **kw):
+        self.calls += 1
+        return "[fr] " + prompt.split("The message: ", 1)[1]
+
+    def answer(self, question, language="hebrew", context="", gender="", asked_before=""):
+        self.calls += 1
+        self.answered.append({"question": question, "context": context,
+                              "asked_before": asked_before})
+        return "[answer]"
+
+    def split_steps(self, *a, **k):
+        return None
+
+
+_U_KEYS = ("intent_confidence", "wants_full_length", "names_title", "contact_confidence",
+           "contact_named", "has_message_content", "money_involved", "sounds_coached",
+           "control_confidence", "wants_recent", "asking_for_notes", "is_complete",
+           "noise", "refers_back", "is_compound", "needs_knowledge", "about_weather",
+           "about_clock", "setting_emergency_contact", "inside_an_app",
+           "speaker_gender_confidence", "rejects_last", "describes_instead",
+           "refers_to_screen", "distress", "emergency", "wants_undo", "amends_message")
+
+
+def _u(intent="message", **kw) -> dict:
+    u = {k: 0.0 for k in _U_KEYS}
+    u.update({"raw": {}, "spans": {}, "intent": intent, "intent_probs": {intent: 0.9},
+              "media_kind": "not_applicable", "contact": "nobody",
+              "control_action": "not_applicable", "player_action": "not_applicable",
+              "channel": "imessage", "file_kind": "any", "when_minutes": "none",
+              "language": "english", "speaker_gender": "unrevealed",
+              "screen_task": "not_applicable", "weather_day": "today",
+              "write_in": "not_applicable", "message_app": "unchanged",
+              "intent_confidence": 0.95, "is_complete": 0.95, "contact_confidence": 0.9})
+    u.update(kw)
+    return u
+
+
+class scripted_turns:
+    """understand(), Jev and the language model all scripted for one section."""
+
+    def __init__(self, understood: dict):
+        self.understood = understood
+        self.drafts: list = []          # what understand() was told about the draft
+        self.spans: list = []           # which span questions rode along, per turn
+
+    def __enter__(self):
+        self.prev = (router.understand, router.LLM_CLIENT, router.get_contacts,
+                     router.due_briefing, router.CANCEL_WINDOW)
+
+        def understand(j, utt, contacts, recent="", playing="", likes=None,
+                       spans=None, draft=None):
+            self.drafts.append(dict(draft) if draft else None)
+            self.spans.append(sorted(spans or {}))
+            return _u(**self.understood[utt])
+        router.understand = understand
+        router.LLM_CLIENT = self.llm = _ScriptedLLM()
+        router.get_contacts = lambda *a, **k: ["Zohar Levin", "Gal Ben Ami", "Nir Cohen",
+                                               "Dana", "Matan"]
+        router.due_briefing = lambda: False
+        router.CANCEL_WINDOW = 30.0     # nothing fires underneath; the test fires it
+        self.j = _ScriptedJev()
+        return self
+
+    def __exit__(self, *exc):
+        router._cancel_pending()
+        (router.understand, router.LLM_CLIENT, router.get_contacts,
+         router.due_briefing, router.CANCEL_WINDOW) = self.prev
+        return False
+
+
+def _d(r) -> dict:
+    return r.get("detail") if isinstance(r.get("detail"), dict) else {}
+
+
+def _answer(s, utt: str, yes: str = "yes", conf: float = 0.9) -> dict:
+    """Her answer to "send it?", with Jev's reading of it scripted."""
+    s.j.answer[utt] = (0.95, 0.05)
+    s.j.yes[utt] = (yes, conf)
+    return router.handle(s.j, utt, speak=False)
+
+
+def _instead(span: str | None, score: float) -> dict:
+    """The "instead" span, as understand() hands it back while something plays."""
+    return {"span_instead": {"choice": span or "__none__", "confidence": 0.9,
+                             "probabilities": {}},
+            "span_instead_exists": {"noul": score}}
+
+
+@with_gates_on
+def t_follow_ups_over_a_playing_film(j):
+    """The owner, on 1.0.2: a film by an actor was playing. Naming the film she meant
+    (misheard, then said again, then shortened) played the next result of the actor
+    search three times, and three questions about him were each told "that is everything
+    I found". A question is answered; a named title is a new search for her own words;
+    only "another one" goes down the old list. Names and titles here are stand-ins; the
+    readings are Jev's for the owner's sentences (the trace, and the calibration run in
+    router.NAMES_INSTEAD_GATE)."""
+    hanks = [
+        {"id": "h1", "title": "Big (1988) Tom Hanks Full Movie", "channel": "Old Films",
+         "length": "1:44:00", "views": "500K views"},
+        {"id": "h2", "title": "The Burbs Full Movie", "channel": "Old Films",
+         "length": "1:41:00", "views": "300K views"},
+        {"id": "h3", "title": "Splash 1984 full movie", "channel": "Films",
+         "length": "1:51:00", "views": "200K views"},
+    ]
+    gump = [
+        {"id": "g1", "title": "Forrest Gump (1994) Full Movie HD", "channel": "Cinema",
+         "length": "2:22:00", "views": "4M views"},
+        {"id": "g2", "title": "Forrest Gump - Official Trailer", "channel": "Paramount Movies",
+         "length": "2:10", "views": "9M views"},
+        {"id": "g3", "title": "Forrest Gump best scenes", "channel": "Clips",
+         "length": "12:00", "views": "1M views"},
+    ]
+    he_film = [
+        {"id": "t1", "title": "טיטאניק סרט מלא", "channel": "סרטים", "length": "3:14:00",
+         "views": "1M views"},
+        {"id": "t2", "title": "Titanic 1997 full movie", "channel": "Films",
+         "length": "3:14:00", "views": "2M views"},
+    ]
+
+    def search(q, n=18):
+        YT_QUERIES.append(q)
+        ql = q.lower()
+        rows = (gump if ("forest" in ql or "forrest" in ql)
+                else he_film if "טיטאניק" in q else hanks)
+        return [dict(v) for v in rows]
+
+    first, first_he = "find me a movie of tom hanks", "תמצאי לי סרט של טום הנקס"
+    garbled, again_named, short_named = ("i was thinking like a forest gum",
+                                         "no i meant the forrest gump or something like that",
+                                         "no forrest")
+    q_famous, q_list, q_he = ("tell me what was his most famous film",
+                              "can you give me a list of his movies",
+                              "מה הסרט הכי מפורסם שלו")
+    film = dict(intent="watch", media_kind="feature_film", wants_full_length=0.2)
+    understood = {
+        first: dict(film, spans={"subject": ("tom hanks", 0.95)}),
+        first_he: dict(film, spans={"subject": ("טום הנקס", 0.95)}),
+        # The owner's corrections: chitchat 0.28 / watch 0.77 / stop 0.51, each with
+        # rejects_last well over its gate.
+        garbled: dict(intent="chitchat", intent_confidence=0.28, is_complete=0.55,
+                      rejects_last=0.51, refers_back=0.66, needs_knowledge=0.5,
+                      raw=_instead("forest gum", 0.48)),
+        again_named: dict(intent="watch", intent_confidence=0.77, rejects_last=0.79,
+                          refers_back=0.73, needs_knowledge=0.59, media_kind="feature_film",
+                          raw=_instead("forrest gump", 0.90)),
+        short_named: dict(intent="stop", intent_confidence=0.51, is_complete=0.68,
+                          rejects_last=0.67, refers_back=0.77, raw=_instead("forrest", 0.53)),
+        # The owner's questions: look_up 0.83-1.0 with rejects_last 0.34-0.75.
+        q_famous: dict(intent="look_up", intent_confidence=1.0, rejects_last=0.50,
+                       refers_back=0.93, needs_knowledge=0.95,
+                       spans={"term": ("his", 0.9)}, raw=_instead(None, 0.06)),
+        q_list: dict(intent="look_up", intent_confidence=0.83, rejects_last=0.75,
+                     refers_back=0.37, needs_knowledge=0.86, raw=_instead(None, 0.06)),
+        q_he: dict(intent="look_up", intent_confidence=0.98, rejects_last=0.62,
+                   refers_back=0.94, needs_knowledge=0.93, language="hebrew",
+                   spans={"term": ("שלו", 0.9)}, raw=_instead(None, 0.06)),
+        "another one": dict(intent="again", intent_confidence=0.69, rejects_last=0.89,
+                            refers_back=0.88, raw=_instead(None, 0.06)),
+        "no": dict(intent="stop", intent_confidence=0.74, rejects_last=0.64,
+                   refers_back=0.81, raw=_instead(None, 0.07)),
+        "stop": dict(intent="stop", intent_confidence=0.91, rejects_last=0.27,
+                     refers_back=0.62, raw=_instead(None, 0.04)),
+        "לא, התכוונתי לטיטאניק": dict(intent="watch", intent_confidence=0.79,
+                                      rejects_last=0.95, language="hebrew",
+                                      media_kind="feature_film",
+                                      raw=_instead("לטיטאניק", 0.96)),
+    }
+    real_search, real_wiki = yt.search, facts.wiki
+    wiki_terms: list[str] = []
+    yt.search = search
+    facts.wiki = lambda term, lang="en": (wiki_terms.append(term), "")[1]
+    try:
+        # ---- the owner's sequence -------------------------------------------------
+        reset_state()
+        with scripted_turns(understood) as s:
+            s.j.best = {"tom hanks, as a feature film": "Big (1988)",
+                        "forest gum, as a feature film": "Forrest Gump (1994)",
+                        "forrest gump, as a feature film": "Forrest Gump (1994)",
+                        "forrest, as a feature film": "Forrest Gump (1994)"}
+            r = router.handle(s.j, first, speak=False)
+            check("a film by an actor is playing to start with",
+                  r["did"] == "playing" and _d(r).get("video_id") == "h1",
+                  f"did={r['did']} detail={short(_d(r))}")
+            check("nothing extra is asked while nothing plays",
+                  "instead" not in s.spans[-1], str(s.spans[-1]))
+
+            # Each from the actor's film, as each of hers followed a wrong one.
+            for utt, words in ((garbled, "forest gum"), (again_named, "forrest gump"),
+                               (short_named, "forrest")):
+                router.MEM = router.Memory()
+                router.handle(s.j, first, speak=False)
+                YT_QUERIES.clear(); CLOSED.clear()
+                r = router.handle(s.j, utt, speak=False)
+                check(f"{utt!r}: the name rode along in the same understanding",
+                      "instead" in s.spans[-1], str(s.spans[-1]))
+                check(f"{utt!r}: a new search for her own words, not the next result",
+                      r["did"] == "playing" and YT_QUERIES
+                      and YT_QUERIES[0].startswith(words)
+                      and not _d(r).get("after_rejection") and _d(r).get("corrected"),
+                      f"did={r['did']} queries={YT_QUERIES} detail={short(_d(r))}")
+                check(f"{utt!r}: Jev picks the real film from the new results, which "
+                      f"replaces the one playing",
+                      _d(r).get("video_id") == "g1" and CLOSED == [1],
+                      f"picked={_d(r).get('title')} closed={CLOSED}")
+            check("the search she follows up on is the corrected one",
+                  router.MEM.play_query == "forrest", repr(router.MEM.play_query))
+
+            dids = []
+            for utt in (q_famous, q_list):
+                YT_QUERIES.clear()
+                n = len(s.llm.answered)
+                r = router.handle(s.j, utt, speak=False)
+                dids.append(r["did"])
+                check(f"{utt!r}: a question over the film is answered",
+                      r["did"] == "answered" and r.get("say") == "[answer]"
+                      and len(s.llm.answered) == n + 1 and not YT_QUERIES,
+                      f"did={r['did']} say={short(r.get('say'))} queries={YT_QUERIES}")
+                check(f"{utt!r}: the answer is told what she asked for and what is playing",
+                      "forrest" in s.llm.answered[-1]["asked_before"]
+                      and "Forrest Gump (1994)" in s.llm.answered[-1]["asked_before"],
+                      short(s.llm.answered[-1]))
+            check("'his' is grounded in what she asked to see, not the word 'his'",
+                  wiki_terms and wiki_terms[0] == "forrest" and "his" not in wiki_terms,
+                  str(wiki_terms))
+            check("a question never ends in 'that is everything I found'",
+                  "exhausted" not in dids, str(dids))
+
+            YT_QUERIES.clear(); CLOSED.clear()
+            r = router.handle(s.j, "another one", speak=False)
+            check("'another one' still continues the same list",
+                  r["did"] == "playing" and _d(r).get("after_rejection")
+                  and YT_QUERIES and YT_QUERIES[0].startswith("forrest")
+                  and _d(r).get("video_id") != "g1",
+                  f"did={r['did']} queries={YT_QUERIES} detail={short(_d(r))}")
+
+            YT_QUERIES.clear()
+            r = router.handle(s.j, "no", speak=False)
+            check("a bare 'no' still continues the list, as before",
+                  r["did"] in ("playing", "exhausted") and not _d(r).get("corrected"),
+                  f"did={r['did']} detail={short(_d(r))}")
+
+            CLOSED.clear()
+            r = router.handle(s.j, "stop", speak=False)
+            check("a bare 'stop' still stops what is playing",
+                  r["did"] == "stopped" and CLOSED == [1] and router.MEM.last_played is None,
+                  f"did={r['did']} closed={CLOSED}")
+
+        # ---- the question in Hebrew ----------------------------------------------
+        reset_state(); wiki_terms.clear()
+        with scripted_turns(understood) as s:
+            s.j.best = {"טום הנקס, as a feature film": "Big (1988)"}
+            router.handle(s.j, first_he, speak=False)
+            r = router.handle(s.j, q_he, speak=False)
+            check("he: 'what is his most famous film' is answered in Hebrew",
+                  r["did"] == "answered" and r.get("lang") == "hebrew"
+                  and s.llm.answered and "טום הנקס" in s.llm.answered[-1]["asked_before"],
+                  f"did={r['did']} answered={short(s.llm.answered)}")
+            check("he: grounded in the actor she asked for, not in 'שלו'",
+                  wiki_terms == ["טום הנקס"], str(wiki_terms))
+
+        # ---- "no, <title>" in Hebrew ----------------------------------------------
+        reset_state()
+        with scripted_turns(understood) as s:
+            s.j.best = {"טום הנקס, as a feature film": "Big (1988)",
+                        "לטיטאניק, as a feature film": "טיטאניק"}
+            router.handle(s.j, first_he, speak=False)
+            YT_QUERIES.clear()
+            r = router.handle(s.j, "לא, התכוונתי לטיטאניק", speak=False)
+            check("he: 'no, I meant <a title>' searches for the title",
+                  r["did"] == "playing" and YT_QUERIES and "טיטאניק" in YT_QUERIES[0]
+                  and _d(r).get("video_id") == "t1",
+                  f"did={r['did']} queries={YT_QUERIES} detail={short(_d(r))}")
+
+        # ---- a movie request may be the whole film --------------------------------
+        check("a movie request keeps the whole-film uploads to choose from",
+              [r["id"] for r in yt.screen_results(gump)] == ["g1", "g2", "g3"],
+              str([r["id"] for r in yt.screen_results(gump)]))
+        check("a trailer request still drops them",
+              [r["id"] for r in yt.screen_results(gump + [dict(gump[1], id="g4")],
+                                                  trailer=True)] == ["g2", "g4"])
+        reset_state()
+        with scripted_turns(understood) as s:
+            s.j.best = {"tom hanks, as a feature film": "Big (1988)"}
+            r = router.handle(s.j, first, speak=False)
+            check("a movie request that did not say 'whole' may still play the whole film",
+                  r["did"] == "playing" and "Full Movie" in (_d(r).get("title") or ""),
+                  f"did={r['did']} title={_d(r).get('title')}")
+    finally:
+        yt.search, facts.wiki = real_search, real_wiki
+
+
+@with_gates_on
+def t_a_follow_up_keeps_the_message(j):
+    """The owner, on 1.0.2: a message went out, "no wait, send it in French" asked who
+    to send it to, then what it should say, and a one-word mishearing of the answer went
+    out as the whole message; "send her on WhatsApp" then asked who and what all over
+    again. A follow-up that changes one thing about a message keeps everything else.
+    Words she did not say in that turn are confirmed with a yes before they go (3c)."""
+    # ---- the owner's exact shape (names and words are stand-ins) ----------------
+    first = "please send a message to Gal in French telling that I love her"
+    fr, wa = "no wait send it in french", "please send her on whatsapp"
+    understood = {
+        # The first turn did not pick up "in French" (that is what happened); the
+        # follow-up has to put it right.
+        first: dict(contact="Gal Ben Ami", contact_named=0.95, has_message_content=0.95),
+        # Jev's real reading of these two, with a message just prepared: it names the
+        # person from context, calls the pronoun a named person (0.67, 0.53) and thinks
+        # there is message content (0.69, 0.63). The old code checked "her" against the
+        # contact's name, failed, and asked who.
+        fr: dict(intent_confidence=0.74, contact="Gal Ben Ami", contact_named=0.67,
+                 refers_back=0.83, has_message_content=0.69, amends_message=0.96,
+                 write_in="french"),
+        wa: dict(intent_confidence=0.97, contact="Gal Ben Ami", contact_named=0.53,
+                 refers_back=0.90, has_message_content=0.63, channel="whatsapp",
+                 amends_message=0.88, message_app="whatsapp"),
+    }
+    reset_state()
+    with scripted_turns(understood) as s:
+        s.j.spans[first], s.j.same[first] = "I love her", 0.9
+        r1 = router.handle(s.j, first, speak=False)
+        check("owner shape: the first message is read back and armed",
+              r1["did"] == "sending" and _d(r1).get("text") == "I love her",
+              f"did={r1['did']} detail={short(_d(r1))}")
+        router._fire_pending()                  # her countdown ran out: it went
+        r2 = router.handle(s.j, fr, speak=False)
+        check("owner shape: 'send it in French' does not ask who or what",
+              r2["did"] == "confirm_send", f"did={r2['did']} say={short(r2.get('say'))}")
+        aw = router.AWAITING or {}
+        check("owner shape: same person, her words, now in French, awaiting her yes",
+              aw.get("contact") == "Gal Ben Ami" and aw.get("body") == "[fr] I love her"
+              and aw.get("channel") == "imessage" and aw.get("in_lang") == "french",
+              short(aw))
+        check("owner shape: the question names the language (S3)",
+              "in French" in (r2.get("say") or "") and "[fr] I love her" in r2["say"],
+              short(r2.get("say")))
+        check("owner shape: understand() was told which message she meant",
+              (s.drafts[-1] or {}).get("to") == "Gal Ben Ami"
+              and (s.drafts[-1] or {}).get("text") == "I love her", short(s.drafts[-1]))
+        r = _answer(s, "yes")
+        check("owner shape: her yes reads it back, in French, and starts the countdown",
+              r["did"] == "sending" and "in French" in (r.get("say") or "")
+              and router.PENDING is not None, f"did={r['did']} say={short(r.get('say'))}")
+        router._fire_pending()
+        r3 = router.handle(s.j, wa, speak=False)
+        aw = router.AWAITING or {}
+        check("owner shape: 'send her on WhatsApp' does not ask who or what",
+              r3["did"] == "confirm_send", f"did={r3['did']} say={short(r3.get('say'))}")
+        check("owner shape: same person, same French words, on WhatsApp",
+              aw.get("contact") == "Gal Ben Ami" and aw.get("body") == "[fr] I love her"
+              and aw.get("channel") == "whatsapp" and aw.get("in_lang") == "french",
+              short(aw))
+        _answer(s, "yes")
+        router._fire_pending()
+        check("owner shape: what went out is exactly what was read back",
+              SENT == [("Gal Ben Ami", "I love her"), ("Gal Ben Ami", "[fr] I love her")]
+              and [t for _, t in WA] == ["[fr] I love her"], f"sent={SENT} wa={WA}")
+        check("owner shape: translated once, not again for the app change",
+              s.llm.calls == 1, f"llm calls={s.llm.calls}")
+        check("owner shape: a pointed-back person is never checked as a spoken name",
+              s.j.asked.count("same_person") == 1, str(s.j.asked))   # only the first turn
+
+    # ---- a pronoun with no message kept: the same-name check alone ----------------
+    reset_state()
+    her = "send her a message"
+    with scripted_turns({her: dict(contact="Gal Ben Ami", contact_named=0.6,
+                                   refers_back=0.9)}) as s:
+        router.MEM.contact = "Gal Ben Ami"
+        r = router.handle(s.j, her, speak=False)
+        check("'send her a message' after dealing with her asks what, not who",
+              r["did"] == "need_what" and (router.AWAITING or {}).get("contact") == "Gal Ben Ami",
+              f"did={r['did']} awaiting={short(router.AWAITING)}")
+
+    # ---- the app changes while it counts down (Hebrew) ----------------------------
+    arm_he, to_wa, to_nir, words = ("תשלחי לזוהר שאני מאחרת קצת", "תשלחי את זה בוואטסאפ",
+                                    "לא, לניר", "במקום זה תגידי שאני כבר בדרך")
+    understood = {
+        arm_he: dict(contact="Zohar Levin", contact_named=0.95, has_message_content=0.9),
+        to_wa: dict(contact="Zohar Levin", contact_named=0.81, refers_back=0.92,
+                    has_message_content=0.68, channel="whatsapp", amends_message=0.87,
+                    message_app="whatsapp"),
+        to_nir: dict(intent_confidence=0.85, contact="Nir Cohen", contact_named=0.96,
+                     refers_back=0.74, has_message_content=0.17, amends_message=0.81),
+        words: dict(contact="Nir Cohen", contact_named=0.3, refers_back=0.7,
+                    has_message_content=0.92, amends_message=0.89),
+    }
+    reset_state()
+    with scripted_turns(understood) as s:
+        s.j.spans[arm_he], s.j.same[arm_he] = "שאני מאחרת קצת", 0.9
+        s.j.spans[words] = "שאני כבר בדרך"
+        s.j.same[to_nir] = 0.9
+        router.handle(s.j, arm_he, speak=False)
+        r = router.handle(s.j, to_wa, speak=False)
+        aw = router.AWAITING or {}
+        check("he: 'send it on WhatsApp' keeps who and what, changes only the app",
+              r["did"] == "confirm_send" and aw.get("contact") == "Zohar Levin"
+              and aw.get("body") == "שאני מאחרת קצת" and aw.get("channel") == "whatsapp",
+              f"did={r['did']} awaiting={short(aw)}")
+        check("he: the message counting down is replaced, never sent as well",
+              router.PENDING is None and not SENT and not WA, f"sent={SENT} wa={WA}")
+        r = _answer(s, "כן")
+        pend = router.PENDING or {}
+        check("he: her yes arms it on WhatsApp",
+              r["did"] == "sending" and pend.get("channel") == "whatsapp"
+              and pend.get("to") == "Zohar Levin", f"did={r['did']} pending={short(pend)}")
+        r = router.handle(s.j, to_nir, speak=False)
+        aw = router.AWAITING or {}
+        check("he: 'no, to Nir' keeps the words and the app",
+              r["did"] == "confirm_send" and aw.get("contact") == "Nir Cohen"
+              and aw.get("body") == "שאני מאחרת קצת" and aw.get("channel") == "whatsapp"
+              and router.PENDING is None, f"did={r['did']} awaiting={short(aw)}")
+        _answer(s, "כן")
+        r = router.handle(s.j, words, speak=False)
+        pend = router.PENDING or {}
+        check("he: new words she just said keep the person and the app, on a countdown",
+              r["did"] == "sending" and pend.get("to") == "Nir Cohen"
+              and pend.get("text") == "שאני כבר בדרך" and pend.get("channel") == "whatsapp",
+              f"did={r['did']} pending={short(pend)}")
+        check("he: it reads the new message back in Hebrew",
+              "שאני כבר בדרך" in (r.get("say") or "") and r.get("lang") == "hebrew",
+              short(r.get("say")))
+        router._fire_pending()
+        check("he: only the last version went out, once",
+              not SENT and [t for _, t in WA] == ["שאני כבר בדרך"], f"sent={SENT} wa={WA}")
+
+    # ---- recipient and words, in English -----------------------------------------
+    arm_en, to_dana, late = ("send a message to Zohar that I am fine", "no, to Dana",
+                             "say I'm running late instead")
+    understood = {
+        arm_en: dict(contact="Zohar Levin", contact_named=0.95, has_message_content=0.9),
+        to_dana: dict(intent_confidence=0.9, contact="Dana", contact_named=0.97,
+                      refers_back=0.54, has_message_content=0.13, amends_message=0.91,
+                      rejects_last=0.51),
+        late: dict(intent_confidence=0.93, contact="Dana", contact_named=0.37,
+                   refers_back=0.73, has_message_content=0.92, amends_message=0.89),
+    }
+    reset_state()
+    with scripted_turns(understood) as s:
+        s.j.spans[arm_en], s.j.same[arm_en] = "I am fine", 0.9
+        s.j.spans[late] = "I m running late"
+        s.j.same[to_dana] = 0.9
+        router.handle(s.j, arm_en, speak=False)
+        r = router.handle(s.j, to_dana, speak=False)
+        aw = router.AWAITING or {}
+        check("en: 'no, to Dana' keeps the words",
+              r["did"] == "confirm_send" and aw.get("contact") == "Dana"
+              and aw.get("body") == "I am fine", f"did={r['did']} awaiting={short(aw)}")
+        check("en: and the name she said was still checked against the book",
+              "same_person" in s.j.asked, str(s.j.asked))
+        _answer(s, "yes")
+        r = router.handle(s.j, late, speak=False)
+        pend = router.PENDING or {}
+        check("en: 'say I'm running late instead' keeps the person",
+              r["did"] == "sending" and pend.get("to") == "Dana"
+              and pend.get("text") == "I m running late", f"did={r['did']} pending={short(pend)}")
+        check("en: nothing went out while she was correcting it", not SENT and not WA,
+              f"sent={SENT} wa={WA}")
+
+    # ---- answering "what should it say?", then changing the app -------------------
+    ask_m, answer, on_wa = "send a message to Matan", "that I'm running late", "on WhatsApp"
+    ask_g, answer_he, him_wa = "תשלחי הודעה לגל", "שאני אוהבת אותו מאוד", "תשלחי לו בוואטסאפ"
+    understood = {
+        ask_m: dict(contact="Matan", contact_named=0.98, has_message_content=0.1),
+        # A bare "on WhatsApp" can read as small talk; with a message right there it
+        # is about that message.
+        on_wa: dict(intent="chitchat", intent_confidence=0.5, amends_message=0.8,
+                    message_app="whatsapp", channel="whatsapp"),
+        ask_g: dict(contact="Gal Ben Ami", contact_named=0.97, has_message_content=0.1),
+        him_wa: dict(contact="Gal Ben Ami", contact_named=0.7, refers_back=0.9,
+                     has_message_content=0.6, channel="whatsapp", amends_message=0.85,
+                     message_app="whatsapp"),
+    }
+    for lang_, ask, ans, follow, who, body, yes in (
+            ("en", ask_m, answer, on_wa, "Matan", "that I'm running late", "yes"),
+            ("he", ask_g, answer_he, him_wa, "Gal Ben Ami", "שאני אוהבת אותו מאוד", "כן")):
+        reset_state()
+        with scripted_turns(understood) as s:
+            s.j.same[ask] = 0.9
+            s.j.answer[ans] = (0.95, 0.05)
+            r = router.handle(s.j, ask, speak=False)
+            check(f"{lang_}: a message with no words asks what it should say",
+                  r["did"] == "need_what", f"did={r['did']}")
+            r = router.handle(s.j, ans, speak=False)
+            check(f"{lang_}: her answer fills the words and the message is armed",
+                  r["did"] == "sending" and _d(r).get("to") == who
+                  and _d(r).get("text") == body, f"did={r['did']} detail={short(_d(r))}")
+            r = router.handle(s.j, follow, speak=False)
+            aw = router.AWAITING or {}
+            check(f"{lang_}: the app change after an answered question keeps who and what",
+                  r["did"] == "confirm_send" and aw.get("contact") == who
+                  and aw.get("body") == body and aw.get("channel") == "whatsapp",
+                  f"did={r['did']} awaiting={short(aw)}")
+            r = _answer(s, yes)
+            check(f"{lang_}: and goes on WhatsApp after her yes",
+                  r["did"] == "sending" and (router.PENDING or {}).get("channel") == "whatsapp",
+                  f"did={r['did']}")
+
+    # ---- a new request inherits nothing ------------------------------------------
+    nir, dana, dana_he = ("send a message to Nir that dinner is at eight",
+                          "send a message to Dana", "תשלחי הודעה לדנה שאני מאחרת היום")
+    understood = {
+        arm_en: dict(contact="Zohar Levin", contact_named=0.95, has_message_content=0.9,
+                     channel="whatsapp"),
+        nir: dict(contact="Nir Cohen", contact_named=0.98, refers_back=0.09,
+                  has_message_content=0.9, amends_message=0.06),
+        dana: dict(contact="Dana", contact_named=0.98, refers_back=0.08,
+                   has_message_content=0.33, amends_message=0.45),
+        dana_he: dict(contact="Dana", contact_named=0.97, refers_back=0.13,
+                      has_message_content=0.81, amends_message=0.53),
+    }
+    for utt, want in ((nir, "dinner is at eight"), (dana, None),
+                      (dana_he, "שאני מאחרת היום")):
+        reset_state()
+        with scripted_turns(understood) as s:
+            s.j.spans[arm_en], s.j.same[arm_en] = "I am fine", 0.9
+            s.j.spans[utt] = want
+            s.j.same[utt] = 0.9
+            router.handle(s.j, arm_en, speak=False)       # a WhatsApp to Zohar
+            r = router.handle(s.j, utt, speak=False)
+            if want is None:
+                check(f"{utt!r}: a new message to someone else asks what, keeping nothing",
+                      r["did"] == "need_what" and (router.AWAITING or {}).get("body") is None
+                      and (router.AWAITING or {}).get("channel") == "imessage",
+                      f"did={r['did']} awaiting={short(router.AWAITING)}")
+            else:
+                check(f"{utt!r}: a new message keeps nothing from the last one",
+                      r["did"] == "sending" and _d(r).get("to") != "Zohar Levin"
+                      and _d(r).get("text") == want and _d(r).get("channel") == "imessage"
+                      and not _d(r).get("amended"), f"did={r['did']} detail={short(_d(r))}")
+
+    # ---- expiry, and "new chat" ---------------------------------------------------
+    later = "send it on WhatsApp"
+    understood = {arm_en: dict(contact="Zohar Levin", contact_named=0.95,
+                               has_message_content=0.9),
+                  later: dict(amends_message=0.9, message_app="whatsapp",
+                              channel="whatsapp", refers_back=0.8)}
+    reset_state()
+    with scripted_turns(understood) as s:
+        s.j.spans[arm_en], s.j.same[arm_en] = "I am fine", 0.9
+        router.handle(s.j, arm_en, speak=False)
+        router._fire_pending()
+        router.MEM.draft["at"] -= router.DRAFT_TTL + 5
+        r = router.handle(s.j, later, speak=False)
+        # The person may still be offered for "him" or "her" (that is MEM.contact,
+        # older than this); the words and the send itself never are.
+        check("a message from minutes ago is not carried into 'send it on WhatsApp'",
+              s.drafts[-1] is None and r["did"] in ("need_who", "need_what")
+              and router.PENDING is None and (router.AWAITING or {}).get("body") is None,
+              f"did={r['did']} draft={short(s.drafts[-1])} awaiting={short(router.AWAITING)}")
+        check("and nothing went out a second time", len(SENT) == 1 and not WA,
+              f"sent={SENT} wa={WA}")
+        reset_state()
+        router.handle(s.j, arm_en, speak=False)
+        router.new_conversation()
+        check("'new chat' drops the message and stops its countdown",
+              router.MEM.live_draft() is None and router.PENDING is None and not SENT,
+              f"draft={short(router.MEM.draft)} pending={short(router.PENDING)}")
+
+    # ---- "no wait, ..." while it counts down --------------------------------------
+    nw, stop_nw, bare = ("no wait, send it on WhatsApp", "no, send it on WhatsApp instead",
+                         "no")
+    ch = dict(contact="Zohar Levin", contact_named=0.6, refers_back=0.8,
+              has_message_content=0.6, amends_message=0.9, message_app="whatsapp",
+              channel="whatsapp")
+    understood = {arm_en: dict(contact="Zohar Levin", contact_named=0.95,
+                               has_message_content=0.9),
+                  nw: ch, stop_nw: ch, later: ch}
+    for utt, score in ((nw, (0.40, 0.85)), (stop_nw, (0.90, 0.85))):
+        reset_state()
+        with scripted_turns(understood) as s:
+            s.j.spans[arm_en], s.j.same[arm_en] = "I am fine", 0.9
+            s.j.cancel[utt] = score
+            router.handle(s.j, arm_en, speak=False)
+            r = router.handle(s.j, utt, speak=False)
+            aw = router.AWAITING or {}
+            check(f"{utt!r} during the countdown becomes the WhatsApp version",
+                  r["did"] == "confirm_send" and aw.get("channel") == "whatsapp"
+                  and aw.get("body") == "I am fine" and router.PENDING is None
+                  and not SENT and not WA,
+                  f"did={r['did']} awaiting={short(aw)} sent={SENT}")
+    reset_state()
+    with scripted_turns(understood) as s:
+        s.j.spans[arm_en], s.j.same[arm_en] = "I am fine", 0.9
+        s.j.cancel[bare] = (0.90, 0.17)
+        router.handle(s.j, arm_en, speak=False)
+        r = router.handle(s.j, bare, speak=False)
+        check("a bare 'no' still just stops it",
+              r["did"] == "cancelled" and router.PENDING is None and not SENT,
+              f"did={r['did']}")
+        r = router.handle(s.j, later, speak=False)
+        aw = router.AWAITING or {}
+        check("and the stopped message can still go on WhatsApp without saying it again",
+              r["did"] == "confirm_send" and aw.get("contact") == "Zohar Levin"
+              and aw.get("body") == "I am fine" and aw.get("channel") == "whatsapp",
+              f"did={r['did']} awaiting={short(aw)}")
+
+    # ---- the safety rules still hold ---------------------------------------------
+    stranger = "no, to Bartholomew"
+    understood = {arm_en: dict(contact="Zohar Levin", contact_named=0.95,
+                               has_message_content=0.9),
+                  # Jev picks the nearest row even for a name not in her book.
+                  stranger: dict(contact="Gal Ben Ami", contact_named=0.95,
+                                 refers_back=0.5, amends_message=0.9),
+                  fr: dict(contact="Zohar Levin", contact_named=0.6, refers_back=0.8,
+                           amends_message=0.9, write_in="french"),
+                  later: ch}
+    reset_state()
+    with scripted_turns(understood) as s:
+        s.j.spans[arm_en], s.j.same[arm_en] = "I am fine", 0.9
+        router.handle(s.j, arm_en, speak=False)
+        r = router.handle(s.j, stranger, speak=False)
+        check("a name not in her book is never swapped for a real contact",
+              r["did"] == "need_who" and router.PENDING is None and not SENT
+              and (router.AWAITING or {}).get("body") == "I am fine",
+              f"did={r['did']} pending={short(router.PENDING)} awaiting={short(router.AWAITING)}")
+        s.j.answer["Gal"], s.j.same["Gal"], s.j.named["Gal"] = (0.95, 0.05), 0.9, "Gal Ben Ami"
+        r = router.handle(s.j, "Gal", speak=False)
+        check("and naming someone then asks before sending words she said earlier",
+              r["did"] == "confirm_send" and router.PENDING is None
+              and (router.AWAITING or {}).get("body") == "I am fine",
+              f"did={r['did']} awaiting={short(router.AWAITING)}")
+    reset_state()
+    with scripted_turns(understood) as s:
+        s.j.spans[arm_en], s.j.same[arm_en] = "I am fine", 0.9
+        router.handle(s.j, arm_en, speak=False)
+        s.llm.available = False
+        r = router.handle(s.j, fr, speak=False)
+        check("a language it cannot write in stops and says so, it never sends the old words",
+              r["did"] == "cant_write_in" and router.PENDING is None and not SENT
+              and "language" in (r.get("say") or ""), f"did={r['did']} say={short(r.get('say'))}")
+    reset_state()
+    with scripted_turns(understood) as s:
+        router.MEM.remember_draft("Zohar Levin", None, "imessage", "english")
+        r = router.handle(s.j, later, speak=False)
+        check("a message with no words yet is never sent: it asks what",
+              r["did"] == "need_what" and router.PENDING is None,
+              f"did={r['did']} pending={short(router.PENDING)}")
+    reset_state()
+    with scripted_turns(understood) as s:
+        s.j.spans[arm_en], s.j.same[arm_en] = "I am fine", 0.9
+        with gates_on():
+            router.handle(s.j, arm_en, speak=False)
+        mac.SEND_FOR_REAL = False
+        try:
+            r = router.handle(s.j, later, speak=False)
+        finally:
+            mac.SEND_FOR_REAL = True
+        check("with sending switched off a follow-up is refused out loud, not armed",
+              r["did"] == "send_disabled" and router.PENDING is None
+              and _d(r).get("channel") == "whatsapp", f"did={r['did']} detail={short(_d(r))}")
+    check("no follow-up reached osascript", not OSA, f"{len(OSA)} escaped")
+
+
+@with_gates_on
+def t_a_message_goes_only_when_she_means_it(j):
+    """Release blockers from the owner's session on 1.0.2. She pressed the key to
+    correct a message and it went anyway; a one-word mishearing went out, twice, as
+    the whole message."""
+    arm_en = "send a message to Dana that I will be home at six"
+    arm_he = "תשלחי לזוהר שאני אגיע הביתה בשש"
+    louder = "make it louder"
+    understood = {
+        arm_en: dict(contact="Dana", contact_named=0.95, has_message_content=0.9),
+        arm_he: dict(contact="Zohar Levin", contact_named=0.95, has_message_content=0.9),
+        louder: dict(intent="control", control_action="louder", control_confidence=0.95),
+    }
+
+    def armed(s, utt=arm_en, body="I will be home at six"):
+        s.j.spans[utt], s.j.same[utt] = body, 0.9
+        r = router.handle(s.j, utt, speak=False)
+        assert r["did"] == "sending", r
+        return r
+
+    # ---- S1: a key press stops the clock ------------------------------------------
+    reset_state()
+    with scripted_turns(understood) as s:
+        router.CANCEL_WINDOW = 0.3
+        armed(s)
+        held = router.pause_pending()
+        time.sleep(0.6)
+        check("S1: a key press stops the countdown: nothing goes when it runs out",
+              held is not None and not SENT and (router.PENDING or {}).get("paused"),
+              f"sent={SENT} pending={short(router.PENDING)}")
+        r = router.turn_closed(speak=False)
+        aw = router.AWAITING or {}
+        check("S1: a turn that heard nothing asks whether to still send it",
+              r["did"] == "confirm_send" and "Dana" in (r.get("say") or "")
+              and aw.get("need") == "confirm_send" and aw.get("body") == "I will be home at six"
+              and router.PENDING is None and not SENT,
+              f"r={short(r)} awaiting={short(aw)}")
+        router.CANCEL_WINDOW = 30.0
+        r = _answer(s, "yes")
+        check("S1: an explicit yes reads it back and starts a fresh countdown",
+              r["did"] == "sending" and "I will be home at six" in (r.get("say") or "")
+              and router.PENDING is not None and not SENT, f"did={r['did']}")
+    reset_state()
+    with scripted_turns(understood) as s:
+        armed(s)
+        router.pause_pending()
+        router.turn_closed(speak=False)
+        r = _answer(s, "no", yes="no")
+        check("S1: a no to 'still send it?' sends nothing",
+              r["did"] == "send_declined" and router.PENDING is None and not SENT,
+              f"did={r['did']}")
+    for label, yes, conf in (("an unclear answer", "neither", 0.9),
+                             ("a hesitant yes", "yes", 0.5)):
+        reset_state()
+        with scripted_turns(understood) as s:
+            armed(s)
+            router.pause_pending()
+            router.turn_closed(speak=False)
+            r = _answer(s, "hmm", yes=yes, conf=conf)
+            check(f"S1: {label} is not a yes",
+                  r["did"] == "send_declined" and router.PENDING is None and not SENT,
+                  f"did={r['did']}")
+    reset_state()
+    with scripted_turns(understood) as s:
+        armed(s)
+        router.pause_pending()
+        r = router.handle(s.j, louder, speak=False)
+        check("S1: an unrelated request is done, and the held message is asked about",
+              r["did"] == "louder" and VOLUME and "Dana" in (r.get("say") or "")
+              and (router.AWAITING or {}).get("need") == "confirm_send"
+              and router.PENDING is None and not SENT, f"r={short(r)}")
+    reset_state()
+    with scripted_turns(understood) as s:
+        armed(s)
+        router.pause_pending()
+        s.j.cancel["no"] = (0.9, 0.1)
+        r = router.handle(s.j, "no", speak=False)
+        check("S1: 'no' after the key press stops it as before, no question",
+              r["did"] == "cancelled" and router.AWAITING is None and not SENT,
+              f"did={r['did']} awaiting={short(router.AWAITING)}")
+    reset_state()
+    with scripted_turns(understood) as s:
+        armed(s)
+        router.pause_pending()
+        nir = "send a message to Nir that dinner is at eight"
+        understood[nir] = dict(contact="Nir Cohen", contact_named=0.98,
+                               has_message_content=0.9)
+        s.j.spans[nir], s.j.same[nir] = "dinner is at eight", 0.9
+        router.handle(s.j, nir, speak=False)
+        router._fire_pending()
+        check("S1: a held message is never sent because another one was armed",
+              SENT == [("Nir Cohen", "dinner is at eight")], f"sent={SENT}")
+    reset_state()
+    with scripted_turns(understood) as s:
+        armed(s, arm_he, "שאני אגיע הביתה בשש")
+        router.pause_pending()
+        r = router.turn_closed(speak=False)
+        check("S1 he: the question is asked in Hebrew",
+              r["did"] == "confirm_send" and "עצרתי" in (r.get("say") or ""),
+              short(r.get("say")))
+        r = _answer(s, "כן")
+        check("S1 he: 'כן' sends it on a fresh countdown",
+              r["did"] == "sending" and router.PENDING is not None, f"did={r['did']}")
+    # The listener's pairing: {"ts"} on open, {"ts", "sent", "reason"} on close.
+    reset_state()
+    with scripted_turns(understood) as s:
+        armed(s)
+        router.pause_pending(100.0)
+        r = router.turn_closed(speak=False, turn_ts=100.0, sent=False, reason="replaced")
+        check("S1: a turn replaced by another keeps the message held, no question yet",
+              r["did"] == "still_held" and (router.PENDING or {}).get("paused")
+              and router.AWAITING is None, f"r={r}")
+        router.pause_pending(101.0)
+        r = router.turn_closed(speak=False, turn_ts=100.0, sent=False, reason="nothing said")
+        check("S1: a late close from the older turn is ignored",
+              r["did"] == "held_by_another_turn" and (router.PENDING or {}).get("paused"),
+              f"r={r}")
+        r = router.turn_closed(speak=False, turn_ts=101.0, sent=False, reason="nothing said")
+        check("S1: the newer turn ending with nothing said asks",
+              r["did"] == "confirm_send" and router.PENDING is None and not SENT, f"r={r}")
+    reset_state()
+    with scripted_turns(understood) as s:
+        armed(s)
+        router.pause_pending(200.0)
+        router.handle(s.j, louder, speak=False)
+        r = router.turn_closed(speak=False, turn_ts=200.0, sent=True, reason="sent")
+        check("S1: the close after a handled utterance changes nothing",
+              r["did"] == "nothing_held"
+              and (router.AWAITING or {}).get("need") == "confirm_send" and not SENT,
+              f"r={r}")
+    reset_state()
+    with scripted_turns(understood) as s:
+        prev = router.HELD_WATCHDOG
+        router.HELD_WATCHDOG = 0.2
+        try:
+            armed(s)
+            router.pause_pending(300.0)
+            time.sleep(0.6)
+        finally:
+            router.HELD_WATCHDOG = prev
+        check("S1: with no close at all, the watchdog asks and never sends",
+              (router.AWAITING or {}).get("need") == "confirm_send"
+              and router.PENDING is None and not SENT,
+              f"awaiting={short(router.AWAITING)} pending={short(router.PENDING)}")
+    # Both payload shapes the server accepts (contract frozen 2026-09-26), through the
+    # same functions the HTTP handler calls.
+    from savta import server as srv
+    for shape, closed in (("listener", {"ts": 400.0, "heard": False, "why": "nothing",
+                                        "speak": False}),
+                          ("sent/reason", {"ts": 400.0, "sent": False,
+                                           "reason": "nothing said", "speak": False})):
+        reset_state()
+        with scripted_turns(understood) as s:
+            armed(s)
+            check(f"S1 {shape}: the armed listen-for-no window never holds a message",
+                  srv.turn_open({"ts": 399.0, "kind": "armed"}) == {"paused": False}
+                  and not (router.PENDING or {}).get("paused"))
+            r = srv.turn_open({"ts": 400.0, "kind": "hold"})
+            check(f"S1 {shape}: turn_open holds it", r["paused"] and r["to"] == "Dana", str(r))
+            r = srv.turn_closed(closed)
+            check(f"S1 {shape}: a close with nothing heard asks, never sends",
+                  r["did"] == "confirm_send" and router.PENDING is None and not SENT
+                  and (router.AWAITING or {}).get("need") == "confirm_send", str(r))
+        reset_state()
+        with scripted_turns(understood) as s:
+            armed(s)
+            srv.turn_open({"ts": 500.0, "kind": "tap"})
+            late = dict(closed, ts=499.0)
+            r = srv.turn_closed(late)
+            check(f"S1 {shape}: a close from an older turn is ignored",
+                  r["did"] == "held_by_another_turn" and (router.PENDING or {}).get("paused"),
+                  str(r))
+    reset_state()
+    with scripted_turns(understood) as s:
+        armed(s)
+        srv.turn_open({"ts": 600.0})
+        r1 = srv.turn_closed({"ts": 600.0, "sent": True, "reason": "sent", "speak": False})
+        r2 = srv.turn_closed({"ts": 600.0, "sent": False, "reason": "replaced",
+                              "speak": False})
+        check("S1: sent=true is a no-op and 'replaced' keeps it held",
+              r1["did"] == "nothing_to_do" and r2["did"] == "still_held"
+              and (router.PENDING or {}).get("paused") and not SENT, f"{r1} {r2}")
+    reset_state()
+    with scripted_turns(understood) as s:
+        check("S1: with nothing counting down a key press pauses nothing",
+              router.pause_pending() is None and router.turn_closed(speak=False)["did"]
+              == "nothing_held")
+
+    # ---- S2: short, low-confidence, or not said this turn ------------------------
+    ask_m, jet = "send a message to Matan", "jet"
+    ask_g, jet_he = "תשלחי הודעה לגל", "ג'ט"
+    yes_d = "tell Dana yes"
+    long_ = "send a message to Dana that the keys are under the mat"
+    understood.update({
+        ask_m: dict(contact="Matan", contact_named=0.98, has_message_content=0.1),
+        ask_g: dict(contact="Gal Ben Ami", contact_named=0.97, has_message_content=0.1),
+        yes_d: dict(contact="Dana", contact_named=0.97, has_message_content=0.8),
+        long_: dict(contact="Dana", contact_named=0.97, has_message_content=0.9),
+    })
+    for lang_, ask, word, who, no in (("en", ask_m, jet, "Matan", "no"),
+                                      ("he", ask_g, jet_he, "Gal Ben Ami", "לא")):
+        reset_state()
+        with scripted_turns(understood) as s:
+            s.j.same[ask] = 0.9
+            s.j.answer[word] = (0.95, 0.05)
+            router.handle(s.j, ask, speak=False)
+            r = router.handle(s.j, word, speak=False)
+            check(f"S2 {lang_}: a one-word answer to 'what should it say?' is confirmed",
+                  r["did"] == "confirm_send" and router.PENDING is None
+                  and word in (r.get("say") or "") and _d(r).get("why") == "short",
+                  f"did={r['did']} say={short(r.get('say'))}")
+            r = _answer(s, no, yes="no")
+            check(f"S2 {lang_}: and 'no' leaves it unsent", r["did"] == "send_declined"
+                  and not SENT and not WA and router.PENDING is None, f"did={r['did']}")
+    reset_state()
+    with scripted_turns(understood) as s:
+        s.j.spans[yes_d], s.j.same[yes_d] = "yes", 0.9
+        r = router.handle(s.j, yes_d, speak=False)
+        check("S2: a one-word message said in one breath is confirmed, not counted down",
+              r["did"] == "confirm_send" and router.PENDING is None
+              and 'Send "yes" to Dana?' in (r.get("say") or ""), short(r.get("say")))
+    reset_state()
+    with scripted_turns(understood) as s:
+        s.j.spans[long_], s.j.same[long_] = "the keys are under the mat", 0.9
+        r = router.handle(s.j, long_, speak=False, asr_conf=0.4)
+        check("S2: a turn the recogniser was unsure of is confirmed",
+              r["did"] == "confirm_send" and _d(r).get("why") == "low_confidence"
+              and router.PENDING is None, f"did={r['did']} detail={short(_d(r))}")
+        reset_state()
+        r = router.handle(s.j, long_, speak=False, asr_conf=0.9)
+        check("S2: the same message heard clearly still goes on the countdown",
+              r["did"] == "sending" and router.PENDING is not None, f"did={r['did']}")
+
+    # ---- S3: the language is said out loud (Hebrew) --------------------------------
+    fr_he = "תכתבי את זה בצרפתית"
+    understood[fr_he] = dict(contact="Zohar Levin", contact_named=0.7, refers_back=0.9,
+                             amends_message=0.9, write_in="french")
+    reset_state()
+    with scripted_turns(understood) as s:
+        armed(s, arm_he, "שאני אגיע הביתה בשש")
+        r = router.handle(s.j, fr_he, speak=False)
+        check("S3 he: the question says it is in French",
+              r["did"] == "confirm_send" and "בצרפתית" in (r.get("say") or ""),
+              short(r.get("say")))
+        r = _answer(s, "כן")
+        check("S3 he: and so does the read-back",
+              r["did"] == "sending" and "בצרפתית" in (r.get("say") or ""),
+              short(r.get("say")))
+    check("nothing reached osascript", not OSA, f"{len(OSA)} escaped")
+
 def t_onboarding(j: Jev):
     """4. The first conversation, from an empty machine."""
     reset_state()
@@ -568,18 +1605,47 @@ def t_onboarding(j: Jev):
         PROFILE.unlink(missing_ok=True)
         check("profile.json is gone before onboarding starts", not PROFILE.exists())
 
-        # A silent first press: nothing said yet, so it cannot know the language.
+        # A silent first press: nothing heard yet, so it greets in the language chosen
+        # in Settings, which is English unless she chose another. It used to greet in
+        # Hebrew first, in the Hebrew voice, on every new Mac.
         r0 = router.handle(j, "", speak=False)
-        check("a silent first press greets in both languages",
-              r0["did"] == "onboarding_greet" and "מיקמיק" in (r0.get("say") or "")
-              and "MicMic" in (r0.get("say") or ""),
-              f"did={r0['did']!r} say={short(r0.get('say'))}")
-        # Speaking Hebrew is enough to pick the language, and the request still happens.
+        check("a silent first press greets in English only by default",
+              r0["did"] == "onboarding_greet" and r0.get("lang") == "english"
+              and (r0.get("say") or "").startswith("Hello, I'm MicMic")
+              and "מיקמיק" not in (r0.get("say") or ""),
+              f"did={r0['did']!r} lang={r0.get('lang')!r} say={short(r0.get('say'))}")
+        saved = router.SETTINGS.read_bytes() if router.SETTINGS.exists() else None
+        try:
+            router.save_settings({"language_hint": "he-IL"})
+            PROFILE.unlink(missing_ok=True)
+            r0 = router.handle(j, "", speak=False)
+            check("with Hebrew chosen in Settings, the silent first press is Hebrew only",
+                  r0.get("lang") == "hebrew" and (r0.get("say") or "").startswith("שלום")
+                  and "MicMic" not in (r0.get("say") or ""),
+                  f"lang={r0.get('lang')!r} say={short(r0.get('say'))}")
+        finally:
+            if saved is None:
+                router.SETTINGS.unlink(missing_ok=True)
+            else:
+                router.SETTINGS.write_bytes(saved)
+        # A real first request is answered FIRST; the one-line introduction follows.
         PROFILE.unlink(missing_ok=True)
-        r0 = router.handle(j, "שלום", speak=False)
-        check("speaking first greets only in her language",
-              "מיקמיק" in (r0.get("say") or "") and "MicMic" not in (r0.get("say") or ""),
-              f"did={r0['did']!r} say={short(r0.get('say'))}")
+        r0 = router.handle(j, "what time is it micmic", speak=False)
+        say0 = r0.get("say") or ""
+        check("a first request is answered before the introduction",
+              r0["did"] == "answered" and say0.startswith("It is ")
+              and say0.endswith("I'm MicMic. What should I call you?")
+              and "Hello" not in say0,
+              f"did={r0['did']!r} say={short(say0)}")
+        # Speaking Hebrew is enough to pick the language, and the request still happens,
+        # answered first, then introduced, in her language only.
+        PROFILE.unlink(missing_ok=True)
+        r0 = router.handle(j, "מה השעה מיקמק", speak=False)
+        say0 = r0.get("say") or ""
+        check("speaking first greets only in her language, after the answer",
+              r0["did"] == "answered" and say0.startswith("השעה")
+              and say0.endswith("אני מיקמיק. איך קוראים לך?") and "MicMic" not in say0,
+              f"did={r0['did']!r} say={short(say0)}")
 
         r1 = router.handle(j, "קוראים לי מרים", speak=False)
         p1 = prof.load()
@@ -1075,7 +2141,7 @@ def t_weather(j):
               place.split()[0] in say and "Haifa" not in say, say)
         check(f"{utt[:30]!r} answers in her language", must in say, say)
         check(f"{utt[:30]!r} gives the temperature", "17" in say, say)
-        check(f"{utt[:30]!r} answers in under 3s", dt < 3000, f"{dt:.0f}ms")
+        check_latency(f"{utt[:30]!r} answers in under 3s", dt < 3000, f"{dt:.0f}ms")
     check("rain over 40 percent tells her to take an umbrella",
           "מטריה" in (router._weather_line(FAKE_WEATHER, "תל אביב", "hebrew")))
     dry = dict(FAKE_WEATHER, rain_pct=10, code=113)
@@ -1113,7 +2179,7 @@ def t_clock(j):
         check(f"{utt!r} is answered", r["did"] == "answered", f"did={r['did']}")
         check(f"{utt!r} comes from this machine's clock",
               (r.get("detail") or {}).get("source") == "system clock", str(r.get("detail")))
-        check(f"{utt!r} answers in under 1.5s", dt < 1500, f"{dt:.0f}ms")
+        check_latency(f"{utt!r} answers in under 1.5s", dt < 1500, f"{dt:.0f}ms")
         say = r.get("say") or ""
         check(f"{utt!r} contains the actual time",
               _t.strftime("%H:%M") in say or _t.strftime("%-I:%M") in say, say)
@@ -1726,7 +2792,7 @@ def t_undo(j):
 
     router.CANCEL_WINDOW = 30.0
     try:
-        r = router.handle(j, "תשלחי הודעה לזוהר שאני בסדר", speak=False)
+        r = router.handle(j, "תשלחי הודעה לזוהר שאני בסדר גמור היום", speak=False)
         u = router.undo_last()
         check("Undo during the countdown stops the message", r["did"] == "sending"
               and u["undone"] and router.PENDING is None and not SENT,
@@ -2223,7 +3289,540 @@ def t_a_follow_up_question_keeps_its_subject(j):
 
 
 
+class _LLMSpy:
+    """Stands in for Gemini inside one block: records every prompt, answers from a
+    script, and puts the real client back afterwards."""
+
+    def __init__(self, *answers):
+        self.answers = list(answers)
+        self.calls: list[dict] = []
+
+    def __enter__(self):
+        self.real = router.LLM_CLIENT.text
+
+        def text(prompt, system="", max_tokens=400, temperature=0.2, timeout=None):
+            self.calls.append({"prompt": prompt, "system": system, "timeout": timeout})
+            return self.answers.pop(0) if self.answers else None
+        router.LLM_CLIENT.text = text
+        return self
+
+    def __exit__(self, *exc):
+        router.LLM_CLIENT.text = self.real
+        return False
+
+
+def t_weather_never_from_a_model(j):
+    """QA v1.0.1 #5: "מה מזג האוויר בליסבון" reached wttr as "בליסבון", which it does
+    not know, and a model then made the weather up. The weather comes from the weather
+    service or it is not given."""
+    real_geo, real_at = facts.geocode, facts.conditions_at
+    known = {"ליסבון", "Lisbon", "חיפה", "Haifa", "ירושלים", "תל אביב"}
+    asked: list[str] = []
+
+    def only_real_names(name, lang="en"):
+        asked.append(name)
+        return ([{"name": name, "country": "", "country_code": "PT", "admin1": "",
+                  "lat": 32.8, "lon": 35.0, "population": 500000}]
+                if name in known else [])
+    facts.geocode = only_real_names
+    try:
+        for utt in ("מה מזג האוויר בליסבון", "מה התחזית לליסבון", "what's the weather in Lisbon"):
+            reset_state(); asked.clear()
+            with _LLMSpy("נעים מאוד") as spy:
+                r = router.handle(j, utt, speak=False)
+            say = r.get("say") or ""
+            check(f"{utt!r} is answered from the weather service",
+                  r["did"] == "answered" and "17" in say and (r.get("detail") or {}).get(
+                      "source") == "wttr.in", f"did={r['did']} say={say} asked={asked}")
+            check(f"{utt!r} never asks a model", not spy.calls, str(spy.calls)[:120])
+            check(f"{utt!r} says Lisbon back once, with one preposition",
+                  ("בליסבון" in say and "בבליסבון" not in say) or "In Lisbon" in say, say)
+
+        # The follow-up. Just under the 0.5 gate a bare "Lisbon" went to the model,
+        # which described Lisbon's weather with no data on 9 of 10 turns.
+        for utt, recent in (("Lisbon", "מה השעה -> answered | what's the weather in Lisbon -> answered"),):
+            reset_state(); asked.clear()
+            with _LLMSpy("The weather in Lisbon is lovely right now.") as spy:
+                r = router.handle(j, utt, recent, speak=False)
+            check(f"{utt!r} right after a weather question is weather, from wttr",
+                  r["did"] == "answered" and (r.get("detail") or {}).get("source") == "wttr.in"
+                  and not spy.calls, f"did={r['did']} say={r.get('say')} llm={len(spy.calls)}")
+        with _LLMSpy("Lisbon is the capital of Portugal.") as spy:
+            reset_state()
+            r = router.handle(j, "tell me about Lisbon", "what's the weather in Lisbon -> answered",
+                              speak=False)
+        check("but 'tell me about Lisbon' is still a question about the city",
+              (r.get("detail") or {}).get("source") != "wttr.in", f"did={r['did']} {short(r.get('detail'))}")
+        check("and the model is told it has no weather to give",
+              spy.calls and "no live weather" in spy.calls[0]["system"], str(spy.calls)[:100])
+        with _LLMSpy("The weather in Lisbon is lovely.") as spy:
+            router.LLM_CLIENT.chat("Lisbon", "english")
+        check("so is the small-talk model",
+              spy.calls and "no live weather" in spy.calls[0]["system"], str(spy.calls)[:100])
+
+        reset_state(); asked.clear()
+        with _LLMSpy("נעים מאוד") as spy:
+            r = router.handle(j, "מה מזג האוויר בקסקזזבלוף", speak=False)
+        check("a place wttr does not know is said so, honestly and in Hebrew",
+              r["did"] == "weather_unavailable" and "לא מצאתי" in (r.get("say") or "")
+              and not spy.calls, f"did={r['did']} say={r.get('say')} llm={spy.calls}")
+
+        facts.conditions_at = lambda lat, lon: None
+        reset_state()
+        with _LLMSpy("It is lovely and sunny") as spy:
+            r = router.handle(j, "what is the weather in Lisbon", speak=False)
+        check("with wttr down she hears that, not a model's guess",
+              r["did"] == "weather_unavailable" and "not answering" in (r.get("say") or "")
+              and "sunny" not in (r.get("say") or "") and not spy.calls,
+              f"did={r['did']} say={r.get('say')}")
+        # A report from somewhere else is someone else's weather.
+        facts.conditions_at = lambda lat, lon: dict(FAKE_WEATHER, lat=40.0, lon=-3.7)
+        reset_state()
+        with _LLMSpy("It is lovely and sunny") as spy:
+            r = router.handle(j, "what is the weather in Lisbon", speak=False)
+        check("a report for a place far from the one she named is not spoken",
+              r["did"] == "weather_unavailable" and "could not find" in (r.get("say") or ""),
+              f"did={r['did']} say={r.get('say')}")
+    finally:
+        facts.geocode, facts.conditions_at = real_geo, real_at
+
+    # The daily briefing carries the weather too, and it used to go through a model
+    # to be rephrased in her language. This is what the suite-wide default of
+    # router.due_briefing = False exists to keep out of every OTHER test: it is put
+    # back for exactly this section, which is the one that means to exercise it.
+    reset_state()
+    p = prof.load()
+    p["last_briefed"] = ""
+    prof.save(p)
+    router.due_briefing = REAL_DUE_BRIEFING
+    try:
+        with _LLMSpy("בוקר טוב, היום נעים מאוד") as spy:
+            r = router.handle(j, "מה השעה", speak=False)
+        brief = r.get("briefing") or ""
+        check("the morning briefing's weather is wttr's numbers, in Hebrew, with no model",
+              "17" in brief and "מעלות" in brief and not spy.calls,
+              f"briefing={brief!r} llm={len(spy.calls)}")
+        check("and the question she asked is still answered", r["did"] == "answered", r["did"])
+        check("the briefing is marked done for today", not router.due_briefing())
+    finally:
+        router.due_briefing = lambda: False       # back to the suite default
+
+    for said, want in (("בליסבון", "ליסבון"), ("לליסבון", "ליסבון"), ("מלונדון", "לונדון"),
+                       ("הרצליה", "רצליה"), ("ובחיפה", "חיפה"), ("في باريس", "باريس")):
+        got = router._place_readings(said)
+        check(f"{said!r} is tried as said first, then as {want!r}",
+              got[0] == said and want in got, str(got))
+    check("a name with no bound letter is tried only as said",
+          router._place_readings("Lisbon") == ["Lisbon"], str(router._place_readings("Lisbon")))
+
+
+def t_undo_answers_in_her_language(j):
+    """QA #13: "תבטלי את מה שעשית" with nothing to undo answered in English."""
+    reset_state(); router._drop_undo()
+    r = router.handle(j, "תבטלי את מה שעשית", speak=False)
+    check("nothing to undo, said in Hebrew", r["did"] == "nothing_to_undo"
+          and r["say"] == router._UNDO_NOTHING["hebrew"], f"did={r['did']} say={r['say']}")
+    router._offer_undo("louder", "english", lambda: True, router._DONE["volume"])
+    u = router.undo_last("hebrew")
+    check("an English action undone by a Hebrew request answers in Hebrew",
+          u["undone"] and u["say"] == router._DONE["volume"]["hebrew"], str(u))
+    router._offer_undo("louder", "hebrew", lambda: True, router._DONE["volume"])
+    router.undo_last()
+    check("the button with nothing left answers in the last action's language",
+          router.undo_last()["say"] == router._UNDO_NOTHING["hebrew"])
+
+
+def t_the_trailer_she_asked_for(j):
+    """QA #14: "play the Titanic trailer" searched "Titanic full movie" and played a
+    parody or a pirated film. Jev still chooses; only among real results."""
+    titanic = [
+        {"id": "full1", "title": "TITANIC 1997 FULL MOVIE ENGLISH HD JACK AND ROSE",
+         "channel": "crafting M", "length": "2:52:58", "views": "6.6M views"},
+        {"id": "orange", "title": "Annoying Orange: Titanic", "channel": "Annoying Orange",
+         "length": "3:12", "views": "9M views"},
+        {"id": "parody", "title": "Titanic Parody | Iceberg Edition", "channel": "Funny",
+         "length": "4:02", "views": "2M views"},
+        {"id": "official", "title": 'Titanic | "Official Trailer" | Paramount Movies',
+         "channel": "Paramount Movies", "length": "1:42", "views": "8.6M views"},
+        {"id": "rt", "title": "Titanic (1997) Trailer #1 | Movieclips Classic Trailers",
+         "channel": "Rotten Tomatoes Classic Trailers", "length": "2:03", "views": "2.9M views"},
+    ]
+    real = yt.search
+    yt.search = lambda q, n=18: (YT_QUERIES.append(q), [dict(v) for v in titanic])[1]
+    try:
+        for utt in ("play the Titanic trailer", "official trailer for the movie Titanic",
+                    "תשימי לי את הטריילר של טיטאניק"):
+            reset_state()
+            r = router.handle(j, utt, speak=False)
+            d = r.get("detail") or {}
+            check(f"{utt!r} searches for a trailer, not the full movie",
+                  YT_QUERIES and ("trailer" in YT_QUERIES[0].lower() or "טריילר" in YT_QUERIES[0])
+                  and "full movie" not in YT_QUERIES[0], str(YT_QUERIES))
+            check(f"{utt!r} plays an official trailer",
+                  r["did"] == "playing" and d.get("video_id") in ("official", "rt"),
+                  f"did={r['did']} picked={d.get('title')}")
+    finally:
+        yt.search = real
+    kept = yt.screen_results(titanic, trailer=True)
+    check("parodies and whole-film uploads never reach the trailer choice",
+          {r["id"] for r in kept} == {"official", "rt"}, str([r["id"] for r in kept]))
+    check("a title is read without its channel, pipes or quotes",
+          yt.spoken_title('Titanic | "Iceberg, Right Ahead!" | Paramount', "Paramount Movies")
+          == "Titanic, Iceberg, Right Ahead!",
+          yt.spoken_title('Titanic | "Iceberg, Right Ahead!" | Paramount', "Paramount Movies"))
+    check("and an artist's own channel does not eat the artist",
+          yt.spoken_title("Adele - Hello (Official Music Video)", "AdeleVEVO") == "Adele - Hello",
+          yt.spoken_title("Adele - Hello (Official Music Video)", "AdeleVEVO"))
+
+
+def t_answers_are_in_one_language(j):
+    """QA #15: a Hebrew answer came back with Arabic spliced into it, grounded in an
+    article about the wrong thing, ending in a question nobody asked."""
+    from savta import llm as _llm
+    mixed = "המרחק הוא כשماء وثلاثمائة ألف קילומטר. בערך 384 אלף קילומטרים."
+    check("Arabic inside a Hebrew answer is caught", _llm.foreign_script(mixed, "hebrew"))
+    check("a Latin name inside a Hebrew answer is fine",
+          not _llm.foreign_script("את הספר כתבה ג'יין אוסטן (Jane Austen).", "hebrew"))
+    with _LLMSpy(mixed, "המרחק הממוצע הוא 384 אלף קילומטרים.") as spy:
+        out = router.LLM_CLIENT.answer("כמה רחוק הירח", "hebrew")
+    check("a mixed answer is asked for again, strictly, and the clean one is used",
+          out == "המרחק הממוצע הוא 384 אלף קילומטרים." and len(spy.calls) == 2
+          and "ONLY in Hebrew" in spy.calls[1]["system"], f"{out!r} calls={len(spy.calls)}")
+    with _LLMSpy(mixed, mixed) as spy:
+        out = router.LLM_CLIENT.answer("כמה רחוק הירח", "hebrew")
+    check("twice mixed: only the sentences in her script are kept",
+          out == "בערך 384 אלף קילומטרים.", repr(out))
+    with _LLMSpy("המרחק הוא 384 אלף קילומטרים. את מתעניינת באסטרונומיה?") as spy:
+        out = router.LLM_CLIENT.answer("כמה רחוק הירח", "hebrew")
+    check("an answer does not end in a question back", out == "המרחק הוא 384 אלף קילומטרים.",
+          repr(out))
+    check("spoken answers wait at most 8 s",
+          spy.calls and spy.calls[0]["timeout"] == _llm.SPOKEN_TIMEOUT == 8.0, str(spy.calls))
+
+    real_wiki = facts.wiki
+    for utt, passage, keep in (
+            ("כמה רחוק הירח מכדור הארץ",
+             "מופע הירח הוא צורת הירח הנראית לצופה הנמצא בכדור הארץ.", False),
+            ("who wrote Pride and Prejudice",
+             "Pride and Prejudice is a novel by English author Jane Austen, published in 1813.",
+             True)):
+        facts.wiki = lambda term, lang="he", p=passage: p
+        reset_state()
+        with _LLMSpy("384 thousand kilometres." if not keep else "Jane Austen.") as spy:
+            r = router.handle(j, utt, speak=False)
+        grounded = bool(spy.calls) and passage in spy.calls[0]["prompt"]
+        check(f"{utt[:28]!r}: the passage is {'kept' if keep else 'dropped'}",
+              r["did"] == "answered" and grounded == keep,
+              f"did={r['did']} grounded={grounded} detail={short(r.get('detail'))}")
+    # Knowledge speed: the term rides in understand(), and Wikipedia gets 1.5 s.
+    facts.wiki = lambda term, lang="he": "Pride and Prejudice is a novel by Jane Austen."
+    reset_state()
+    with _LLMSpy("Jane Austen wrote it.") as spy:
+        r = router.handle(j, "who wrote Pride and Prejudice", speak=False)
+    check("a knowledge answer asks Jev twice, not three times (the term rides along)",
+          r["did"] == "answered" and r["timing"]["jev_n"] == 2, str(r.get("timing")))
+
+    def slow_wiki(term, lang="he"):
+        time.sleep(4)
+        return "Pride and Prejudice is a novel by Jane Austen."
+    facts.wiki = slow_wiki
+    reset_state()
+    t0 = time.time()
+    with _LLMSpy("Jane Austen wrote it.") as spy:
+        r = router.handle(j, "who wrote Pride and Prejudice", speak=False)
+    waited = time.time() - t0
+    check("a Wikipedia that has not answered in 1.5 s is not waited for",
+          r["did"] == "answered" and spy.calls and "Jane Austen, published" not in spy.calls[0]["prompt"]
+          and "novel by Jane Austen" not in spy.calls[0]["prompt"] and waited < 3.5,
+          f"did={r['did']} waited={waited:.1f}s")
+    facts.wiki = real_wiki
+
+
+def t_small_talk_does_not_hang(j):
+    """QA #17: one small-talk turn waited 20.8 s on Gemini, then said a stock line."""
+    from savta import llm as _llm
+    seen = {}
+    real_post = router.LLM_CLIENT._post
+
+    def post(payload, model=None, timeout=None):
+        seen["timeout"] = timeout
+        return None
+    router.LLM_CLIENT._post = post
+    try:
+        router.LLM_CLIENT.chat("how are you", "english")
+    finally:
+        router.LLM_CLIENT._post = real_post
+    check("small talk gives the model 8 s, not 20", seen.get("timeout") == 8.0, str(seen))
+    reset_state()
+    real_avail = type(router.LLM_CLIENT).available
+    type(router.LLM_CLIENT).available = property(lambda self: True)
+    try:
+        with _LLMSpy() as spy:
+            r = router.handle(j, "היי מה שלומך היום", speak=False)
+    finally:
+        type(router.LLM_CLIENT).available = real_avail
+    check("a model that did not answer is admitted to, in her language",
+          r["did"] == "chat_timeout" and "זמן" in (r.get("say") or ""),
+          f"did={r['did']} say={r.get('say')}")
+
+
+def t_what_she_sees_is_plain(j):
+    """QA #19 and #24: the browser card showed the agent's English log with em dashes,
+    Hebrew said "פתחתי Calculator.", and several steps said "Done." twice."""
+    from savta.actions import web
+    log = ["consent: Accept all", "only 3 things on the page, waiting for it to finish",
+           "waited", "type Where from? = Tel Aviv", "click Search flights  [changed nothing]",
+           "nothing moving, closed whatever was on top", "click: no target",
+           "click Pay  [refused: completes a purchase]"]
+    he = web.shown_steps(log, "hebrew")
+    check("the card's steps are in her language", he and all(
+        re.search(r"[\u0590-\u05FF]", x) for x in he), str(he))
+    check("with no developer words and no dashes", not any(
+        w in " ".join(he) for w in ("—", "[", "no target", "consent", "changed nothing")), str(he))
+    src = (ROOT / "savta" / "actions" / "web.py").read_text()
+    check("no step the agent logs carries an em dash",
+          not re.search(r'steps\.append\([^)]*—', src))
+    real_run, real_where = web.run, web.where_to_start
+    web.where_to_start = lambda j_, task: ("https://example.com", "general")
+    try:
+        for did in ("done", "partly_done", "needs_payment", "blocked", "stuck"):
+            web.run = lambda *a, did=did, **k: {"did": did, "steps": log, "url": "u",
+                                               "title": "t", "why": ""}
+            for lg in ("english", "russian", "hebrew"):
+                reset_state()
+                r = router.handle(j, {"english": "book me a table for two at an italian restaurant tonight",
+                                      "russian": "забронируй мне столик на двоих в итальянском ресторане сегодня",
+                                      "hebrew": "תזמיני לי שולחן לשניים במסעדה איטלקית הערב"}[lg],
+                                  speak=False)
+                if not r["did"].startswith("web_"):
+                    continue
+                check(f"web_{did} in {lg} speaks with no em dash",
+                      "—" not in (r.get("say") or "") and "—" not in " ".join(
+                          (r.get("detail") or {}).get("steps") or []), r.get("say") or "")
+    finally:
+        web.run, web.where_to_start = real_run, real_where
+    check("the Russian read-back has no em dash", "—" not in router._narrate("Мириам", "привет", "russian"))
+    reset_state()
+    r = router.handle(j, "תפתחי את המחשבון", speak=False)
+    check("Hebrew hears the calculator by its Hebrew name",
+          r["did"] == "opened_app" and "Calculator" not in (r.get("say") or ""),
+          f"did={r['did']} say={r.get('say')}")
+    check("steps that each said 'Done.' are said once",
+          router._once(["Done.", "I opened Calculator.", "Done."], "english") == ["I opened Calculator."]
+          and router._once(["Done.", "Done."], "english") == ["Done."])
+
+
+def t_one_briefing_even_when_turns_fail(j):
+    """tests/test_account.py died of SIGBUS: with the proxy refusing, every turn failed
+    after starting the day's briefing and before claiming it, so each turn started
+    another, and their copies of the message store overwrote one another's open file."""
+    import threading as _th
+    reset_state()
+    p = prof.load(); p["last_briefed"] = ""; prof.save(p)
+    ran = []
+    real_brief, real_understand = router.briefing, router.understand
+
+    def counting_briefing(lang):
+        ran.append(lang)
+        return ""
+
+    def refusing(*a, **k):
+        raise KeyError("intent")
+    router.briefing, router.understand = counting_briefing, refusing
+    router.due_briefing = REAL_DUE_BRIEFING       # this section is what it exercises
+    try:
+        for _ in range(3):
+            try:
+                router.handle(j, "what time is it", speak=False)
+            except KeyError:
+                pass
+        time.sleep(0.2)
+    finally:
+        router.briefing, router.understand = real_brief, real_understand
+        check("three failing turns start one briefing, not three", len(ran) == 1, str(ran))
+        check("and the day is claimed", not router.due_briefing())
+        router.due_briefing = lambda: False       # back to the suite default
+
+    # The store itself: two readers may never copy over each other.
+    inside, overlap = [0], []
+    real_copy = book._copy_db
+
+    def slow_copy(name):
+        inside[0] += 1
+        if inside[0] > 1:
+            overlap.append(name)
+        time.sleep(0.05)
+        inside[0] -= 1
+        return None
+    book._copy_db = slow_copy
+    try:
+        ts = [_th.Thread(target=f) for f in (REAL_UNREAD, lambda: REAL_READ_RECENT(40),
+                                             REAL_UNREAD)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+    finally:
+        book._copy_db = real_copy
+    check("reads of the message store run one at a time", not overlap, str(overlap))
+
+
+def t_the_day_and_the_place_she_asked_about(j):
+    """"מה מזג האוויר מחר בתל אביב" was answered with today's weather, and a Hebrew town
+    name reached wttr to be resolved however it liked ("Al Mas`Udiya")."""
+    for utt, lang, want in (
+            ("מה מזג האוויר מחר בתל אביב", "hebrew", ("מחר", "21", "28")),
+            ("what's the weather tomorrow in London", "english", ("Tomorrow", "21", "28")),
+            ("מה מזג האוויר מחרתיים בירושלים", "hebrew", ("מחרתיים", "12", "15")),
+            ("what will the weather be in Tokyo the day after tomorrow", "english",
+             ("day after tomorrow", "12", "15")),
+            ("מה מזג האוויר עכשיו באילת", "hebrew", ("17 מעלות",))):
+        reset_state()
+        r = router.handle(j, utt, speak=False)
+        say = r.get("say") or ""
+        check(f"{utt!r} speaks the day she asked about",
+              r["did"] == "answered" and all(w in say for w in want), f"did={r['did']} say={say}")
+    reset_state()
+    r = router.handle(j, "what's the weather in Paris next week", speak=False)
+    check("next week is beyond the forecast, and says so",
+          r["did"] == "weather_too_far" and "only have" in (r.get("say") or ""),
+          f"did={r['did']} say={r.get('say')}")
+
+    london = [{"name": "London", "country": "United Kingdom", "country_code": "GB",
+               "admin1": "England", "lat": 51.5, "lon": -0.12, "population": 8961989},
+              {"name": "London", "country": "Canada", "country_code": "CA",
+               "admin1": "Ontario", "lat": 42.98, "lon": -81.2, "population": 422324}]
+    check("the far bigger London is taken without asking",
+          router._choose_place(j, london, "what's the weather in London")["country_code"] == "GB")
+    portland = [{"name": "Portland", "country": "United States", "country_code": "US",
+                 "admin1": "Oregon", "lat": 45.5, "lon": -122.7, "population": 652503},
+                {"name": "Portland", "country": "United States", "country_code": "US",
+                 "admin1": "Maine", "lat": 43.66, "lon": -70.26, "population": 68408},
+                {"name": "Portland", "country": "Australia", "country_code": "AU",
+                 "admin1": "Victoria", "lat": -38.3, "lon": 141.6, "population": 9900}]
+    got = router._choose_place(j, portland, "what's the weather in Portland Maine")
+    check("two real places she could mean: Jev chooses by what she said",
+          got["admin1"] == "Maine", str(got))
+
+
+# Every line the browser agent logs, in the shapes it logs them: tracebacks, labels
+# with dashes, refusals. What the card shows is shown_steps() of these.
+WEB_LOG_SAMPLES = [
+    "out of time after 91s",
+    "could not read the page: TargetClosedError('Target page, context or browser has been closed')",
+    "only 3 things on the page, waiting for it to finish",
+    "nothing moving, closed whatever was on top",
+    "nothing moving, went back to the top of the page",
+    "dismissed: Close — newsletter",
+    "consent: Reject all",
+    "thought it was finished, but the goal is not visible yet",
+    "nothing usable yet, waiting for the page",
+    "waiting for the page to finish loading",
+    "waited", "scrolled",
+    "click: no target", "type: nothing to enter",
+    "click Pay now  [refused: this completes a purchase]",
+    "type Card number  [refused: password or payment field]",
+    "click Search flights  [TimeoutError('locator.click: Timeout 1500ms exceeded')]",
+    "click Search flights  [changed nothing]",
+    "click Done  [going round in circles]",
+    "click Next  [tried three times, moving on]",
+    "type Where from? = Tel Aviv",
+    "select Adults = 2",
+    "click Flights — cheapest first",
+]
+_DEV_WORDS = ("could not read", "nothing moving", "things on the page", "consent",
+              "dismissed", "no target", "nothing to enter", "Error", "Exception",
+              "Timeout", "(", ")", "[", "]", "—", "refused", "changed nothing",
+              "round in circles", "tried three", "thought it was", "waited", "scrolled",
+              "out of time", "usable yet")
+
+
+def t_small_things_she_hears(j):
+    """QA v1.0.2 re-verify: a tomorrow forecast recorded today's numbers, Hebrew read
+    "ל31" as one token, and the browser card could show the agent's own log."""
+    j1 = {"current_condition": [{"weatherDesc": [{"value": "Sunny"}], "weatherCode": "113",
+                                 "temp_C": "26", "FeelsLikeC": "27"}],
+          "nearest_area": [{"areaName": [{"value": "Al Mas`Udiya"}],
+                            "latitude": "32.083", "longitude": "34.783"}],
+          "weather": [{"date": "d0", "mintempC": "25", "maxtempC": "27",
+                       "hourly": [{"weatherCode": "113", "chanceofrain": "3"}] * 8},
+                      {"date": "d1", "mintempC": "24", "maxtempC": "31",
+                       "hourly": [{"weatherCode": "113", "chanceofrain": "0"}] * 8},
+                      {"date": "d2", "mintempC": "-3", "maxtempC": "2",
+                       "hourly": [{"weatherCode": "338", "chanceofrain": "80"}] * 8}]}
+    cond = facts._parse(j1)
+    check("each day is exactly wttr's mintempC and maxtempC",
+          [(d["low"], d["high"]) for d in cond["days"]] == [(25, 27), (24, 31), (-3, 2)],
+          str(cond["days"]))
+    real_at, real_geo = facts.conditions_at, facts.geocode
+    facts.conditions_at = lambda lat, lon: facts._parse(j1)
+    facts.geocode = lambda name, lang="en": [
+        {"name": name, "country": "", "country_code": "IL", "admin1": "",
+         "lat": 32.0809, "lon": 34.7806, "population": 432892}]
+    try:
+        for utt, want, lo, hi in (
+                ("מה מזג האוויר מחר בתל אביב", "בין 24 ל-31 מעלות", 24, 31),
+                ("what's the weather tomorrow in Tel Aviv", "between 24 and 31", 24, 31),
+                ("מה מזג האוויר בתל אביב", "היום בין 25 ל-27", 25, 27)):
+            reset_state()
+            r = router.handle(j, utt, speak=False)
+            d = r.get("detail") or {}
+            check(f"{utt!r} says {want!r} and records the same numbers",
+                  want in (r.get("say") or "") and (d.get("low"), d.get("high")) == (lo, hi),
+                  f"say={r.get('say')} detail low/high={d.get('low')}/{d.get('high')}")
+    finally:
+        facts.conditions_at, facts.geocode = real_at, real_geo
+    frost = router._weather_line(cond, "מוסקבה", "hebrew", 2)
+    check("below zero is said, not dashed twice", "ל-2" in frost and "--" not in frost, frost)
+    check("no Hebrew bound letter touches a digit in any weather line", not any(
+        re.search(r"(?<![\u0590-\u05FF])[בלמוהכש]\d", router._weather_line(cond, "חיפה", "hebrew", k))
+        for k in (0, 1, 2)))
+
+    from savta.actions import web
+    for lg in ("english", "hebrew"):
+        shown = web.shown_steps(WEB_LOG_SAMPLES, lg)
+        bad = [x for x in shown if any(w in x for w in _DEV_WORDS)]
+        check(f"every logged step reaches the card plain ({lg})", shown and not bad, str(bad))
+        if lg == "hebrew":
+            check("and in Hebrew", all(re.search(r"[\u0590-\u05FF]", x) for x in shown),
+                  str([x for x in shown if not re.search(r"[\u0590-\u05FF]", x)]))
+    # A new line logged by the agent must be added to WEB_LOG_SAMPLES (and mapped).
+    src = (ROOT / "savta" / "actions" / "web.py").read_text()
+    logged = re.findall(r'steps\.append\(\s*f?"([^"{]*)', src)
+    unknown = [head for head in logged if head.strip() and not any(
+        smp.startswith(head.strip()[:12]) for smp in WEB_LOG_SAMPLES)]
+    check("every kind of line the agent logs has a sample here", not unknown, str(unknown))
+
+    # #24, re-checked with stubs.
+    reset_state()
+    r = router.handle(j, "תפתחי את המחשבון", speak=False)
+    check("Hebrew still hears 'פתחתי מחשבון'",
+          r["did"] == "opened_app" and "מחשבון" in (r.get("say") or ""), r.get("say") or "")
+    real = yt.search
+    yt.search = lambda q, n=18: [{"id": "tt", "title": 'טיטאניק | "קרחון, ישר לפנינו!" | Paramount',
+                                  "channel": "Paramount Movies", "length": "2:10",
+                                  "views": "5M views"}]
+    try:
+        reset_state()
+        r = router.handle(j, "תשימי לי את הטריילר של טיטאניק", speak=False)
+    finally:
+        yt.search = real
+    check("a Hebrew video title is read clean",
+          r["did"] == "playing" and (r.get("say") or "").endswith("טיטאניק, קרחון, ישר לפנינו!")
+          and "|" not in (r.get("say") or "") and "Paramount" not in (r.get("say") or ""),
+          r.get("say") or "")
+
+
 TESTS = [
+    ("0zg. the small things she hears", t_small_things_she_hears),
+    ("0zf. the day and the place she asked about", t_the_day_and_the_place_she_asked_about),
+    ("0ze. one briefing, even when turns fail", t_one_briefing_even_when_turns_fail),
+    ("0y. the weather never comes from a model", t_weather_never_from_a_model),
+    ("0z. undo answers in her language", t_undo_answers_in_her_language),
+    ("0za. the trailer she asked for", t_the_trailer_she_asked_for),
+    ("0zb. answers are in one language", t_answers_are_in_one_language),
+    ("0zc. small talk does not hang", t_small_talk_does_not_hang),
+    ("0zd. what she sees is plain", t_what_she_sees_is_plain),
     ("0. a switched-off gate refuses out loud", t_gates_refuse_loudly),
     ("0b. answering a call offer never sends a message", t_answer_to_a_call_is_not_a_message),
     ("0c. a call is announced only if it happened", t_a_call_is_only_announced_if_it_happened),
@@ -2254,6 +3853,9 @@ TESTS = [
     ("1. safety: nothing leaves the machine", t_safety),
     ("2. the six second cancel window", t_cancel_window),
     ("3. multi-turn slot filling", t_multi_turn),
+    ("3b. a follow-up changes only what she changed", t_a_follow_up_keeps_the_message),
+    ("3d. a question or a named film over a playing one", t_follow_ups_over_a_playing_film),
+    ("3c. a message goes only when she means it", t_a_message_goes_only_when_she_means_it),
     ("4. onboarding from an empty machine", t_onboarding),
     ("5. contact matching across scripts", t_contact_matching),
     ("6. the escape hatch", t_escape_hatch),
@@ -2277,7 +3879,11 @@ def main() -> int:
     only = [a for a in sys.argv[1:] if not a.startswith("-")]
     try:
         j = Jev()
-        j.warmup()
+        # In pure replay mode nothing this pool warms will ever be asked a real
+        # question, so skip the TCP+TLS handshake: one less thing the suite needs
+        # the network for, and one less thing making it slower for nothing.
+        if replay.MODE != "replay" or replay.ALLOW_LIVE:
+            j.warmup()
     except Exception as e:  # noqa: BLE001
         print(f"cannot reach Jev: {e!r}\n"
               f"(TYPESAFE_API_KEY must be in the environment or in "
@@ -2286,7 +3892,8 @@ def main() -> int:
 
     t_all = time.time()
     print(f"MicMic regression suite   {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"sends are gated off (MICMIC_ALLOW_SEND unset), osascript is blocked\n")
+    print(f"sends are gated off (MICMIC_ALLOW_SEND unset), osascript is blocked")
+    print(f"replay: {replay.MODE}" + (" (ALLOW_LIVE)" if replay.ALLOW_LIVE else "") + "\n")
 
     for title, fn in TESTS:
         if only and not any(o in title for o in only):
@@ -2307,8 +3914,9 @@ def main() -> int:
         print(f"{len(FAILED)} FAILURE(S):")
         for name, detail in FAILED:
             print(f"  - {name}\n      {detail}")
-    print(f"{PASSED} passed, {len(FAILED)} failed   "
+    print(f"{PASSED} passed, {len(FAILED)} failed, {SKIPPED} skipped   "
           f"{j.calls} jev calls  ${j.cost_usd:.5f}  {dt:.1f}s")
+    print(f"{replay.summary_line()}")
     print(f"never sent for real: {len(OSA_TOTAL)} osascript calls escaped the stub "
           f"(must be 0); {len(DELIBERATE)} deliberate probes of the real functions; "
           f"{len(LAUNCHED)} launcher calls, all blocked")

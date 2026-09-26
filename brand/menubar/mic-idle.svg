@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 18">
+  <!-- MicMic's twin-capsule mark, simplified for 16px legibility, WITH the mark's
+       defining U-shaped yoke wrapping under the capsules (see brand/micmic-mark.svg
+       and brand/micmic-icon.png) — without it this reads as "00 on a line", not a
+       microphone. Capsules sit close together (gap = 1/6 of the pair's width, like
+       the real mark) rather than spaced apart like two eyes. Idle = outlined
+       capsules (hollow), solid yoke/stem/base; see mic-active.svg for the "hearing
+       you" variant (capsules filled solid). Pure black on transparent so macOS can
+       recolor it as a template image (setTemplate_(True) in listener.py). Weight
+       (yoke stroke ~1.5pt at this 18pt size, arm tips rising to the capsules'
+       vertical middle) checked side by side against the system "mic" SF Symbol at
+       the same size — see render.py and preview-compare-*.png. -->
+  <g fill="none" stroke="#000000" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M6.62 1.3a1.7 1.7 0 0 0-1.7 1.7v4.4a1.7 1.7 0 0 0 3.4 0v-4.4a1.7 1.7 0 0 0-1.7-1.7z"/>
+    <path d="M11.38 1.3a1.7 1.7 0 0 0-1.7 1.7v4.4a1.7 1.7 0 0 0 3.4 0v-4.4a1.7 1.7 0 0 0-1.7-1.7z"/>
+  </g>
+  <g fill="none" stroke="#000000" stroke-width="1.5" stroke-linecap="round">
+    <path d="M3.92 5.2A5.08 7.4 0 0 0 14.08 5.2"/>
+    <path d="M9 12.6V15.3"/>
+  </g>
+  <path fill="#000000" d="M6.5 15.5h5a0.7 0.7 0 0 1 0.7 0.7 0.7 0.7 0 0 1-0.7 0.7h-5a0.7 0.7 0 0 1-0.7-0.7 0.7 0.7 0 0 1 0.7-0.7z"/>
+</svg>

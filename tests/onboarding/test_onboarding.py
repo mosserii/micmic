@@ -8,8 +8,9 @@ MICMIC_STATE_DIR, sends and calls disarmed, and MICMIC_DRY_OPEN=1 so pressing "T
 never brings System Settings up in front of whoever is using the Mac. Never 8799.
 Playwright's bundled Chromium, headless; one server and one browser at a time.
 
-One real turn goes through Jev (step 3 completing on a real utterance, speak off):
-about a cent. Everything else is free.
+Free by default: the servers cannot reach Jev or Gemini (see OFFLINE below), and the
+checks that judge a real answer are skipped. MICMIC_LIVE=1 runs those too, for about
+a cent.
 """
 from __future__ import annotations
 
@@ -33,12 +34,30 @@ PORT = 8881
 BASE = f"http://127.0.0.1:{PORT}"
 assert PORT != 8799, "never the live server"
 
-PASSED, FAILED = [], []
+PASSED, FAILED, SKIPPED = [], [], []
+NOCOST = []           # /api/health of each server that ended with zero Jev calls
+# Jev and Gemini cost money, so by default the servers here cannot reach them: they run
+# as a proxy client pointed at a closed local port, which also skips reading the
+# developer's keys from .env.local, and no device gets registered with the cloud. Every
+# turn then answers "cannot reach my service", which is all most checks need. The few
+# that judge a real answer run only with MICMIC_LIVE=1 and are listed as skipped
+# otherwise, never counted as passed.
+LIVE = os.environ.get("MICMIC_LIVE") == "1"
+OFFLINE = {} if LIVE else {"MICMIC_MODE": "proxy", "MICMIC_PROXY_URL": "http://127.0.0.1:9",
+                           "MICMIC_PROXY_TOKEN": "offline-test"}
 
 
 def check(name, ok, detail=""):
     (PASSED if ok else FAILED).append(name)
     print(("PASS " if ok else "FAIL ") + name + ("" if ok else f"   <- {detail}"))
+
+
+def live_check(name, ok, detail=""):
+    """A check of what Jev answered: real money, so only with MICMIC_LIVE=1."""
+    if LIVE:
+        return check(name, ok, detail)
+    SKIPPED.append(name)
+    print("SKIP " + name + "   (needs a live turn: MICMIC_LIVE=1)")
 
 
 # ---------------------------------------------------------------- server
@@ -64,7 +83,7 @@ class Server:
 
     def __enter__(self):
         env = dict(os.environ, MICMIC_PORT=str(PORT), MICMIC_STATE_DIR=str(self.state),
-                   MICMIC_DRY_OPEN="1")
+                   MICMIC_DRY_OPEN="1", **OFFLINE)
         env.pop("MICMIC_ALLOW_SEND", None)
         env.pop("MICMIC_ALLOW_CALL", None)
         self.proc = subprocess.Popen([str(ROOT / ".venv/bin/python3"), "-m", "savta.server"],
@@ -78,6 +97,18 @@ class Server:
         raise SystemExit(f"server on {PORT} did not start")
 
     def __exit__(self, *exc):
+        # Every server here is keyless unless MICMIC_LIVE=1: its own count of paid Jev
+        # calls says so before it goes.
+        if not LIVE:
+            try:
+                h = json.loads(urllib.request.urlopen(BASE + "/api/health", timeout=5).read())
+                ok = not h.get("calls") and not h.get("cost_usd")
+            except Exception as e:  # noqa: BLE001
+                h, ok = repr(e), False
+            if not ok:
+                check("this server made no paid model calls", False, h)
+            else:
+                NOCOST.append(h)
         self.proc.terminate()
         try:
             self.proc.wait(timeout=5)
@@ -227,6 +258,28 @@ def test_endpoints(srv):
     code, o = call("POST", "/api/onboarding", {"action": "nope"})
     check("an unknown onboarding action is refused", code == 400, (code, o))
 
+    # QA #29: the page never used the contact list, and "name" was written twice.
+    req = urllib.request.urlopen(BASE + "/api/config", timeout=10)
+    raw = req.read().decode()
+    check("/api/config sends no contact list to the page", "contacts" not in json.loads(raw), raw[:200])
+    check("/api/config has one name key", raw.count('"name"') == 1, raw.count('"name"'))
+    code, c1 = call("GET", "/api/config?contacts=1")
+    check("the listener's ?contacts=1 still gets them", isinstance(c1.get("contacts"), list), c1.keys())
+    # A client dropping the connection is routine: no traceback on the console.
+    import io, contextlib, socket as _s
+    with socket.create_connection(("127.0.0.1", PORT)) as c:
+        c.setsockopt(_s.SOL_SOCKET, _s.SO_LINGER, b"\x01\x00\x00\x00\x00\x00\x00\x00")
+    check("the server still answers after a client reset its connection",
+          call("GET", "/api/health")[0] == 200)
+    from savta import server as _srv
+    err = io.StringIO()
+    try:
+        raise ConnectionResetError(54, "Connection reset by peer")
+    except ConnectionResetError:
+        with contextlib.redirect_stderr(err):
+            _srv.Server.handle_error(type("S", (), {})(), None, ("127.0.0.1", 1))
+    check("a dropped connection prints nothing", err.getvalue() == "", err.getvalue()[:200])
+
     code, s = call("POST", "/api/settings", {"onboarded": "yes"})
     check("the settings validator refuses a non-boolean onboarded",
           "onboarded" in s.get("rejected", []), s)
@@ -253,8 +306,8 @@ def test_skip_persists(srv, browser):
     page.reload()
     page.wait_for_function("document.documentElement.lang.length === 2")
     page.wait_for_timeout(900)
-    check("never again once onboarded, even though first_run is still true",
-          not shown(page) and call("GET", "/api/config")[1]["first_run"] is True)
+    check("never again once onboarded, and skipping it finishes setup (first_run false)",
+          not shown(page) and call("GET", "/api/config")[1]["first_run"] is False)
     check("no page errors", not page.__errors, page.__errors)
     ctx.close()
 
@@ -269,6 +322,89 @@ def test_only_first_run(browser):
         check("set up already: its script is not even fetched",
               not any("/onboarding/" in u for u in page.__requests), page.__requests)
         ctx.close()
+
+
+def _chip(browser, path="/"):
+    """What the page shows with nothing remembered in the browser: no micmic.lang in
+    localStorage, the way a freshly installed app's web view starts."""
+    ctx = browser.new_context(viewport={"width": 380, "height": 560})
+    ctx.add_init_script(INIT)
+    page = ctx.new_page()
+    page.goto(BASE + path)
+    page.wait_for_function("document.documentElement.lang.length === 2")
+    page.wait_for_timeout(600)
+    got = (page.inner_text("#langnow"), page.evaluate("document.documentElement.lang"))
+    ctx.close()
+    return got
+
+
+def test_speech_language_default(browser):
+    """English unless she chose another language in Settings. A fresh 1.0.1 came up
+    listening in Hebrew (listener log locale=he-IL, chip "HE") with en-US in the
+    shipped config: profile.DEFAULT carried speech_lang he-IL and /api/config read
+    that placeholder as a learned language."""
+    with Server():
+        cfg = call("GET", "/api/config")[1]
+        check("a new Mac listens in English", cfg.get("language_hint") == "en-US", cfg.get("language_hint"))
+        check("a new Mac's page shows EN", _chip(browser) == ("EN", "en"), _chip(browser))
+        call("POST", "/api/settings", {"language_hint": "ru-RU"})
+        check("choosing Russian in Settings is what it then listens in",
+              call("GET", "/api/config")[1].get("language_hint") == "ru-RU")
+        _, s = call("POST", "/api/settings", {"language_hint": "en-US"})
+        check("and choosing English again is echoed back",
+              s.get("settings", {}).get("language_hint") == "en-US", s)
+    with Server(profile={"setup_complete": True, "step": "done", "language": "hebrew",
+                         "speech_lang": "he-IL"}):
+        cfg = call("GET", "/api/config")[1]
+        check("a language setup only heard does not choose the recogniser",
+              cfg.get("language_hint") == "en-US", cfg.get("language_hint"))
+        check("but it is sent as the second language a turn is read in",
+              cfg.get("language") == "hebrew", cfg.get("language"))
+    with Server(profile={"setup_complete": True, "step": "done", "language": "hebrew"},
+                settings={"language_hint": "he-IL"}):
+        cfg = call("GET", "/api/config")[1]
+        check("someone who chose Hebrew in Settings keeps Hebrew",
+              cfg.get("language_hint") == "he-IL", cfg.get("language_hint"))
+        check("and their page shows HE", _chip(browser) == ("HE", "he"), _chip(browser))
+    with Server(settings={"language_hint": "xx-XX"}):
+        check("a settings value that is not one of the four falls back to English",
+              call("GET", "/api/config")[1].get("language_hint") == "en-US")
+
+
+def _say(text):
+    code, r = call("POST", "/api/utterance", {"text": text, "speak": False,
+                                              "client": "native", "activation": "push"},
+                   timeout=60)
+    return r
+
+
+def test_onboarded_ends_voice_setup():
+    """QA #16: once the window's onboarding is finished or skipped, the old spoken setup
+    never runs: no "What should I call you?" tacked onto answers, no greeting on a
+    silent press. The owner's 1.0.1 was left with onboarded true and setup_complete
+    false; that state is resolved to done."""
+    with Server(profile={}, settings={"onboarded": True}) as srv:
+        check("onboarded but never set up by voice: resolved to set up at start",
+              call("GET", "/api/config")[1]["first_run"] is False
+              and json.loads((srv.state / "profile.json").read_text()).get("setup_complete") is True)
+        r = _say("")
+        check("a silent press says nothing, no greeting", r.get("did") == "empty", r)
+        r = _say("what time is it micmic")
+        live_check("an answer has no setup question after it",
+              r.get("did") == "answered" and (r.get("say") or "").startswith("It is")
+              and "call you" not in (r.get("say") or ""), r.get("say"))
+    with Server() as srv:
+        r = _say("what time is it micmic")
+        live_check("not onboarded yet: the answer comes first, then the one-line intro in English",
+              (r.get("say") or "").startswith("It is")
+              and (r.get("say") or "").endswith("I'm MicMic. What should I call you?"), r.get("say"))
+        call("POST", "/api/onboarding", {"action": "done"})
+        check("finishing the window finishes setup",
+              json.loads((srv.state / "profile.json").read_text()).get("setup_complete") is True
+              and call("GET", "/api/config")[1]["first_run"] is False)
+        r = _say("what time is it")
+        check("and the spoken setup question never comes back",
+              "call you" not in (r.get("say") or ""), r.get("say"))
 
 
 def test_other_modes(srv, browser):
@@ -327,9 +463,12 @@ def test_flow(srv, browser):
     check("the circle hands the press to the listener", page.evaluate("window.__msgs") == ["listen"],
           page.evaluate("window.__msgs"))
     # A real utterance, the way the listener sends one, speech off.
-    code, _ = call("POST", "/api/utterance", {"text": "What time is it?", "speak": False,
+    code, r = call("POST", "/api/utterance", {"text": "What time is it?", "speak": False,
                                                "client": "native"}, timeout=60)
     check("the utterance went through", code == 200, code)
+    live_check("the window is introducing MicMic: no spoken setup question on the try",
+          "call you" not in (r.get("say") or "") and (r.get("say") or "").startswith("It is"),
+          r.get("say"))
     page.wait_for_selector(".ob-step.ok", timeout=5000)
     check("step 3 completes on the real turn, showing what was heard",
           page.inner_text(".ob-qtext") == "What time is it?" and page.inner_text(".ob-step.ok .ob-title") == "You're set.")
@@ -348,8 +487,11 @@ def test_flow(srv, browser):
 def test_languages_and_motion(browser):
     """Four languages, both directions, both schemes, and reduced motion. No em dash in
     anything a person can read on any screen."""
+    speech = {"he": "he-IL", "en": "en-US", "ar": "ar-SA", "ru": "ru-RU"}
     for lang, rtl in (("he", True), ("en", False), ("ar", True), ("ru", False)):
-        with Server():
+        # The page's language is the server's speech language; the browser's saved one
+        # only covers the moment before /api/config answers.
+        with Server(settings={"language_hint": speech[lang]}):
             ctx, page = new_page(browser, lang=lang, scheme="dark" if rtl else "light",
                                  reduced="reduce" if lang == "ar" else "no-preference")
             settle(page)
@@ -373,10 +515,10 @@ def test_languages_and_motion(browser):
             check(f"{lang}: the keyboard stays left to right", page.evaluate(
                 "getComputedStyle(document.querySelector('.ob-kbd')).direction") == "ltr")
             if lang == "ar":
-                page.keyboard.press("Escape")
-                page.wait_for_timeout(300)
+                # A second window on the same, still unfinished Mac. (Skipping here and
+                # then writing onboarded false no longer brings it back: skipping now
+                # finishes setup, which is the point.)
                 ctx2, p2 = new_page(browser, lang="ar", reduced="reduce")
-                call("POST", "/api/settings", {"onboarded": False})
                 settle(p2)
                 check("reduced motion: the demo is one still frame", p2.evaluate(
                     "document.querySelector('.ob-demo').dataset.p") == "press")
@@ -406,7 +548,13 @@ def main():
                     test_skip_persists(srv, browser)
                 except Exception as e:  # noqa: BLE001
                     check("test_skip_persists ran to the end", False, repr(e)[:400])
-            for t in (test_only_first_run, test_languages_and_motion):
+            print("\n-- test_onboarded_ends_voice_setup")
+            try:
+                test_onboarded_ends_voice_setup()
+            except Exception as e:  # noqa: BLE001
+                check("test_onboarded_ends_voice_setup ran to the end", False, repr(e)[:400])
+            for t in (test_only_first_run, test_speech_language_default,
+                      test_languages_and_motion):
                 print(f"\n-- {t.__name__}")
                 try:
                     t(browser)
@@ -414,7 +562,10 @@ def main():
                     check(f"{t.__name__} ran to the end", False, repr(e)[:400])
         finally:
             browser.close()
-    print(f"\n{len(PASSED)} passed, {len(FAILED)} failed")
+    if not LIVE:
+        print(f"\n{len(NOCOST)} servers, each ended with 0 Jev calls and $0")
+    print(f"\n{len(PASSED)} passed, {len(FAILED)} failed, {len(SKIPPED)} skipped"
+          + ("" if LIVE else " (no model calls; MICMIC_LIVE=1 runs the skipped ones for real)"))
     for f in FAILED:
         print("  FAILED:", f)
     sys.exit(1 if FAILED else 0)

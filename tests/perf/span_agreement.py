@@ -69,11 +69,30 @@ CASES = [
     ("weather_place", "كيف الطقس بحيفا", ["بحيفا", "حيفا"]),
     ("weather_place", "is it going to rain in London tomorrow", ["London"]),
 ]
+# "term" (the thing a knowledge question is about) is not folded: it sat on its gate.
+# These are only asked with --also term, to see whether folding it would hold now.
+TERM_CASES = [
+    ("term", "who wrote Pride and Prejudice", ["Pride and Prejudice"]),
+    ("term", "how far is the moon from the earth", ["the moon", "moon"]),
+    ("term", "when was the Eiffel Tower built", ["the Eiffel Tower", "Eiffel Tower"]),
+    ("term", "how tall is Mount Everest", ["Mount Everest"]),
+    ("term", "כמה רחוק הירח מכדור הארץ", ["הירח"]),
+    ("term", "מי כתב את גאווה ודעה קדומה", ["גאווה ודעה קדומה"]),
+    ("term", "מי היה ראש הממשלה הראשון של ישראל",
+     ["ראש הממשלה הראשון של ישראל", "ראש הממשלה"]),
+    ("term", "кто написал Войну и мир", ["Войну и мир"]),
+    ("term", "من هو جمال عبد الناصر", ["جمال عبد الناصر"]),
+    ("term", "what is the capital of Portugal", ["Portugal"]),
+]
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--repeats", type=int, default=2)
+    ap.add_argument("--also", action="append", default=[],
+                    help="fold this span too (e.g. term) and ask only its sentences")
+    ap.add_argument("--base", action="store_true",
+                    help="with --also: ask every sentence, to see the others still hold")
     a = ap.parse_args()
     tm = bench.load_wall()
     from savta import brain, memory as longterm
@@ -83,9 +102,12 @@ def main() -> int:
     j.warmup()
     tm.reset_state()
     # Exactly what router.handle() sends.
-    folded_spec = {k: (router.SPANS[k], router.SPAN_EXISTS.get(k)) for k in router.FOLDED_SPANS}
+    folded_spec = {k: (router.SPANS[k], router.SPAN_EXISTS.get(k))
+                   for k in tuple(router.FOLDED_SPANS) + tuple(a.also)}
+    cases = ([c for c in TERM_CASES if c[0] in a.also] if a.also and not a.base
+             else CASES + [c for c in TERM_CASES if c[0] in a.also])
     rows, t_plain, t_fold = [], [], []
-    for name, text, ok in CASES:
+    for name, text, ok in cases:
         contacts = router.get_contacts(text)
         recent = json.dumps(router.MEM.snapshot(), ensure_ascii=False)
         folded, separate = [], []

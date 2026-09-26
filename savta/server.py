@@ -9,6 +9,7 @@ from .router import handle, load_config, get_contacts, limit_table, local_hhmm
 from .actions import mac
 from . import account
 from . import onboarding_api
+from . import login_item
 from . import profile as _prof
 
 WEB = Path(__file__).resolve().parent / "web"
@@ -94,7 +95,7 @@ def _her_lang(text: str = "") -> str:
         if ch.isalpha():
             return "english"
     try:
-        return _prof.load().get("language") or "hebrew"
+        return _prof.load().get("language") or "english"
     except Exception:  # noqa: BLE001
         return "english"
 
@@ -144,6 +145,37 @@ def _valid_hotkey(spec: str) -> bool:
     return len(key) == 1 and key.isalnum()
 
 
+def _ts(payload: dict) -> float | None:
+    """The listener's turn id: the epoch seconds it opened at."""
+    try:
+        return float(payload["ts"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def turn_open(payload: dict) -> dict:
+    """POST /api/turn_open. Every kind holds a counting-down message except "armed",
+    which is the listen-for-"no" window of the countdown itself."""
+    from . import router as _r
+    if (payload.get("kind") or "") == "armed":
+        return {"paused": False}
+    held = _r.pause_pending(_ts(payload))
+    return {"paused": held is not None, "to": (held or {}).get("to")}
+
+
+def turn_closed(payload: dict) -> dict:
+    """POST /api/turn_closed, in either shape: the listener's {"heard", "why"} or
+    {"sent", "reason"}. heard or sent false: nothing reached the server this turn,
+    so a message still held is asked about. sent true: its utterance was already
+    handled, nothing to do. reason "replaced": the turn that took over keeps it."""
+    from . import router as _r
+    reason = str(payload.get("reason") or payload.get("why") or "")[:40]
+    if payload.get("sent") is True or payload.get("heard") is True:
+        return {"did": "nothing_to_do"}
+    return _r.turn_closed(speak=bool(payload.get("speak", True)), turn_ts=_ts(payload),
+                          sent=False, reason=reason)
+
+
 def _validate_settings(payload: dict) -> tuple[dict, list[str]]:
     ok: dict = {}
     bad: list[str] = []
@@ -184,7 +216,21 @@ def _validate_settings(payload: dict) -> tuple[dict, list[str]]:
     if "onboarded" in payload:
         v = payload["onboarded"]
         (ok.__setitem__("onboarded", v) if isinstance(v, bool) else bad.append("onboarded"))
+    if "open_at_login" in payload:
+        v = payload["open_at_login"]
+        (ok.__setitem__("open_at_login", v) if isinstance(v, bool) else bad.append("open_at_login"))
     return ok, bad
+
+
+def speech_language(cfg: dict | None = None) -> str:
+    """The language MicMic listens in and the page speaks: English, unless she chose
+    another one in Settings. Nothing else may pick it. A profile default of he-IL was
+    read as a "learned" language on a Mac nobody had set up, and a fresh install came
+    up listening in Hebrew with English in the shipped config."""
+    if cfg is None:
+        cfg = load_config()
+    v = cfg.get("language_hint")        # the shipped config, then Settings over it
+    return v if v in SPEECH_LANGS else "en-US"
 
 
 def apply_send_setting() -> None:
@@ -199,6 +245,16 @@ def apply_send_setting() -> None:
         return
     from .router import load_settings
     mac.SEND_FOR_REAL = bool(load_settings().get("allow_send", True))
+
+
+class Server(ThreadingHTTPServer):
+    """A client that goes away mid-request (the page reloading, the listener's poll
+    timing out) is routine, not an error: it used to print a full traceback each time."""
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
 
 
 class H(BaseHTTPRequestHandler):
@@ -221,21 +277,13 @@ class H(BaseHTTPRequestHandler):
             return onboarding_api.get(self)
         if self.path.startswith("/api/config"):
             cfg = load_config()
-            # What onboarding LEARNED beats what the config file was shipped with.
-            # profile["speech_lang"] was being written and read by nothing at all, so a
-            # Russian speaker kept being transcribed by a Hebrew recogniser.
-            learned = _prof.load().get("speech_lang")
-            # A language she picked in Settings wins over one MicMic learned from her
-            # speech: she chose English and it kept listening in Hebrew.
-            from .router import load_settings as _ls
-            chosen = _ls().get("language_hint")
             return self._send(200, json.dumps({
-                "language_hint": chosen or learned or cfg.get("language_hint", "en-US"),
-                "name": cfg.get("name", "MicMic"),
-                # Whatever is cached, never a wait: the first read copies WhatsApp's
-                # data (2.5 s here), and the window's first paint and the onboarding
-                # were held up behind it. The listener asks again every 20 s.
-                "contacts": get_contacts(wait=0.0),
+                "language_hint": speech_language(cfg),
+                # The language the setup conversation heard her speak. Not the
+                # recogniser's language (Settings alone decides that), but the second
+                # language a turn is also read in beside English (native/listener.py
+                # _make_recognizers), so a Russian speaker is still read in Russian.
+                "language": _prof.load().get("language", ""),
                 "activation": cfg.get("activation", "push"),
                 "wake_words": cfg.get("wake_words", ["savta"]),
                 "listen_seconds": cfg.get("listen_seconds", 12),
@@ -252,6 +300,21 @@ class H(BaseHTTPRequestHandler):
                 # arrives, which is wrong for half the people who will use this.
                 "gender": _prof.load().get("gender", ""),
                 "name": _prof.load().get("name", "") or cfg.get("name", "MicMic"),
+                # The Settings switch's real position: SMAppService's own word once
+                # native/listener.py has polled it, so turning the login item off in
+                # System Settings > General > Login Items is reflected here too, not
+                # just what was last asked for (savta/login_item.py).
+                "open_at_login": login_item.enabled(),
+                # What she asked for, which the listener applies. It is not the same
+                # as the line above: reading the real status back as the request
+                # meant a switch turned on never registered (2026-09-26).
+                "open_at_login_desired": login_item.desired(),
+                # Contact names only for the one caller that uses them: the listener
+                # hands them to the recogniser as contextual strings. The page never
+                # read them, and got sixty names with every config fetch. Whatever is
+                # cached, never a wait: the first read copies WhatsApp's data (2.5 s).
+                **({"contacts": get_contacts(wait=0.0)}
+                   if "contacts=1" in (self.path or "") else {}),
             }, ensure_ascii=False).encode())
         if self.path.startswith("/api/memory"):
             from . import memory as _mem
@@ -402,6 +465,25 @@ class H(BaseHTTPRequestHandler):
             from . import memory as _mem
             _mem.forget_all()
             return self._send(200, json.dumps({"forgotten": True}).encode())
+        if self.path.startswith(("/api/turn_open", "/api/turn_closed")):
+            # The listener's turn, opened and closed (native/listener.py). Opening one
+            # stops a message's countdown at once; however the turn ends, a held
+            # message is only sent after a yes. Contract, both POST:
+            #   /api/turn_open   {"ts": <epoch s>, "kind": "hold"|"tap"|"followup"}
+            #   /api/turn_closed {"ts": <the same>, "heard": false, "why": "nothing"|"error"}
+            # A close comes only when no /api/utterance did; a turn replaced by a new
+            # one sends none (its open keeps the hold). The listen-for-"no" window
+            # after a read-back posts nothing. Either post can be lost, so
+            # router.HELD_WATCHDOG asks on its own if no close arrives. The frozen
+            # contract also accepts {"sent", "reason"}: see turn_open / turn_closed.
+            body = self._drain()
+            try:
+                payload = json.loads(body or b"{}")
+            except Exception:  # noqa: BLE001
+                payload = {}
+            res = (turn_open(payload) if self.path.startswith("/api/turn_open")
+                   else turn_closed(payload))
+            return self._send(200, json.dumps(res, ensure_ascii=False, default=str).encode())
         if self.path.startswith("/api/new_conversation"):
             self._drain()
             # Talking about music and then about flights should not leave the flight
@@ -418,6 +500,11 @@ class H(BaseHTTPRequestHandler):
             from .router import save_settings, load_config
             changes, rejected = _validate_settings(payload)
             if changes:
+                # router.save_settings() only persists its own SETTABLE keys and
+                # silently ignores the rest, so open_at_login is saved here instead:
+                # it is applied by native/listener.py (SMAppService), not router.py.
+                if "open_at_login" in changes:
+                    login_item.set_desired(changes["open_at_login"])
                 save_settings(changes)
                 if "allow_send" in changes:
                     apply_send_setting()
@@ -427,8 +514,23 @@ class H(BaseHTTPRequestHandler):
                  "settings": {**{k: cfg.get(k) for k in
                                  ("language_hint", "activation", "listen_seconds",
                                   "wake_words", "hotkey", "display")},
-                              "allow_send": bool(mac.SEND_FOR_REAL)}},
+                              "language_hint": speech_language(cfg),
+                              "allow_send": bool(mac.SEND_FOR_REAL),
+                              # Echo what was just asked for, not the polled OS status:
+                              # the switch should hold its new position at once, and
+                              # only correct itself against reality next time Settings
+                              # opens (GET /api/config's open_at_login, see login_item.py).
+                              "open_at_login": login_item.desired()}},
                 ensure_ascii=False).encode())
+        if self.path.startswith("/api/login_item_status"):
+            # native/listener.py, after applying (or merely re-checking) SMAppService.
+            body = self._drain()
+            try:
+                payload = json.loads(body or b"{}")
+            except Exception:  # noqa: BLE001
+                payload = {}
+            login_item.set_status(str(payload.get("status") or ""))
+            return self._send(200, json.dumps({"ok": True}).encode())
         if self.path.startswith("/api/undo"):
             # The bar's Undo button. Reverses the last undoable action exactly once and
             # answers in the language it was done in. Contract, frozen: {"undone": bool,
@@ -484,8 +586,7 @@ class H(BaseHTTPRequestHandler):
             # A silent first press is how onboarding introduces itself. Short-circuiting
             # it here meant a brand new machine answered the very first press with
             # nothing at all.
-            from . import profile as _prof
-            if not _prof.load().get("setup_complete"):
+            if not onboarding_api.setup_done():
                 res = handle(_jev, "", "", speak=speak,
                              client=(payload.get("client") or "web"))
                 return self._send(200, json.dumps(res, ensure_ascii=False,
@@ -513,9 +614,16 @@ class H(BaseHTTPRequestHandler):
             # could carry out the guess. A half-heard "send a message to…" armed one
             # send, and the finished sentence armed another.
             speculative = bool(payload.get("speculative"))
+            # The recogniser's confidence in this transcript, 0 to 1, when the listener
+            # sends it. A message heard at low confidence is confirmed before it goes.
+            try:
+                asr_conf = float(payload["asr_confidence"])
+                asr_conf = asr_conf if 0.0 <= asr_conf <= 1.0 else None
+            except (KeyError, TypeError, ValueError):
+                asr_conf = None
             res = handle(_jev, text, recent, speak=speak and not speculative,
                          client=client, activation=activation, reason=reason,
-                         speculative=speculative)
+                         speculative=speculative, asr_conf=asr_conf)
             with _lock:
                 if res.get("did") not in ("ignored", "waiting"):
                     _recent.append(f"{text} -> {res.get('did')}")
@@ -586,11 +694,14 @@ def main():
     # onboarding has said what MicMic is.
     from .actions import contacts as _book
     from .paths import is_bundled as _bundled
+    # A Mac whose onboarding window was finished but whose spoken setup never was
+    # (onboarded true, setup_complete false) is set up: say so before anything reads it.
+    onboarding_api.setup_done()
     fresh = _bundled() and not _prof.load().get("setup_complete")
     if not fresh:
         threading.Thread(target=_book.recent_chats, daemon=True,
                          name="micmic-recent-warm").start()
-    srv = ThreadingHTTPServer(("127.0.0.1", PORT), H)
+    srv = Server(("127.0.0.1", PORT), H)
     print(f"\n  MicMic listening on http://127.0.0.1:{PORT}")
     if not _bundled():
         print(f"  contacts: {get_contacts()}")

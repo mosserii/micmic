@@ -23,7 +23,7 @@ API = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
 CREDENTIALS = "credentials.json"
 # A kept-alive connection idle longer than this is treated as already closed by the
-# far end. Measured 2026-09-25 (measured with tests/perf/bench.py): the proxy on Railway keeps an
+# far end. Measured 2026-09-25, with tests/perf/bench.py: the proxy on Railway keeps an
 # idle connection 45 s and has closed it by 70 s; api.typesafe.ai keeps it past 130 s.
 # She rarely speaks twice inside a minute, so without this nearly every turn in the
 # field paid a failed send and a new TLS handshake before any real work began.

@@ -32,18 +32,24 @@ W, H = 380, 560
 class MicMicPanelBridge(AppKit.NSObject, protocols=[objc.protocolNamed("WKScriptMessageHandler")]):
     """The page's way to reach the listener. In panel mode the page has no microphone of
     its own (the listener owns it), so a click on the orb used to do nothing at all.
-    Now it posts "listen" here and the listener arms, exactly as "Listen now" does."""
+    Now it posts "listen" here and the listener arms, exactly as "Listen now" does.
+    It also posts "drag" when a press on its background starts to move: see
+    MicMicPanel._drag_window."""
 
     def initWithCallback_(self, callback):
         self = objc.super(MicMicPanelBridge, self).init()
         if self is None:
             return None
         self._callback = callback
+        self._drag = None
         return self
 
     def userContentController_didReceiveScriptMessage_(self, controller, message):
-        if str(message.body()) == "listen" and self._callback is not None:
+        body = str(message.body())
+        if body == "listen" and self._callback is not None:
             self._callback()
+        elif body == "drag" and self._drag is not None:
+            self._drag()
 
 
 class MicMicPanel:
@@ -85,6 +91,7 @@ class MicMicPanel:
         # Held on self: the content controller keeps its own reference, but an object
         # nobody on the Python side holds is one refactor away from being collected.
         self._bridge = MicMicPanelBridge.alloc().initWithCallback_(on_listen)
+        self._bridge._drag = self._drag_window
         cfg.userContentController().addScriptMessageHandler_name_(self._bridge, "micmic")
         self.web = WebKit.WKWebView.alloc().initWithFrame_configuration_(
             Foundation.NSMakeRect(0, 0, W, H), cfg)
@@ -99,6 +106,18 @@ class MicMicPanel:
 
         self._loaded = False
         self._placed = False
+
+        # The last left press inside this window, for _drag_window. The drag is anchored
+        # on the press itself, not on the move that made it a drag, so the spot she
+        # grabbed stays under the pointer instead of the window trailing it.
+        self._press = None
+
+        def note(event):
+            if event.windowNumber() == self.panel.windowNumber():
+                self._press = event
+            return event
+        self._monitor = AppKit.NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+            AppKit.NSEventMaskLeftMouseDown, note)
 
     # -------------------------------------------------------------- state
     def set_state(self, state: str, text: str = "") -> None:
@@ -159,6 +178,28 @@ class MicMicPanel:
         else:
             self.load()
 
+    def _drag_window(self) -> None:
+        """Move the window with the pointer, from a press on the page's background.
+
+        setMovableByWindowBackground_ is not enough on its own: the web view takes every
+        mouse event, so AppKit never sees a press on "background". The page reports when
+        a press on its background has moved (never on a control, the typing box or
+        text), and the window server takes the drag from here until the button is up.
+        A message that arrives after the button is already up does nothing, or the
+        window would follow a pointer nobody is holding.
+        """
+        if not _left_button_down():
+            return
+        event = self._press
+        if event is None:
+            # No press recorded (it should always be): the move that triggered this is
+            # the next best anchor.
+            event = AppKit.NSApp().currentEvent()
+            if not (event is not None and event.type() in _PRESS_TYPES
+                    and event.windowNumber() == self.panel.windowNumber()):
+                return
+        self.panel.performWindowDragWithEvent_(event)
+
     def _place_top_right(self) -> None:
         """Out of the way by default. The middle of the screen is where a dialog goes,
         and this is not a dialog — it is meant to be visible while you work."""
@@ -169,6 +210,13 @@ class MicMicPanel:
         self.panel.setFrameOrigin_(Foundation.NSMakePoint(
             vis.origin.x + vis.size.width - W - 24,
             vis.origin.y + vis.size.height - H - 24))
+
+
+_PRESS_TYPES = (AppKit.NSEventTypeLeftMouseDown, AppKit.NSEventTypeLeftMouseDragged)
+
+
+def _left_button_down() -> bool:
+    return bool(AppKit.NSEvent.pressedMouseButtons() & 1)
 
 
 def _js_string(s: str) -> str:

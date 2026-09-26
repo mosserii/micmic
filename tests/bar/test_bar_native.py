@@ -52,6 +52,11 @@ assert PORT != 8799, "never the live server"
 SHOTS = Path(os.environ.get("BAR_SHOTS", tempfile.mkdtemp(prefix="bar-native-shots-")))
 SHOTS.mkdir(parents=True, exist_ok=True)
 PASSED, FAILED = [], []
+# Jev and Gemini cost money: the server here is a proxy client pointed at a closed local
+# port, so it never reads the developer's keys from .env.local, never registers a device
+# with the cloud, and any model call fails at once, for free. Nothing here needs one.
+OFFLINE = {"MICMIC_MODE": "proxy", "MICMIC_PROXY_URL": "http://127.0.0.1:9",
+           "MICMIC_PROXY_TOKEN": "offline-test"}
 
 
 def check(name, ok, detail=""):
@@ -123,7 +128,7 @@ def ensure_server():
     if port_open(PORT):
         return None
     env = dict(os.environ, MICMIC_PORT=str(PORT),
-               MICMIC_STATE_DIR=tempfile.mkdtemp(prefix="bar-native-state-"))
+               MICMIC_STATE_DIR=tempfile.mkdtemp(prefix="bar-native-state-"), **OFFLINE)
     env.pop("MICMIC_ALLOW_SEND", None)
     env.pop("MICMIC_ALLOW_CALL", None)
     proc = subprocess.Popen([str(ROOT / ".venv/bin/python3"), "-m", "savta.server"], cwd=ROOT,

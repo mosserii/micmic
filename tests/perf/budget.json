@@ -120,9 +120,9 @@
   "store": 0
  },
  "knowledge_he#0": {
-  "jev": 2,
+  "jev": 1,
   "gemini": 1,
-  "depth": 3,
+  "depth": 2,
   "store": 0
  },
  "undo_en#0": {
@@ -150,15 +150,15 @@
   "store": 0
  },
  "followup_en#0": {
-  "jev": 2,
+  "jev": 1,
   "gemini": 1,
-  "depth": 3,
+  "depth": 2,
   "store": 0
  },
  "followup_en#1": {
-  "jev": 2,
+  "jev": 1,
   "gemini": 1,
-  "depth": 3,
+  "depth": 2,
   "store": 0
  }
 }

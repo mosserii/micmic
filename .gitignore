@@ -46,3 +46,11 @@ tests/perf/replay.json
 docs/research/
 # Baked in by the release build; empty in a checkout.
 savta/cloud_url.txt
+
+# ---- model-answer recordings for tests: made on the maintainer's Mac, may hold
+#      real contact names from its address book. Local only, never published.
+tests/recordings/
+
+# Renders of Apple SF Symbols (used only to compare weights locally); not ours to publish.
+brand/menubar/sf-mic-ref*.png
+brand/menubar/preview-compare-*.png

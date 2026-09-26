@@ -18,7 +18,7 @@ DEFAULT = {
     "step": "greet",
     "name": "",
     "language": "",          # hebrew | english | arabic | russian
-    "speech_lang": "he-IL",
+    "speech_lang": "",       # what setup heard; Settings alone picks the recogniser
     "city": "",
     "gender": "",            # feminine | masculine — how to ADDRESS her or him
     "emergency_contact": "",
@@ -31,17 +31,26 @@ STEPS = ["greet", "name", "city", "who", "done"]
 
 LANG_TO_SPEECH = {"hebrew": "he-IL", "arabic": "ar-SA", "russian": "ru-RU",
                   "english": "en-US"}
+SPEECH_TO_LANG = {v: k for k, v in LANG_TO_SPEECH.items()}
 
 # What it says at each step, in every language it knows.
 SCRIPT = {
-    # Used once she has said anything at all, so her language is already known — the
-    # bilingual FIRST_LINE below is only for a silent first press, when it is not.
-    # It must still ask her name: this is what advances the step to "name".
-    "greet": {
+    # A silent first press: nothing to answer, so the greeting is the whole reply, in
+    # the language chosen in Settings (English unless she chose another).
+    "hello": {
         "hebrew":  "שלום, אני מיקמיק. איך קוראים לך?",
-        "english": "Hello, I am MicMic. What should I call you?",
+        "english": "Hello, I'm MicMic. What should I call you?",
         "arabic":  "مرحبا، أنا ميكميك. ما اسمك؟",
         "russian": "Здравствуйте, я МикМик. Как вас зовут?",
+    },
+    # She asked for something on her very first press. The answer comes first and this
+    # one short line rides after it, in the language she spoke. It must still ask her
+    # name: this is what advances the step to "name".
+    "greet": {
+        "hebrew":  "אני מיקמיק. איך קוראים לך?",
+        "english": "I'm MicMic. What should I call you?",
+        "arabic":  "أنا ميكميك. ما اسمك؟",
+        "russian": "Я МикМик. Как вас зовут?",
     },
     # Gender not yet known here (it is only inferred later, from what she says), so
     # this defaults to feminine like the rest of the script until it is. Marker syntax
@@ -82,12 +91,6 @@ SCRIPT = {
     },
 }
 
-# Said before it has heard a single word, so it cannot know the language yet and has to
-# hedge in two. The moment she says anything at all, `greet` below is used instead and
-# speaks only her language — the bilingual version is for a silent first press only.
-FIRST_LINE = "שלום, אני מיקמיק. איך קוראים לך? ... Hello, I am MicMic. What should I call you?"
-
-
 def load() -> dict:
     if PATH.exists():
         try:
@@ -125,6 +128,18 @@ def save(p: dict) -> None:
         tmp.replace(PATH)
     except Exception:  # noqa: BLE001
         pass
+
+
+def finish_setup() -> dict:
+    """Setup is over without the spoken conversation: the app's own onboarding window
+    was finished or skipped. Whatever it had not asked yet stays empty, and the spoken
+    path fills a field whenever she mentions it."""
+    p = load()
+    if not p.get("setup_complete"):
+        p["setup_complete"] = True
+        p["step"] = "done"
+        save(p)
+    return p
 
 
 def clear() -> None:

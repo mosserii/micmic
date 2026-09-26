@@ -76,10 +76,11 @@ spoke. It tells them apart by the alphabet you spoke in, not by a guessing model
 
 ## How it works
 
-**1. Hold right Option** in any app. A slim bar opens at the top of your screen, like
-Spotlight, and never takes focus from what you are doing.<br>
+**1. Hold right Option, or tap it once.** A slim bar opens at the top of your screen,
+like Spotlight, and never takes focus from what you are doing.<br>
 **2. Talk.** Your words show up in the bar as you speak.<br>
-**3. Let go.** MicMic does it and shows you what it did.
+**3. Let go, or just stop talking.** Held the key, let go and it sends. Tapped it,
+MicMic sends on its own a moment after you go quiet, or tap again to send sooner.
 
 <p align="center">
   <picture>

@@ -12,8 +12,8 @@ What it proves: every state; hundreds of live-word updates a second; very long H
 Arabic and English answers clamped without overflow or overlap; RTL; all four
 languages; light and dark; Undo against success, undone:false, a network failure, a
 500, bad JSON and the real 404 (the endpoint does not exist in this tree yet); Esc;
-the height messages; that the bar never opens a microphone; and that the plain page
-and ?panel=1 are pixel-identical to the baseline commit before the bar existed.
+the height messages; that the bar never opens a microphone; and that the bar's styling
+and hooks leave the plain page and ?panel=1 alone (see test_other_modes_unchanged).
 """
 from __future__ import annotations
 
@@ -33,15 +33,15 @@ ROOT = Path(__file__).resolve().parents[2]
 PORT = 8802
 BASE = f"http://127.0.0.1:{PORT}"
 assert PORT != 8799, "never the live server"
-# Pinned rather than "main", which stops being a baseline the moment it moves. First
-# the commit before the bar existed (2afddd2); moved to 4b5de6a, which deliberately
-# added the "what appears when you talk" row to Settings and pushed every row below it
-# down. Nothing after it may change the normal page or ?panel=1.
-BASELINE = os.environ.get("BAR_BASELINE", "4b5de6a")
 SHOTS = Path(os.environ.get("BAR_SHOTS", tempfile.mkdtemp(prefix="bar-page-shots-")))
 SHOTS.mkdir(parents=True, exist_ok=True)
 
 PASSED, FAILED = [], []
+# Jev and Gemini cost money: the server here is a proxy client pointed at a closed local
+# port, so it never reads the developer's keys from .env.local, never registers a device
+# with the cloud, and any model call fails at once, for free. Nothing here needs one.
+OFFLINE = {"MICMIC_MODE": "proxy", "MICMIC_PROXY_URL": "http://127.0.0.1:9",
+           "MICMIC_PROXY_TOKEN": "offline-test"}
 
 
 def check(name, ok, detail=""):
@@ -112,7 +112,7 @@ def ensure_server():
         assert "window.barResult" in page, "something else is on 8802"
         return None
     env = dict(os.environ, MICMIC_PORT=str(PORT),
-               MICMIC_STATE_DIR=tempfile.mkdtemp(prefix="bar-page-state-"))
+               MICMIC_STATE_DIR=tempfile.mkdtemp(prefix="bar-page-state-"), **OFFLINE)
     env.pop("MICMIC_ALLOW_SEND", None)
     env.pop("MICMIC_ALLOW_CALL", None)
     proc = subprocess.Popen([str(ROOT / ".venv/bin/python3"), "-m", "savta.server"],
@@ -126,9 +126,15 @@ def ensure_server():
     raise SystemExit("server on 8802 did not start")
 
 
-def baseline_html():
-    return subprocess.run(["git", "-C", str(ROOT), "show", f"{BASELINE}:savta/web/index.html"],
-                          capture_output=True, text=True, check=True).stdout
+def no_model_calls():
+    """The server's own count of Jev calls and their cost, which must both be zero."""
+    import urllib.request as _u
+    try:
+        h = json.loads(_u.urlopen(BASE + "/api/health", timeout=5).read())
+    except Exception as e:  # noqa: BLE001
+        return check("the server reports no paid model calls", False, repr(e))
+    check("the server reports no paid model calls (Jev calls and cost both zero)",
+          not h.get("calls") and not h.get("cost_usd"), h)
 
 
 # ---------------------------------------------------------------- helpers
@@ -143,14 +149,28 @@ def _guard(route):
         route.continue_()
 
 
-def new_ctx(browser, **kw):
+SPEECH = {"en": "en-US", "he": "he-IL", "ar": "ar-SA", "ru": "ru-RU"}
+
+
+def new_ctx(browser, lang=None, **kw):
+    """lang: the server's speech language for this context. The page takes its language
+    from /api/config (the browser's saved one only covers the moment before it answers),
+    so that is where a test picks it."""
     ctx = browser.new_context(**kw)
     ctx.route("**/api/**", _guard)
+    if lang:
+        def config(route):
+            if route.request.method != "GET":
+                return _guard(route)
+            body = route.fetch().json()
+            body["language_hint"] = SPEECH[lang]
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+        ctx.route("**/api/config", config)
     return ctx
 
 
 def open_bar(browser, lang="en", scheme="light", width=640, extra_init=""):
-    ctx = new_ctx(browser, viewport={"width": width, "height": 64}, color_scheme=scheme,
+    ctx = new_ctx(browser, lang=lang, viewport={"width": width, "height": 64}, color_scheme=scheme,
                               device_scale_factor=2, reduced_motion="reduce")
     ctx.add_init_script(INIT + f"try{{localStorage.setItem('micmic.lang', {json.dumps(lang)})}}catch(_){{}}"
                         + extra_init)
@@ -551,11 +571,52 @@ def test_language_follows_panel(browser):
     ctx.close()
 
 
+# Every style rule that exists for the bar, removed from the live page. What is left is
+# the page as it would be without the bar's styling.
+STRIP_BAR_RULES = """() => {
+  let n = 0;
+  const strip = list => { for(let i = list.cssRules.length - 1; i >= 0; i--){
+    const r = list.cssRules[i];
+    if(r.cssRules && !r.selectorText) strip(r);
+    // bar-only: it names barmode, and not just to rule the bar out (":not(.barmode)")
+    else if(r.selectorText && r.selectorText.replaceAll(':not(.barmode)', '').includes('barmode')){
+      list.deleteRule(i); n++; }
+  } };
+  for(const sheet of document.styleSheets){ try{ strip(sheet); }catch(_){ /* the web font's, cross-origin */ } }
+  return n; }"""
+
+LAYOUT = """() => {
+  const out = {};
+  for(const e of document.querySelectorAll('[id]')){
+    const r = e.getBoundingClientRect(), cs = getComputedStyle(e);
+    out[e.id] = [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height),
+                 cs.display, cs.color, cs.fontSize, cs.visibility, (e.textContent||'').slice(0, 60)];
+  }
+  out.__body = document.body.className; out.__html = document.documentElement.className;
+  return out; }"""
+
+
+def settled_shot(page):
+    """A picture of a page that has stopped changing: two frames in a row the same. One
+    frame straight after a change can still be mid-composite (the card's glass)."""
+    last = page.screenshot()
+    for _ in range(8):
+        page.wait_for_timeout(120)
+        now = page.screenshot()
+        if now == last:
+            return now
+        last = now
+    return last
+
+
 def test_other_modes_unchanged(browser):
-    """The plain page and ?panel=1 against the commit before the bar existed: the same
-    pixels in every state we can put them in, and the same layout for every element."""
-    old = baseline_html()
-    check("baseline is the page with the display setting", "segDisplay" in old and "PANEL" in old)
+    """The plain page and ?panel=1 are not touched by the bar, in every state we can put
+    them in. This used to compare them with a frozen commit (4b5de6a), which failed on
+    every intended change to the page since and so stopped protecting anything. Now each
+    state is compared with itself minus every bar-only style rule: any bar styling that
+    leaks into these modes changes a pixel or a box and fails, while deliberate changes
+    to the page do not. The bar's hooks, its Undo button and its messages to native
+    must not exist here either."""
     scenarios = [
         ("page idle", "/", (1200, 820), "light", "en", ""),
         ("page idle dark he", "/", (1200, 820), "dark", "he", ""),
@@ -574,52 +635,47 @@ def test_other_modes_unchanged(browser):
         ("panel settings", "/?panel=1", (380, 560), "light", "ar", "openSettings();"),
     ]
     for name, path, (w, h), scheme, lang, script in scenarios:
-        shots, layouts = {}, {}
-        for which in ("baseline", "now"):
-            ctx = new_ctx(browser, viewport={"width": w, "height": h}, color_scheme=scheme,
-                                      reduced_motion="reduce")
-            ctx.add_init_script(INIT + f"try{{localStorage.setItem('micmic.lang', {json.dumps(lang)})}}catch(_){{}}")
-            page = ctx.new_page()
-            errors = []
-            page.on("pageerror", lambda e: errors.append(str(e)))
-            if which == "baseline":
-                page.route(lambda u: u.split("?")[0].rstrip("/") == BASE,
-                           lambda r: r.fulfill(status=200, content_type="text/html; charset=utf-8", body=old))
-            page.goto(BASE + path)
-            page.wait_for_function("document.documentElement.lang === %s" % json.dumps(lang))
-            page.evaluate("document.fonts.ready")
-            if script:
-                page.evaluate(script)
-            page.wait_for_timeout(700)
-            shots[which] = page.screenshot()
-            layouts[which] = page.evaluate("""() => {
-                const out = {};
-                for(const e of document.querySelectorAll('[id]')){
-                  if(e.id === 'undo' || e.id === 'undow') continue;
-                  const r = e.getBoundingClientRect(), cs = getComputedStyle(e);
-                  out[e.id] = [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height),
-                               cs.display, cs.color, cs.fontSize, (e.textContent||'').slice(0, 60)];
-                }
-                out.__body = document.body.className; out.__html = document.documentElement.className;
-                out.__msgs = window.__msgs.filter(m => !m.startsWith('height:')).join(',');
-                return out; }""")
-            layouts[which]["__errors"] = errors
-            if which == "now":
-                undo_shown = page.evaluate("getComputedStyle(document.getElementById('undo')).display")
-                check(f"{name}: the Undo button does not exist visually outside the bar",
-                      undo_shown == "none", undo_shown)
-                check(f"{name}: the bar never posts to micmicbar here",
-                      not any(m.startswith("height:") or m in ("dismiss", "touch") for m in msgs(page)))
-            ctx.close()
-        same = shots["baseline"] == shots["now"]
-        if not same:
-            (SHOTS / f"diff-{name.replace(' ', '-')}-baseline.png").write_bytes(shots["baseline"])
-            (SHOTS / f"diff-{name.replace(' ', '-')}-now.png").write_bytes(shots["now"])
-        check(f"{name}: pixel-identical to the baseline", same, "see diff-*.png in " + str(SHOTS))
-        diffs = {k: (layouts["baseline"].get(k), layouts["now"].get(k))
-                 for k in set(layouts["baseline"]) | set(layouts["now"])
-                 if layouts["baseline"].get(k) != layouts["now"].get(k)}
-        check(f"{name}: every element's box, display, colour, size and text unchanged", not diffs, diffs)
+        ctx = new_ctx(browser, lang=lang, viewport={"width": w, "height": h}, color_scheme=scheme,
+                      reduced_motion="reduce")
+        # A set-up Mac: on this test server's fresh state the first-run screens would
+        # cover the panel, and every panel picture would be of them instead.
+        ctx.route("**/api/onboarding", lambda r: r.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps({"show": False, "first_run": False, "onboarded": True}))
+            if r.request.method == "GET" else _guard(r))
+        ctx.add_init_script(INIT + f"try{{localStorage.setItem('micmic.lang', {json.dumps(lang)})}}catch(_){{}}")
+        page = ctx.new_page()
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(BASE + path)
+        page.wait_for_function("document.documentElement.lang === %s" % json.dumps(lang))
+        page.evaluate("document.fonts.ready")
+        if script:
+            page.evaluate(script)
+        page.wait_for_timeout(700)
+        before, lay_before = settled_shot(page), page.evaluate(LAYOUT)
+        removed = page.evaluate(STRIP_BAR_RULES)
+        after, lay_after = settled_shot(page), page.evaluate(LAYOUT)
+        check(f"{name}: there were bar-only style rules to take out", removed > 20, removed)
+        if before != after:
+            (SHOTS / f"diff-{name.replace(' ', '-')}-with-bar-css.png").write_bytes(before)
+            (SHOTS / f"diff-{name.replace(' ', '-')}-without.png").write_bytes(after)
+        check(f"{name}: the bar's styling changes no pixel here", before == after,
+              "see diff-*.png in " + str(SHOTS))
+        diffs = {k: (lay_before.get(k), lay_after.get(k)) for k in set(lay_before) | set(lay_after)
+                 if lay_before.get(k) != lay_after.get(k)}
+        check(f"{name}: nor any element's box, display, colour, size or text", not diffs, diffs)
+        check(f"{name}: not in bar mode, and the panel itself is what is on screen",
+              "barmode" not in lay_before["__html"] and "onboarding" not in lay_before["__body"],
+              [lay_before["__html"], lay_before["__body"]])
+        check(f"{name}: the Undo button and the working line do not exist visually",
+              lay_before["undo"][4] == "none" and lay_before["work"][4] == "none")
+        check(f"{name}: none of the bar's hooks are defined",
+              page.evaluate("['barState','barHeard','barResult'].every(k => typeof window[k] === 'undefined')"))
+        check(f"{name}: the bar never posts to micmicbar here",
+              all(m.startswith("micmic:") for m in msgs(page)), msgs(page))
+        check(f"{name}: no page errors", not errors, errors[:2])
+        ctx.close()
 
 
 def main():
@@ -639,6 +695,7 @@ def main():
                         check(f"{t.__name__} ran to the end", False, repr(e)[:400])
             finally:
                 browser.close()
+        no_model_calls()
     finally:
         if proc is not None:
             proc.terminate()

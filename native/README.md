@@ -54,10 +54,12 @@ Fix any of them in **System Settings > Privacy & Security**.
 
 ## Talking to it
 
-**Hold right Option**, speak, let go. The bar shows your words as you speak, then
-what MicMic did, with Undo when it can be put back. Change the hotkey in Settings,
-or pin one with `MICMIC_HOTKEY` in `listener.env`: `right-option`, `right-command`,
-`right-control`, `right-shift`, or a combination such as `cmd+shift+m`.
+**Hold right Option**, speak, let go — or **tap it** once and just talk; it sends on
+its own a moment after you go quiet, or tap again to send sooner. The bar shows your
+words as you speak, then what MicMic did, with Undo when it can be put back. Change
+the hotkey in Settings, or pin one with `MICMIC_HOTKEY` in `listener.env`:
+`right-option`, `right-command`, `right-control`, `right-shift`, or a combination
+such as `cmd+shift+m`.
 
 While a message is counting down before it is sent, you do not need the hotkey to
 stop it. Say "no", "stop" or "wait".

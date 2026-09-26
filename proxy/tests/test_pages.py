@@ -49,7 +49,7 @@ def test_pages_load_nothing_from_anywhere_else(make_proxy):
         # The only off-site link on any page is the download itself.
         offsite = set(re.findall(r'href="(https?://[^"]+)"', html))
         assert offsite <= {"https://example.com/MicMic.dmg",
-                           "https://github.com/mosserii/micmic-releases"}, path
+                           "https://github.com/mosserii/micmic"}, path
 
 
 def test_static_paths_cannot_leave_the_static_folder(make_proxy):
@@ -172,7 +172,7 @@ def test_jev_is_named_as_a_fact_with_the_non_affiliation_line(make_proxy):
 def test_header_has_github_and_a_download_button(make_proxy):
     p = make_proxy(download_url="https://example.com/MicMic.dmg")
     head = _get(p, "/")[1].decode("utf-8").split("</header>")[0]
-    assert 'href="https://github.com/mosserii/micmic-releases"' in head and 'aria-label="MicMic on GitHub"' in head
+    assert 'href="https://github.com/mosserii/micmic"' in head and 'aria-label="MicMic on GitHub"' in head
     assert '<div class="top-cta"><a class="button" href="https://example.com/MicMic.dmg">Download</a></div>' in head
     head = _get(make_proxy(), "/")[1].decode("utf-8").split("</header>")[0]
     assert '<div class="top-cta">' not in head      # no link, no header button

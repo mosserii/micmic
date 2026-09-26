@@ -1,0 +1,2 @@
+# The root .gitignore drops every shots/ folder; these are the landing review shots and are kept on purpose.
+!shots/

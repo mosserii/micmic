@@ -221,8 +221,11 @@ class Recorder:
         def post(llm, payload, model=None, timeout=None):
             f = sys._getframe(1)
             caller = f.f_code.co_name
-            if caller in ("text", "generate_content"):
-                caller = f.f_back.f_code.co_name
+            # Attributed to the job that asked (chat, answer, ...), through the helpers
+            # that only carry the call there.
+            while caller in ("text", "generate_content", "_spoken") and f.f_back is not None:
+                f = f.f_back
+                caller = f.f_code.co_name
             t0 = time.time()
             d = real_post(llm, payload, model, timeout)
             t1 = time.time()

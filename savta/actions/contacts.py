@@ -122,6 +122,22 @@ def _copy_with_timeout(src: Path, dst: Path, timeout: float = COPY_TIMEOUT) -> b
     return rc == 0 and dst.exists()
 
 
+# Every copy lands on one fixed path per database, and `cp -f` rewrites it in place.
+# Two readers at once meant one overwrote the -shm file SQLite had memory-mapped in
+# the other, and the whole server died of SIGBUS (tests/test_account.py, when the day's
+# briefing and a turn both read the message store). Copy and read, one at a time.
+_STORE_LOCK = threading.RLock()
+
+
+def _one_at_a_time(fn):
+    def wrapped(*a, **k):
+        with _STORE_LOCK:
+            return fn(*a, **k)
+    wrapped.__name__, wrapped.__doc__ = fn.__name__, fn.__doc__
+    return wrapped
+
+
+@_one_at_a_time
 def _read_whatsapp() -> list[dict]:
     src = WA_DIR / "ContactsV2.sqlite"
     if not src.exists():
@@ -316,6 +332,7 @@ def recent_chats(limit: int = 30) -> list[dict]:
     return [dict(r) for r in rows[:limit]]
 
 
+@_one_at_a_time
 def _read_recent(limit: int) -> list[dict]:
     chat = _copy_db("ChatStorage.sqlite")
     cont = _copy_db("ContactsV2.sqlite")
@@ -349,6 +366,7 @@ def _read_recent(limit: int) -> list[dict]:
     return out
 
 
+@_one_at_a_time
 def unread_summary(limit: int = 8) -> list[dict]:
     """Her most recent incoming messages, for reading aloud."""
     chat = _copy_db("ChatStorage.sqlite")

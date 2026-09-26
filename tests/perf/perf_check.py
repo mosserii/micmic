@@ -144,8 +144,11 @@ def measure(tm, rp: Replay) -> dict:
     def post(llm, payload, model=None, timeout=None):
         f = sys._getframe(1)
         caller = f.f_code.co_name
-        if caller in ("text", "generate_content"):
-            caller = f.f_back.f_code.co_name
+        # Attributed to the job that asked (chat, answer, ...), through the helpers
+        # that only carry the call there.
+        while caller in ("text", "generate_content", "_spoken") and f.f_back is not None:
+            f = f.f_back
+            caller = f.f_code.co_name
         llm.calls += 1
         return rp.gemini(caller)
 

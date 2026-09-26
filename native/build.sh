@@ -99,8 +99,9 @@ release_build() {
   # 2. dependencies, flat, straight from the lockfile --------------------------
   echo "  resolving dependencies from uv.lock"
   ( cd "$PROJECT" && uv export --no-hashes --no-dev --no-emit-project -o "$DIST/requirements.txt" ) >/dev/null
-  # the listener needs two pyobjc frameworks that the server does not
-  printf 'pyobjc-framework-Speech\npyobjc-framework-AVFoundation\npyobjc-framework-WebKit\n' >> "$DIST/requirements.txt"
+  # the listener needs pyobjc frameworks that the server does not: Speech/AVFoundation
+  # for the microphone, WebKit for the bar/panel, ServiceManagement for launch-at-login
+  printf 'pyobjc-framework-Speech\npyobjc-framework-AVFoundation\npyobjc-framework-WebKit\npyobjc-framework-ServiceManagement\n' >> "$DIST/requirements.txt"
   uv pip install --quiet --python "$PYBIN" --target "$RES/lib" -r "$DIST/requirements.txt"
 
   # 3. the app's own code ------------------------------------------------------
@@ -120,6 +121,12 @@ release_build() {
   cp "$HERE/panel.py"    "$RES/app/panel.py"
   cp "$HERE/bar.py"      "$RES/app/bar.py"
   cp "$HERE/../brand/AppIcon.icns" "$RES/AppIcon.icns"
+  # The branded menu-bar mark (idle/hearing you; see brand/menubar/render.py).
+  # _menubar_dir() in listener.py looks for these right here, next to AppIcon.
+  mkdir -p "$RES/menubar"
+  cp "$HERE"/../brand/menubar/mic-idle.png "$HERE"/../brand/menubar/mic-idle@2x.png \
+     "$HERE"/../brand/menubar/mic-active.png "$HERE"/../brand/menubar/mic-active@2x.png \
+     "$RES/menubar/"
   [ -f "$PROJECT/micmic.config.json" ] && cp "$PROJECT/micmic.config.json" "$RES/app/"
   find "$RES/app" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
   # Nothing personal and no credential travels in a shipped bundle. profile.json,
@@ -307,8 +314,10 @@ ENT
     # size, with no downside worth paying for. lzfse has worked in hdiutil since
     # OS X 10.11, well under this app's macOS 13 floor. Format and HFS+ are set in
     # dmg/dmgbuild-settings.py.
-    uvx --from dmgbuild==1.6.7 dmgbuild -s "$HERE/dmg/dmgbuild-settings.py" \
-      -D app="$RAPP" "MicMic" "$DIST/MicMic.dmg" >/dev/null
+    # make_dmg.py runs dmgbuild with its scratch volume mounted privately: macOS
+    # refuses writes to /Volumes/MicMic/MicMic.app on a Mac that has run MicMic from
+    # a download, and that is exactly where dmgbuild would mount it.
+    uvx --from dmgbuild==1.6.7 python "$HERE/dmg/make_dmg.py" "$RAPP" "$DIST/MicMic.dmg" >/dev/null
     # dmgbuild copies the app in with ditto and exits 0 even when that copy fails
     # (seen: "Operation not permitted" on /Volumes/MicMic 1/MicMic.app), leaving an
     # image with no app that Apple would notarize all the same. Open it somewhere
@@ -393,6 +402,20 @@ if [ -f "$ICON_SRC" ] && ! cmp -s "$ICON_SRC" "$APP/Contents/Resources/AppIcon.i
   echo "  wrote:     MicMic.app/Contents/Resources/AppIcon.icns"
   CHANGED=1
 fi
+
+# The branded menu-bar mark (idle/hearing you). Only in the dev launcher's own
+# Resources/menubar so is_bundled()'s Contents/Resources/menubar lookup finds it
+# too; a checkout with no .app running yet reads straight from brand/menubar.
+mkdir -p "$APP/Contents/Resources/menubar"
+for f in mic-idle.png mic-idle@2x.png mic-active.png mic-active@2x.png; do
+  SRC="$HERE/../brand/menubar/$f"
+  DEST="$APP/Contents/Resources/menubar/$f"
+  if [ -f "$SRC" ] && ! cmp -s "$SRC" "$DEST" 2>/dev/null; then
+    cp "$SRC" "$DEST"
+    echo "  wrote:     MicMic.app/Contents/Resources/menubar/$f"
+    CHANGED=1
+  fi
+done
 
 write_if_changed "$APP/Contents/Info.plist" <<PLIST && CHANGED=1
 <?xml version="1.0" encoding="UTF-8"?>

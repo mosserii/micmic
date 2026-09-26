@@ -15,6 +15,28 @@ from .jev import Jev, choice, noul, score
 
 MAX_OPTIONS = 250  # Jev hard limit is 255
 
+# Languages a message can be asked to go out in. The translation itself is the
+# language model's job; Jev only says which one she asked for.
+WRITE_IN = {"not_applicable": "She did not ask for the message to be in a particular language.",
+            "english": None, "hebrew": None, "arabic": None, "russian": None,
+            "french": None, "spanish": None, "german": None, "italian": None,
+            "portuguese": None}
+
+# Asked only while a message is being prepared (see understand's `draft`). The owner
+# said "send it on WhatsApp" right after a message, and was asked who to send it to
+# and what it should say, as if nothing had happened.
+DRAFT_QUESTIONS = {
+    "amends_message": {"type": "noul",
+        "instructions": "She is changing or repeating the message in message_being_prepared: sending it to a different person, with different words, in another language or by another app, or sending it after all, rather than asking for a new, separate message",
+        "criteria": {"true": "Send it on WhatsApp. Send her on WhatsApp. No, to Dana. Send it to Matan instead. No wait, send it in French. Say I am running late instead. Send it again. תשלחי את זה בוואטסאפ. לא, לדנה. תכתבי את זה באנגלית. במקום זה תגידי שאני מאחרת. Отправь это в WhatsApp.",
+                     "false": "A new message with its own person and words: send a message to Gal that dinner is at eight, tell Nir happy birthday, תשלחי הודעה לדנה שאני בדרך. Only stopping it: no, stop, don't send it, לא, עצרי. Anything that is not about sending a message: play music, what is the weather, call Dana."}},
+    "message_app": {"type": "choice",
+        "instructions": "Did she name the app the message should go by?",
+        "criteria": {"whatsapp": "She said WhatsApp, or ווטסאפ.",
+                     "imessage": "She asked for a text message, an SMS or iMessage by name.",
+                     "unchanged": "She did not name an app."}},
+}
+
 INTENTS = {
     "watch":    "Watch something on screen: a film, a show, a video, a clip, a match, the television news.",
     "music":    "Listen to music or a song or a singer.",
@@ -42,8 +64,14 @@ INTENTS = {
 
 def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
                playing: str = "", likes: dict | None = None,
-               spans: dict[str, str | tuple[str, str | None]] | None = None) -> dict:
+               spans: dict[str, str | tuple[str, str | None]] | None = None,
+               draft: dict | None = None) -> dict:
     """One request. Everything the decision tree could need.
+
+    `draft` is the message this conversation has just prepared, sent or stopped
+    ({"to", "text", "channel"}). While there is one, two more questions ride along:
+    is she changing that message, and did she name an app. Without one they are not
+    asked at all, so every other request is judged exactly as it was.
 
     `spans` is {name: instructions} or {name: (instructions, exists)}: pick_span
     questions whose candidates are the words of this very sentence, so they can ride
@@ -128,6 +156,11 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
                          "false": "Something she would naturally say to her own family."}},
         "message_has_content": {"type": "noul",
             "instructions": "She said what the message should actually say, rather than only naming who to send it to"},
+        # "Send the message to Dana in French": the language she wants it written in,
+        # which is not the language she is speaking.
+        "write_in": {"type": "choice",
+            "instructions": "If she asks for the message to be written or translated into a particular language, which one? The language she happens to be speaking in does not count.",
+            "criteria": WRITE_IN},
         # --- speculative: only read when intent is control ---
         "player_action": {"type": "choice",
             "instructions": "If something is playing and she wants to change it, what change",
@@ -176,6 +209,17 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
                          "false": "A request to do something, or small talk."}},
         "about_weather": {"type": "noul",
             "instructions": "She is asking about the weather"},
+        # --- speculative: only read when she asks about the weather ---
+        # "מה מזג האוויר מחר בתל אביב" was answered with today's.
+        "weather_day": {"type": "choice",
+            "instructions": "If she is asking about the weather, which day is she asking "
+                            "about? Today's date and weekday are in right_now.",
+            "criteria": {"today": "Today or right now, or she did not say a day.",
+                         "tomorrow": "Tomorrow, or the weekday that is tomorrow.",
+                         "day_after": "The day after tomorrow, or the weekday that is "
+                                      "two days from today.",
+                         "later": "A day further away than the day after tomorrow: the "
+                                  "weekend when that is further, next week, a date."}},
         # Hebrew, Arabic and Russian conjugate for the gender of the person being
         # spoken TO. This was built for a grandmother, so every line addressed a woman;
         # a man is then misgendered by almost every sentence MicMic says. Her own verb
@@ -274,6 +318,8 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
                          "Mildly frustrated or repeating herself.",
                          "Confused or upset, a person should check on her."]},
     }
+    if draft:
+        qs.update(DRAFT_QUESTIONS)
     cands = span_candidates(utterance) if spans else []
     for name, spec in (spans or {}).items():
         if not cands:
@@ -301,8 +347,13 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
         # at all when the room is silent. Jev cannot know which without being told.
         "playing_right_now": playing or "nothing is playing",
         "what_just_happened": recent or "nothing yet",
-        "utterance": utterance,
     }
+    if draft:
+        state["message_being_prepared"] = {
+            "to": draft.get("to") or "not said yet",
+            "says": draft.get("text") or "not said yet",
+            "app": "WhatsApp" if draft.get("channel") == "whatsapp" else "text message"}
+    state["utterance"] = utterance
     a = j.ask(state, qs)
 
     intent, conf, probs = choice(a, "intent")
@@ -336,6 +387,7 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
         "needs_knowledge": noul(a, "needs_world_knowledge"),
         "about_weather": noul(a, "about_weather"),
         "about_clock": noul(a, "about_clock"),
+        "weather_day": choice(a, "weather_day")[0],
         "setting_emergency_contact": noul(a, "setting_emergency_contact"),
         "inside_an_app": noul(a, "inside_an_app"),
         "speaker_gender": choice(a, "speaker_gender")[0],
@@ -347,6 +399,9 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
         "screen_task": choice(a, "screen_task")[0],
         "distress": score(a, "distress"),
         "emergency": noul(a, "emergency"),
+        "write_in": choice(a, "write_in")[0],
+        "amends_message": noul(a, "amends_message") if draft else 0.0,
+        "message_app": choice(a, "message_app")[0] if draft else "unchanged",
     }
 
 
@@ -422,7 +477,7 @@ def pick_from(j: Jev, rows: list[dict], label_fn, instructions: str, state_extra
 # ---------------------------------------------------------------- result picking
 
 def pick_result(j: Jev, want: str, results: list[dict], full_length: bool,
-                specific: bool = True):
+                specific: bool = True, trailer: bool = False):
     """Choose among real search results. Paired with a Noul so 'none of these' is sayable.
 
     `specific` scales how fussy we are. "a Leonardo DiCaprio film" names a thing and
@@ -442,9 +497,15 @@ def pick_result(j: Jev, want: str, results: list[dict], full_length: bool,
     instr = (
         "She asked for: " + want + ". "
         "Choose the single result that best gives her exactly that, playable right now. "
-        + ("Strongly prefer a complete full-length work over a trailer, a short clip, a reaction "
+        + ("She asked for the trailer. Choose an official trailer, preferably from the "
+           "studio's or distributor's own channel or a well-known trailer channel. Not a "
+           "parody, a fan-made or concept trailer, a reaction, a scene, or the whole film. "
+           if trailer else
+           "Strongly prefer a complete full-length work over a trailer, a short clip, a reaction "
            "video, a compilation of scenes, or a review. " if full_length else
            "A short clip is fine. ")
+        + ("Never a parody, a spoof, a cartoon or meme version, or a reaction video, unless "
+           "that is what she asked for. " if specific else "")
         + ("Avoid titles that look automatically generated: ones that string several famous "
            "names together with a generic action-film label, promise an implausible unreleased "
            "film, or have very few views for a supposedly famous work. Prefer a genuinely "

@@ -482,13 +482,15 @@ def test_cloud_url():
         check(f"cloud URL {url} {'accepted' if ok else 'refused'}",
               (account.cloud_url() is not None) == ok)
     os.environ.pop("MICMIC_CLOUD_URL")
-    # A checkout has no baked cloud (forks never sign up on the owner's metered one);
-    # the release build writes it, and build.sh bakes an https URL.
+    # A checkout has no baked cloud (forks never sign up on the owner's metered one).
+    # The release build bakes only what MICMIC_CLOUD_URL says: the official release
+    # passes the owner's cloud, any other build gets none (decision of 2026-09-25).
     check("a checkout has no cloud of its own", account.cloud_url() is None
           and account.DEFAULT_CLOUD_URL == "")
     baked = next((l for l in (pathlib.Path(__file__).resolve().parents[1] / "native/build.sh")
                   .read_text().splitlines() if "MICMIC_CLOUD_URL:-" in l), "")
-    check("the release build bakes an https cloud", "MICMIC_CLOUD_URL:-https://" in baked, baked)
+    check("the release build bakes only the cloud it is given, no default",
+          '"${MICMIC_CLOUD_URL:-}"' in baked and "https://" not in baked, baked)
     os.environ["MICMIC_CLOUD_URL"] = CLOUD
 
 

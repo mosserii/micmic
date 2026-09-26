@@ -18,6 +18,44 @@ from . import jev as _jev
 
 MODEL = "gemini-3.5-flash-lite"
 BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+# A spoken answer or a bit of small talk is something she is standing there waiting
+# for. Measured 2026-09-25 on this model with an own key, answers and chat in four
+# languages, n=60: p50 0.65 s, p95 0.84 s, slowest 2.0 s. So 8 s is four times the
+# slowest normal answer. The old 20 s meant one stuck call held her for 20.8 s and
+# then got a stock reply anyway.
+SPOKEN_TIMEOUT = 8.0
+
+# The letters of each language spoken here, and of the scripts that have leaked into
+# answers ("כשماء وثلاثمائة..." in a Hebrew answer). Latin is never foreign: names and
+# units are written in it in every one of these languages.
+_SCRIPT_RX = {
+    "hebrew":  re.compile(r"[\u0590-\u05FF]"),
+    "arabic":  re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]"),
+    "russian": re.compile(r"[\u0400-\u04FF]"),
+    "other":   re.compile(r"[\u0370-\u03FF\u0900-\u0DFF\u0E00-\u0E7F\u3040-\u30FF"
+                          r"\u3400-\u9FFF\uAC00-\uD7AF]"),
+}
+
+
+def foreign_script(text: str, language: str) -> bool:
+    """True when the text has letters of a script the target language does not use."""
+    return any(rx.search(text or "") for name, rx in _SCRIPT_RX.items()
+               if name != language)
+
+
+def _keep_own_script(text: str, language: str) -> str:
+    """Only the sentences written in the target language's own script."""
+    parts = re.split(r"(?<=[.!?؟])\s+", text or "")
+    return " ".join(p for p in parts if p and not foreign_script(p, language)).strip()
+
+
+def _drop_trailing_question(text: str) -> str:
+    """An answer ends when the answer does. "את מתעניינת באסטרונומיה?" tacked on after
+    the distance to the moon is filler she then feels she has to reply to."""
+    parts = re.split(r"(?<=[.!?؟])\s+", (text or "").strip())
+    while len(parts) > 1 and parts[-1].rstrip().endswith(("?", "؟")):
+        parts.pop()
+    return " ".join(parts).strip()
 
 
 def _key() -> str | None:
@@ -230,14 +268,14 @@ class LLM:
         return self._post(payload, model=model, timeout=timeout)
 
     def text(self, prompt: str, system: str = "", max_tokens: int = 400,
-             temperature: float = 0.2) -> str | None:
+             temperature: float = 0.2, timeout: float | None = None) -> str | None:
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"maxOutputTokens": max_tokens, "temperature": temperature},
         }
         if system:
             payload["systemInstruction"] = {"parts": [{"text": system}]}
-        d = self._post(payload)
+        d = self._post(payload, timeout=timeout)
         if not d:
             return None
         try:
@@ -263,7 +301,7 @@ class LLM:
                 "Never invent a step the speaker did not ask for. Maximum 4 steps.\n"
                 'Example input: "send Zohar a message that I am fine and then play me some music"\n'
                 'Example output: ["send Zohar a message that I am fine", "play me some music"]'),
-            max_tokens=300, temperature=0.0)
+            max_tokens=300, temperature=0.0, timeout=SPOKEN_TIMEOUT)
         if not out:
             return None
         m = re.search(r"\[.*\]", out, re.S)
@@ -286,6 +324,30 @@ class LLM:
         return (f" You are speaking to {word}: use {gender} grammatical forms for every "
                 f"verb, pronoun and adjective that refers to them.")
 
+    def _spoken(self, prompt: str, system: str, language: str, lang_name: str,
+                max_tokens: int, temperature: float) -> str | None:
+        """A line to be read aloud, in the one language she spoke.
+
+        The model occasionally drifts into another script mid-sentence: a Hebrew
+        answer came back with Arabic numerals-in-words spliced in and a garbled word
+        after them. That is unspeakable, so it is asked once more, strictly, and what
+        still does not fit is cut to the sentences that do."""
+        out = self.text(prompt, system, max_tokens=max_tokens, temperature=temperature,
+                        timeout=SPOKEN_TIMEOUT)
+        if out and foreign_script(out, language):
+            strict = (system + f"\nWrite ONLY in {lang_name}, in its own alphabet. Not a "
+                      "single word in any other language or alphabet; write numbers "
+                      "as digits.")
+            again = self.text(prompt, strict, max_tokens=max_tokens, temperature=0.0,
+                              timeout=SPOKEN_TIMEOUT)
+            out = again if again and not foreign_script(again, language) else \
+                _keep_own_script(again or out, language)
+        if not out:
+            return None
+        out = re.sub(r"[*_#`]+", "", out)
+        out = re.sub(r"https?://\S+", "", out)
+        return re.sub(r"\s+", " ", out).strip() or None
+
     def chat(self, utterance: str, language: str = "hebrew", name: str = "",
              recent: str = "", gender: str = "") -> str | None:
         """Small talk. Not every sentence is an instruction, and answering "how are
@@ -305,15 +367,13 @@ class LLM:
             "only: no markdown, no lists, no emoji, no URLs, no parentheses.\n"
             "Do NOT list your features and do NOT offer a menu of options unless she "
             "actually asks what you can do. Do not apologise, and never tell her you "
-            "did not understand.")
+            "did not understand.\n"
+            "You have no live weather data: never describe the weather, the temperature "
+            "or a forecast anywhere.")
         prompt = (f"Just before this, the conversation was: {recent}\n\n" if recent else "")
         prompt += f"She said: {utterance}"
-        out = self.text(prompt, sys_prompt, max_tokens=160, temperature=0.7)
-        if not out:
-            return None
-        out = re.sub(r"[*_#`]+", "", out)
-        out = re.sub(r"https?://\S+", "", out)
-        return re.sub(r"\s+", " ", out).strip()[:300]
+        out = self._spoken(prompt, sys_prompt, language, lang, 160, 0.7)
+        return out[:300] if out else None
 
     def answer(self, question: str, language: str = "hebrew", context: str = "",
                gender: str = "", asked_before: str = "") -> str | None:
@@ -336,6 +396,12 @@ class LLM:
             "no URLs, no emoji, no parentheses.\n"
             "Answer the question directly and warmly. If you genuinely do not know, say so in "
             "one short sentence rather than guessing.\n"
+            "Stop when the question is answered: do not end with a question back, an offer "
+            "of more help, or a wish such as hoping it helps.\n"
+            "Write numbers as digits, not as words.\n"
+            "You have no live weather data. Never describe the weather, the temperature "
+            "or a forecast anywhere; if that is what she wants, say you could not get "
+            "the weather just now.\n"
             "You may be given background information. It comes from an automatic search and is "
             "often about the wrong subject. Use it ONLY if it clearly answers this question; "
             "otherwise ignore it completely and answer from your own knowledge. Never repeat "
@@ -349,9 +415,6 @@ class LLM:
         prompt += (f"Background information, which may or may not be relevant:\n{context}\n\n"
                    if context else "")
         prompt += f"Question: {question}"
-        out = self.text(prompt, sys_prompt, max_tokens=320, temperature=0.3)
-        if not out:
-            return None
-        out = re.sub(r"[*_#`]+", "", out)
-        out = re.sub(r"https?://\S+", "", out)
-        return re.sub(r"\s+", " ", out).strip()[:400]
+        out = self._spoken(prompt, sys_prompt, language, lang, 320, 0.3)
+        out = _drop_trailing_question(out) if out else None
+        return out[:400] if out else None

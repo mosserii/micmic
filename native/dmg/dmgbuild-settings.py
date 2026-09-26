@@ -1,7 +1,8 @@
 # dmgbuild settings for the MicMic download (native/build.sh, step 9).
 #
-#   uvx --from dmgbuild==1.6.7 dmgbuild -s native/dmg/dmgbuild-settings.py \
-#       -D app=/path/to/MicMic.app MicMic MicMic.dmg
+#   uvx --from dmgbuild==1.6.7 python native/dmg/make_dmg.py /path/to/MicMic.app MicMic.dmg
+#
+# (make_dmg.py runs dmgbuild with this file; see it for why the mount is private.)
 #
 # dmgbuild writes Finder's .DS_Store itself, so the window looks the same for every
 # download without scripting Finder (which needs Automation permission and races the

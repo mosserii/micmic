@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="he" dir="auto">
+<html lang="en" dir="ltr">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -25,6 +25,7 @@
   /* Menus and popovers read as surfaces, not scenery: opaque enough that the
      drifting colour behind them never competes with the words on top. */
   --sheet:rgba(253,251,248,.93);
+  --err:#b5544a;
 }
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
   --ground:#14110e;
@@ -41,6 +42,8 @@
   --blob-c:#2f6b56;
   --blob-alpha:.75;
   --sheet:rgba(38,33,29,.94);
+  /* the light theme's red is unreadable on the dark ground (bar errors, QA #25) */
+  --err:#ee8b7f;
 }}
 :root[data-theme="dark"]{
   --ground:#14110e; --ink:#fbf7f2; --muted:#bcb1a5;
@@ -48,7 +51,7 @@
   --glass-line:rgba(255,255,255,.10); --shade:rgba(0,0,0,.45);
   --live:#57c69d; --warm:#e0a441;
   --blob-a:#a8722c; --blob-b:#9c4f47; --blob-c:#2f6b56; --blob-alpha:.75;
-  --sheet:rgba(38,33,29,.94);
+  --sheet:rgba(38,33,29,.94); --err:#ee8b7f;
 }
 
 *{box-sizing:border-box;margin:0;padding:0}
@@ -57,8 +60,13 @@ body{
   background:var(--ground);color:var(--ink);
   font:400 20px/1.45 Rubik,-apple-system,BlinkMacSystemFont,"SF Hebrew","Segoe UI",system-ui,sans-serif;
   display:grid;place-items:center;text-align:center;
-  -webkit-font-smoothing:antialiased;user-select:none;cursor:default;
+  -webkit-font-smoothing:antialiased;-webkit-user-select:none;user-select:none;cursor:default;
 }
+/* WebKit (the app's window) honours only the prefixed property, so the unprefixed one
+   alone left every label selectable: a click on a hint painted it blue. What she said,
+   the answer and the card stay selectable, because those are worth copying. */
+html:not(.barmode) :is(.heard,.reply,.thread .said,.card .body){-webkit-user-select:text;user-select:text}
+img,svg{-webkit-user-drag:none}
 
 /* ---- what the glass refracts: slow drifting light behind everything ---- */
 .field{position:fixed;inset:-30%;z-index:0;filter:blur(100px);opacity:var(--blob-alpha);pointer-events:none}
@@ -119,8 +127,8 @@ body.acting .orb .core{color:var(--warm);opacity:1;animation:breathe 2.2s ease-i
 body.acting .orb .ring{border-color:color-mix(in oklab,var(--warm) 45%,transparent)}
 /* The server is unreachable and she can hear nothing else - this must not read as
    "listening" or "thinking", it must read as broken. */
-body.error .orb .core{color:#b5544a;opacity:1;animation:none}
-body.error .orb .ring{border-color:color-mix(in oklab,#b5544a 55%,transparent)}
+body.error .orb .core{color:var(--err);opacity:1;animation:none}
+body.error .orb .ring{border-color:color-mix(in oklab,var(--err) 55%,transparent)}
 @keyframes breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.11)}}
 @keyframes orbit{to{transform:rotate(360deg)}}
 
@@ -196,6 +204,8 @@ body.hascard .reply{min-height:0;margin-top:8px}
 .lang[data-open="1"] .chev{transform:rotate(180deg)}
 .langbtn:hover{opacity:1;transform:translateY(-1px)}
 .langbtn:active{transform:scale(.97)}
+.newchat:focus-visible,.langbtn:focus-visible,.tsend:focus-visible,.axbtn:focus-visible{
+  outline:2px solid color-mix(in oklab,var(--live) 70%,transparent);outline-offset:2px;opacity:1}
 .langmenu{position:absolute;top:calc(100% + 8px);inset-inline-end:0;min-width:190px;
   border-radius:18px;overflow:hidden;padding:6px;
   background:var(--sheet);border:1px solid var(--glass-line);
@@ -299,7 +309,7 @@ body.hasthread .thread{display:flex}
 .cancelbtn:active{transform:scale(.97)}
 .cancelbtn:focus-visible{outline:3px solid var(--warm);outline-offset:3px}
 
-.err{margin-top:14px;font-size:17px;color:#b5544a;max-width:30ch;min-height:1.3em}
+.err{margin-top:14px;font-size:17px;color:var(--err);max-width:30ch;min-height:1.3em}
 .foot{position:fixed;bottom:22px;left:0;right:0;z-index:1;font-size:15px;
   color:var(--muted);opacity:.55;letter-spacing:.02em}
 
@@ -392,7 +402,21 @@ body.hasthread .thread{display:flex}
 .hkbtn.recording{background:color-mix(in oklab,var(--warm) 22%,transparent);
   border-color:color-mix(in oklab,var(--warm) 60%,transparent)}
 .srange{display:flex;align-items:center;gap:12px}
-.srange input[type=range]{flex:1;accent-color:var(--live)}
+/* Drawn by hand: the system track has no dark variant here and vanished on the dark
+   sheet. */
+.srange input[type=range]{flex:1;-webkit-appearance:none;appearance:none;height:24px;
+  background:transparent;cursor:pointer}
+.srange input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:99px;
+  background:color-mix(in oklab,var(--ink) 24%,transparent)}
+.srange input[type=range]::-moz-range-track{height:4px;border-radius:99px;
+  background:color-mix(in oklab,var(--ink) 24%,transparent)}
+.srange input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;
+  margin-top:-7px;border-radius:50%;background:var(--live);border:2px solid var(--ground);
+  box-shadow:0 1px 4px var(--shade)}
+.srange input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;
+  background:var(--live);border:2px solid var(--ground)}
+.srange input[type=range]:focus-visible{outline:2px solid color-mix(in oklab,var(--live) 60%,transparent);
+  outline-offset:2px;border-radius:6px}
 .srange b{font-weight:600;font-variant-numeric:tabular-nums;min-width:5.5ch}
 .stext{width:100%;font:400 16px/1.4 Rubik,-apple-system,system-ui,sans-serif;
   color:var(--ink);padding:11px 14px;border-radius:14px;
@@ -405,6 +429,7 @@ body.hasthread .thread{display:flex}
   border:1px solid color-mix(in oklab,var(--live) 50%,transparent)}
 .ssaved{font-size:14px;color:var(--live);opacity:0;transition:opacity .25s ease}
 .ssaved.on{opacity:1}
+.ssaved.bad{color:var(--err)}
 /* Account: the plan, today's usage and the way to Pro. No element here has an id, so
    the rest of the page's layout checks cannot see it exists. */
 .acct-top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:9px}
@@ -437,11 +462,19 @@ body.panel #settings{padding:0;background:none;-webkit-backdrop-filter:none;back
 body.panel .sheet{width:100%;height:100vh;max-height:100vh;min-height:100vh;
   border-radius:0;border:none;background:var(--ground);
   -webkit-backdrop-filter:none;backdrop-filter:none;box-shadow:none;
-  padding-bottom:0}
+  padding-top:0;padding-bottom:0}
+/* The title row is pinned and solid, and tall enough to hold the window's close and
+   minimise buttons: the list scrolls under it, never under them. A clean edge, no fade
+   below it: a fade left half-transparent buttons showing under "Settings". */
+body.panel .sheet h2{position:sticky;top:0;z-index:2;margin:0 -22px 4px;padding:40px 22px 8px;
+  background:var(--ground)}
 /* Done must stay reachable without scrolling to the end of a list that is taller than
-   the window. */
-body.panel .sfoot{position:sticky;bottom:0;margin-top:18px;padding:12px 0 14px;
-  background:linear-gradient(to top,var(--ground) 68%,transparent)}
+   the window. Solid under the button, with the fade above it: a fade that reached down
+   behind Done left the settings under it readable through it. */
+body.panel .sfoot{position:sticky;bottom:0;margin-top:18px;padding:10px 0 14px;
+  background:var(--ground)}
+body.panel .sfoot::before{content:"";position:absolute;left:0;right:0;bottom:100%;height:22px;
+  pointer-events:none;background:linear-gradient(to top,var(--ground),transparent)}
 /* The window's own close button sits at the physical top LEFT in every language. The
    controls were placed at inline-end, which in Hebrew and Arabic IS the left, so the
    gear sat under the close button. In the panel they go physically right, in one
@@ -465,8 +498,10 @@ body.panel .langmenu{inset-inline:auto;right:0;left:auto}
    proportion, not redesign: the full-window layout assumes vertical room this
    panel does not have, and without these the card ran off the bottom edge and
    .foot (position:fixed) landed on top of the typing box. */
-body.panel .stage{padding:58px 14px 10px;width:100%;gap:0;
-  height:100vh;max-height:100vh;overflow-y:auto;overflow-x:hidden;
+/* The column scrolls below the row of window buttons, "+", the language and the gear,
+   never under it: scrolled up, the orb slid beneath "+". */
+body.panel .stage{margin-top:52px;padding:6px 14px 10px;width:100%;gap:0;
+  height:calc(100vh - 52px);max-height:calc(100vh - 52px);overflow-y:auto;overflow-x:hidden;
   scrollbar-width:none}
 body.panel .stage::-webkit-scrollbar{width:0;height:0}
 /* .foot is pinned to the bottom of the viewport, so in a short window it sits over
@@ -477,6 +512,10 @@ body.panel .foot{display:none}
    the typing row also pushed by an auto margin, the free space splits evenly. When a
    card or a transcript fills the column the margins simply collapse to nothing. */
 body.panel .orb{width:92px;margin-top:auto}
+/* The stage has a fixed height, and its children shrank to fit it: her words painted
+   over the card below them and the transcript was squeezed to one line. They keep
+   their size and the stage scrolls instead. */
+body.panel .stage>*{flex-shrink:0}
 body.panel.hascard .orb{width:58px}
 body.panel .state{margin-top:10px;font-size:12px;letter-spacing:.07em}
 body.panel .heard{margin-top:6px;font-size:19px;max-width:20ch}
@@ -485,8 +524,39 @@ body.panel.hascard .heard{font-size:16px;max-width:24ch}
    and the card carries the detail. */
 body.panel .reply{margin-top:5px;font-size:13px;max-width:26ch;
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+/* Each line reads in its own words' direction, as in the bar: an English question in
+   the Hebrew window showed its question mark at the front. */
+body.panel .heard,body.panel .reply{unicode-bidi:plaintext}
+/* With no card the answer is all there is, so it is never cut: "upgrade to MicMic Pro"
+   and "say it again" were the words the two-line clamp took away. */
+body.panel:not(.hascard) .reply{display:block;-webkit-line-clamp:unset;overflow:visible;
+  margin-top:8px;font-size:19px;line-height:1.32;color:var(--ink);max-width:22ch;text-wrap:balance}
+/* ...and it is the line that matters: the answer gets the big type, as the card's text
+   does, and what she asked steps back to one quiet line above it. The other way round
+   read as if MicMic had repeated her question in large and mumbled the answer. */
+body.panel:not(.hascard):has(#reply:not(:empty)) .heard{font-size:14px;line-height:1.35;
+  color:var(--muted);max-width:30ch;opacity:.9}
+/* A line in the other script (an English message in a Hebrew card) reads in its own
+   direction, lined up on the interface's side like everything else in the card. */
+.card .t,.card .m,.msg b,.msg span,.step{unicode-bidi:plaintext}
+[dir="rtl"] :is(.msg,.step){text-align:right}
+[dir="ltr"] :is(.msg,.step){text-align:left}
 body.panel .thread{max-height:108px}
-body.panel .card{margin-top:10px;width:100%;flex:none}
+/* A tall card (a list of messages) scrolls inside itself, in the room the column has
+   left, instead of pushing the column up until the orb was cut in half under the top
+   row. The orb, the state line and her words always stay whole above it. */
+body.panel .stage>.card{margin-top:10px;width:100%;flex:0 1 auto;min-height:0;
+  display:flex;flex-direction:column}
+/* With a card up, the transcript gives way first (to two turns' height), so the card
+   keeps the room to be read. */
+body.panel.hascard .stage>.thread{flex-shrink:1;min-height:64px}
+body.panel .card .thumb{flex:none}
+body.panel .card .body{min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
+/* More of the card below: its last line fades out rather than being sliced. */
+body.panel .card .body.more{-webkit-mask-image:linear-gradient(to bottom,#000 calc(100% - 34px),transparent);
+  mask-image:linear-gradient(to bottom,#000 calc(100% - 34px),transparent)}
+/* An empty error line held a line of space under the card in a window that has none. */
+body.panel .err:empty{display:none}
 body.panel .card .thumb{aspect-ratio:2.4/1}
 body.panel .card .body{padding:11px 15px 13px}
 body.panel .card .t{font-size:15px}
@@ -494,8 +564,11 @@ body.panel .card .m{font-size:12px;margin-top:4px}
 /* The one control that must never scroll out of reach, so it is pinned and carries a
    fade so the card does not appear to run into it. */
 body.panel .typerow{position:sticky;bottom:0;width:100%;margin-top:auto;
-  padding:10px 0 2px;
-  background:linear-gradient(to top,var(--ground) 62%,transparent)}
+  padding:8px 0 2px;background:var(--ground)}
+/* Solid under the box, fading above it: once the column scrolls, a card passing under
+   a half-clear bar showed its words through the typing box. */
+body.panel .typerow::before{content:"";position:absolute;left:0;right:0;bottom:100%;height:18px;
+  pointer-events:none;background:linear-gradient(to top,var(--ground),transparent)}
 body.panel #typebox{font-size:15px;padding:10px 14px}
 /* A two-pixel ring at half strength reads as an alarm in a window this small. */
 body.panel #typebox:focus{outline:1px solid color-mix(in oklab,var(--live) 38%,transparent);
@@ -506,6 +579,23 @@ body.panel .field{inset:-18%;filter:blur(64px);opacity:calc(var(--blob-alpha) * 
 body.panel .field i:nth-child(1){width:46vmin;height:46vmin}
 body.panel .field i:nth-child(2){width:42vmin;height:42vmin}
 body.panel .field i:nth-child(3){width:38vmin;height:38vmin}
+
+/* Accessibility is off, so the shortcut cannot reach MicMic: said calmly, with the one
+   button that fixes it, until it is on. Only the panel shows it. */
+.axnote{display:none}
+body.panel.noax .axnote{display:flex;flex-direction:column;align-items:center;gap:9px;
+  margin-top:12px;width:100%;max-width:300px;padding:12px 14px;border-radius:18px;
+  font-size:13px;line-height:1.4;color:var(--ink);
+  background:var(--glass);border:1px solid color-mix(in oklab,var(--warm) 45%,transparent);
+  -webkit-backdrop-filter:blur(24px) saturate(190%);backdrop-filter:blur(24px) saturate(190%);
+  box-shadow:0 10px 24px -14px var(--shade),inset 0 1.5px 0 -0.5px var(--glass-edge)}
+body.panel.noax.hascard .axnote{display:none}
+.axbtn{cursor:pointer;font:500 13px/1 Rubik,-apple-system,system-ui,sans-serif;color:var(--ink);
+  padding:8px 14px;border-radius:999px;white-space:nowrap;
+  background:color-mix(in oklab,var(--live) 17%,transparent);
+  border:1px solid color-mix(in oklab,var(--live) 50%,transparent);
+  transition:background .18s ease}
+.axbtn:hover{background:color-mix(in oklab,var(--live) 27%,transparent)}
 
 /* ---- bar --------------------------------------------------------------
    The same page as a slim strip near the top of the screen (?bar=1, native/bar.py):
@@ -586,7 +676,7 @@ html.barmode .reply{grid-area:reply;display:none;margin:0;max-width:none;min-hei
   -webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;
   animation:barIn .32s cubic-bezier(.22,1,.36,1)}
 html.barmode.b-result .reply{display:-webkit-box}
-html.barmode.b-err .reply{color:#b5544a}
+html.barmode.b-err .reply{color:var(--err)}
 /* Something she asked to take back was NOT taken back. Warm amber like the page's
    warning card: nothing is broken, but it must not read like the line that says done. */
 html.barmode.b-undofail .reply{color:var(--warm)}
@@ -617,16 +707,53 @@ html.barmode .undo:disabled{opacity:.6;cursor:default;transform:none}
     <div class="shell"></div>
     <div class="ring" id="ring"></div>
     <div class="core" id="core">
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/>
-        <path d="M6 11a1 1 0 0 0-2 0 8 8 0 0 0 7 7.94V21H9a1 1 0 0 0 0 2h6a1 1 0 0 0 0-2h-2v-2.06A8 8 0 0 0 20 11a1 1 0 0 0-2 0 6 6 0 0 1-12 0z"/>
+      <!-- The REAL brand mark, unmodified (source: brand/menubar/orb-mic.svg, kept
+           in sync by hand): the exact paths from brand/micmic-mark.svg, just
+           wrapped in an outer transform that maps them into this 24x24 box.
+           getBBox lands at x=4 y=2.61 w=16 h=18.79, same x/width as the generic
+           mic glyph this replaces (x=4 w=16), similar height (18.79 vs 20), so
+           every color/opacity/animation rule above keeps working unchanged. -->
+      <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">
+        <g transform="translate(-3.604362,-3.597242) scale(0.01523844)">
+          <g transform="translate(0.000000,2048.000000) scale(0.100000,-0.100000)">
+            <path d="M8120 16399 c-247 -32 -522 -135 -729 -273 -387 -259 -651 -656 -752
+-1131 l-24 -110 0 -2095 0 -2095 23 -108 c51 -242 158 -493 289 -677 83 -116
+250 -291 358 -375 204 -159 442 -270 705 -327 93 -20 132 -22 335 -22 199 0
+243 3 329 22 460 102 838 359 1098 749 118 176 217 421 260 647 22 111 22 115
+26 2106 3 2073 3 2107 -39 2308 -167 812 -882 1399 -1694 1391 -66 -1 -149 -5
+-185 -10z"/>
+            <path d="M11960 16400 c-495 -68 -937 -343 -1211 -752 -171 -257 -267 -525
+-299 -837 -14 -141 -14 -3884 0 -4036 29 -299 121 -571 273 -803 263 -401 642
+-663 1107 -764 92 -19 133 -22 330 -22 252 0 336 12 539 80 653 217 1131 843
+1169 1531 4 66 6 1000 6 2075 -1 1802 -3 1961 -19 2057 -46 282 -153 539 -318
+771 -77 107 -266 299 -375 378 -203 149 -436 251 -691 303 -111 22 -406 33
+-511 19z"/>
+            <path d="M5275 13021 c-150 -54 -249 -174 -275 -333 -13 -83 -13 -1862 0
+-2063 27 -400 122 -745 306 -1107 489 -962 1578 -1749 2964 -2143 405 -115
+920 -209 1313 -240 l87 -7 0 -1114 0 -1113 -777 -3 -778 -3 -65 -23 c-176 -64
+-308 -193 -378 -370 -24 -61 -26 -82 -30 -244 l-4 -178 2601 0 2601 0 0 150
+c0 180 -9 229 -63 339 -76 156 -214 268 -383 311 -74 19 -113 20 -831 20
+l-753 0 0 1115 c0 1114 0 1115 20 1115 106 0 558 60 793 106 1223 236 2275
+764 2982 1495 274 283 509 627 647 947 137 318 205 605 228 958 14 221 13
+1992 -1 2069 -24 131 -109 242 -227 298 l-67 32 -502 3 -503 3 0 -411 0 -410
+235 0 235 0 0 -784 c0 -858 -2 -905 -59 -1127 -69 -274 -224 -574 -427 -829
+-95 -120 -349 -370 -479 -474 -143 -114 -415 -294 -585 -388 -634 -352 -1405
+-578 -2260 -665 -247 -25 -919 -25 -1170 0 -554 55 -1088 170 -1549 333 -645
+230 -1237 591 -1622 991 -312 325 -516 672 -610 1042 -56 221 -59 269 -59
+1122 l0 779 235 0 235 0 0 410 0 410 -487 0 c-445 -1 -492 -2 -538 -19z"/>
+          </g>
+        </g>
       </svg>
     </div>
   </div>
   <div class="state" id="state"></div>
+  <div class="axnote" id="axnote" role="status">
+    <span id="axnotew"></span>
+    <button class="axbtn" id="axbtn" type="button"></button>
+  </div>
   <div class="thread" id="thread" aria-live="off"></div>
-  <h1 class="heard" id="heard"></h1>
-  <p class="reply" id="reply"></p>
+  <h1 class="heard" id="heard" dir="auto"></h1>
+  <p class="reply" id="reply" dir="auto"></p>
   <p class="work" id="work" aria-live="polite"></p>
   <!-- Only the bar shows this (?bar=1); display:none everywhere else. -->
   <button class="undo" id="undo" type="button" hidden>
@@ -637,8 +764,10 @@ html.barmode .undo:disabled{opacity:.6;cursor:default;transform:none}
   <section class="card" id="card" aria-live="polite">
     <img class="thumb" id="thumb" alt="">
     <div class="body">
-      <div class="t" id="cardT"></div>
-      <div class="m" id="cardM"></div>
+      <!-- dir="auto": a clamped English title in a Hebrew card put its ellipsis at the
+           start of the second line, because the ellipsis follows the box's direction. -->
+      <div class="t" id="cardT" dir="auto"></div>
+      <div class="m" id="cardM" dir="auto"></div>
       <div id="cardExtra"></div>
     </div>
   </section>
@@ -658,7 +787,7 @@ html.barmode .undo:disabled{opacity:.6;cursor:default;transform:none}
   <span id="newchatw"></span>
 </button>
 
-<button class="gear" id="gear" type="button" aria-haspopup="dialog" title="Settings">
+<button class="gear" id="gear" type="button" aria-haspopup="dialog">
   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm0 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4z"/><path d="M19.4 13a7.8 7.8 0 0 0 0-2l2-1.5a.5.5 0 0 0 .1-.6l-1.9-3.3a.5.5 0 0 0-.6-.2l-2.3.9a7.6 7.6 0 0 0-1.7-1l-.4-2.5a.5.5 0 0 0-.5-.4h-3.8a.5.5 0 0 0-.5.4l-.4 2.5a7.6 7.6 0 0 0-1.7 1l-2.3-.9a.5.5 0 0 0-.6.2L2.5 8.9a.5.5 0 0 0 .1.6L4.6 11a7.8 7.8 0 0 0 0 2l-2 1.5a.5.5 0 0 0-.1.6l1.9 3.3a.5.5 0 0 0 .6.2l2.3-.9a7.6 7.6 0 0 0 1.7 1l.4 2.5a.5.5 0 0 0 .5.4h3.8a.5.5 0 0 0 .5-.4l.4-2.5a7.6 7.6 0 0 0 1.7-1l2.3.9a.5.5 0 0 0 .6-.2l1.9-3.3a.5.5 0 0 0-.1-.6L19.4 13z" opacity=".45"/></svg>
 </button>
 
@@ -725,6 +854,15 @@ html.barmode .undo:disabled{opacity:.6;cursor:default;transform:none}
     </div>
 
     <div class="srow">
+      <div class="slabel" id="lLogin"></div>
+      <div class="seg" id="segLogin">
+        <button type="button" data-v="on"  id="wLoginOn"></button>
+        <button type="button" data-v="off" id="wLoginOff"></button>
+      </div>
+      <div class="shint" id="hLogin"></div>
+    </div>
+
+    <div class="srow">
       <div class="slabel" id="lSend"></div>
       <div class="seg" id="segSend">
         <button type="button" data-v="on"  id="wSendOn"></button>
@@ -775,9 +913,9 @@ const COPY = {
   // the lines that instruct/describe HER (2nd person) need a masculine counterpart,
   // held in he_m below as overrides so nothing has to be duplicated.
   he_f:{
-      settings:"הגדרות", sHotkey:"מקש קיצור", sHotkeyHint:"מחזיקים את המקש ומדברים, ומשחררים כדי לשלוח. או הקשה אחת כדי להתחיל ועוד אחת כדי לשלוח. לשינוי: לוחצים על הכפתור ואז על מקש. Esc מבטל.", sRightCmd:"⌘ ימני", sRightOpt:"⌥ ימני", sFnTwice:"Fn פעמיים", sTap:"הקשה", sFn:"לחיצה כפולה על Fn", sPressNow:"מחכה לצירוף מקשים…", sStart:"איך מתחילים", sPush:"לחיצה", sWake:"מילת הפעלה", sAlways:"תמיד מקשיבה", sDisplay:"מה מופיע כשמדברים", sSend:"לשלוח הודעות בשבילי", sOn:"כן", sOff:"לא", hSend:"כל הודעה מוקראת לפני שהיא יוצאת, ואפשר להגיד לא כדי לעצור.", sDispPanel:"חלון מלא", sDispBar:"פס קטן", sDispNone:"כלום", hDisplay:"בלי כלום על המסך, MicMic פשוט עושה ואומר בקול מה עשתה.", sWords:"מילות הפעלה", sLang:"שפת הדיבור", sListen:"כמה זמן להקשיב", sSeconds:"שניות", sSaved:"נשמר", sDone:"סיום", sAccount:"חשבון", aFree:"חינם", aPro:"Pro", aUsage:"{n} מתוך {m} בקשות היום", aUsageTotal:"{n} מתוך {m} בקשות חינם לניסיון", aUpgrade:"שדרוג ל-Pro", aManage:"ניהול המנוי", aOwnKey:"משתמשים במפתח אישי", aOffline:"אין חיבור כרגע, אנסה שוב עוד מעט", aSetup:"מגדירה את החשבון…", aTooMany:"בחשבון הזה כבר יש יותר מדי מחשבים", aPayOff:"התשלום לא זמין כרגע, אפשר לנסות שוב מאוחר יותר", aOpenFail:"לא הצלחתי לפתוח את הדף, אפשר לנסות שוב",
+      settings:"הגדרות", sHotkey:"מקש קיצור", sHotkeyHint:"מחזיקים את המקש ומדברים, ומשחררים כדי לשלוח. או הקשה אחת כדי להתחיל ועוד אחת כדי לשלוח. לשינוי: לוחצים על הכפתור ואז על מקש. Esc מבטל.", sRightCmd:"⌘ ימני", sRightOpt:"⌥ ימני", sRightCtrl:"⌃ ימני", sRightShift:"⇧ ימני", sNotSaved:"לא הצלחתי לשמור את זה", sFnTwice:"Fn פעמיים", sTap:"הקשה", sFn:"לחיצה כפולה על Fn", sPressNow:"מחכה לצירוף מקשים…", sStart:"איך מתחילים", sPush:"לחיצה", sWake:"מילת הפעלה", sAlways:"תמיד מקשיבה", sDisplay:"מה מופיע כשמדברים", sSend:"לשלוח הודעות בשבילי", sOn:"כן", sOff:"לא", hSend:"כל הודעה מוקראת לפני שהיא יוצאת, ואפשר להגיד לא כדי לעצור.", sDispPanel:"חלון מלא", sDispBar:"פס קטן", sDispNone:"כלום", hDisplay:"בלי כלום על המסך, MicMic פשוט עושה ואומר בקול מה עשתה.", sLogin:"פתיחה בהתחברות", hLogin:"נפתחת אוטומטית כשנכנסים למחשב.", sWords:"מילות הפעלה", sLang:"שפת הדיבור", sListen:"כמה זמן להקשיב", sSeconds:"שניות", sSaved:"נשמר", sDone:"סיום", sAccount:"חשבון", aFree:"חינם", aPro:"Pro", aUsage:"{n} מתוך {m} בקשות היום", aUsageTotal:"{n} מתוך {m} בקשות חינם לניסיון", aUpgrade:"שדרוג ל-Pro", aManage:"ניהול המנוי", aOwnKey:"משתמשים במפתח אישי", aOffline:"אין חיבור כרגע, אנסה שוב עוד מעט", aSetup:"מגדירה את החשבון…", aTooMany:"בחשבון הזה כבר יש יותר מדי מחשבים", aPayOff:"התשלום לא זמין כרגע, אפשר לנסות שוב מאוחר יותר", aOpenFail:"לא הצלחתי לפתוח את הדף, אפשר לנסות שוב",
      ready:"מקשיבה", think:"רגע", working:"עובדת על זה", acting:"מיד", off:"געי כדי לדבר",
-      idle:"געי כדי לדבר", idlePanel:"מחזיקים את ⌥ הימני ומדברים", wake:"אמרי מיקמיק",
+      idle:"געי כדי לדבר", idlePanel:"מחזיקים את {key} ומדברים", idlePress:"לוחצים {key} ומדברים", idleNoKey:"אפשר לכתוב למטה או ללחוץ על העיגול", wake:"אמרי מיקמיק",
       foot:"געי בעיגול או לחצי על מקש הרווח", footWake:"אמרי מיקמיק כדי להתחיל",
       footAlways:"פשוט תדברי", mic:"תני הרשאה למיקרופון ואז רענני",
       sent:"נשלח", cancelled:"בוטל", sending:"שולחת ל", joiner:"", say:'אמרי "ביטול" כדי לעצור',
@@ -794,19 +932,21 @@ const COPY = {
       obAx:"נגישות", obAxWhy:"בשביל ⌥ בכל אפליקציה", obTurnOn:"הפעלה", obAsked:'לוחצים "אפשר" כש-macOS שואל',
       obUnknown:"אי אפשר לבדוק את זה מכאן", obOn:"מופעל", obOff:"עוד לא",
       ob3Title:"בואו ננסה.", ob3Sub:"מחזיקים ⌥ ואומרים", ob3Phrase:"מה השעה?", obWaiting:"מחכה לך",
-      obNoKey:"⌥ עוד לא עובד? לוחצים על העיגול.", obSetTitle:"הכל מוכן.", obSetSub:"MicMic שמעה אותך.", obListen:"להתחיל להקשיב"},
-  he_m:{off:"גע כדי לדבר", idle:"גע כדי לדבר", idlePanel:"מחזיקים את ⌥ הימני ומדברים", wake:"אמור מיקמיק",
+      obNoKey:"⌥ עוד לא עובד? לוחצים על העיגול.", obSetTitle:"הכל מוכן.", obSetSub:"MicMic שמעה אותך.", obListen:"להתחיל להקשיב",
+      axNote:"כדי ש-{key} יפעיל את MicMic, צריך להפעיל נגישות.", axOpen:"פתיחת הגדרות נגישות", send:"שליחה", language:"שפה", secShort:"{n} שנ׳",
+      ob1TitleFn:"לוחצים פעמיים על Fn ומדברים.", ob1SubFn:"לחיצה נוספת על Fn שולחת.", ob3SubFn:"לוחצים פעמיים על Fn ואומרים", ob1TitlePress:"לוחצים ⌥ ומדברים.", ob1SubPress:"לחיצה נוספת שולחת.", ob3SubPress:"לוחצים ⌥ ואומרים"},
+  he_m:{off:"גע כדי לדבר", idle:"גע כדי לדבר", wake:"אמור מיקמיק",
       foot:"גע בעיגול או לחץ על מקש הרווח", footWake:"אמור מיקמיק כדי להתחיל",
       footAlways:"פשוט תדבר", mic:"תן הרשאה למיקרופון ואז רענן",
       say:'אמור "ביטול" כדי לעצור',
       typehere:"או פשוט לכתוב כאן"},
   en:{
-      settings:"Settings", sHotkey:"Keyboard shortcut", sHotkeyHint:"Hold it and talk, release to send. Or tap once to start and again to send. To change it, click the button, then press a combination or tap one right-hand key. Esc cancels.", sRightCmd:"Right ⌘", sRightOpt:"Right ⌥", sFnTwice:"Fn twice", sTap:"tap", sFn:"double-tap Fn / Globe", sPressNow:"waiting for a combination…", sStart:"How it starts", sPush:"a press", sWake:"a wake word", sAlways:"always listening", sDisplay:"What appears when you talk", sSend:"Send messages for me", sOn:"on", sOff:"off", hSend:"Every message is read back before it goes, and saying no stops it.", sDispPanel:"full window", sDispBar:"small bar", sDispNone:"nothing", hDisplay:"With nothing on screen, MicMic just does it and says out loud what it did.", sWords:"Wake words", sLang:"Speech language", sListen:"How long to listen", sSeconds:"seconds", sSaved:"saved", sDone:"Done", sAccount:"Account", aFree:"Free", aPro:"Pro", aUsage:"{n} of {m} requests today", aUsageTotal:"{n} of {m} free requests used", aUpgrade:"Upgrade to Pro", aManage:"Manage subscription", aOwnKey:"Using your own key", aOffline:"Offline right now. I'll try again shortly.", aSetup:"Setting up your account…", aTooMany:"This account already has too many Macs.", aPayOff:"Payments aren't available right now. Try again later.", aOpenFail:"I couldn't open the page. Try again.",
+      settings:"Settings", sHotkey:"Keyboard shortcut", sHotkeyHint:"Hold it and talk, release to send. Or tap once to start and again to send. To change it, click the button, then press a combination or tap one right-hand key. Esc cancels.", sRightCmd:"Right ⌘", sRightOpt:"Right ⌥", sRightCtrl:"Right ⌃", sRightShift:"Right ⇧", sNotSaved:"That couldn't be saved", sFnTwice:"Fn twice", sTap:"tap", sFn:"double-tap Fn / Globe", sPressNow:"waiting for a combination…", sStart:"How it starts", sPush:"a press", sWake:"a wake word", sAlways:"always listening", sDisplay:"What appears when you talk", sSend:"Send messages for me", sOn:"on", sOff:"off", hSend:"Every message is read back before it goes, and saying no stops it.", sDispPanel:"full window", sDispBar:"small bar", sDispNone:"nothing", hDisplay:"With nothing on screen, MicMic just does it and says out loud what it did.", sLogin:"Open at login", hLogin:"Starts automatically when you log in to the Mac.", sWords:"Wake words", sLang:"Speech language", sListen:"How long to listen", sSeconds:"seconds", sSaved:"saved", sDone:"Done", sAccount:"Account", aFree:"Free", aPro:"Pro", aUsage:"{n} of {m} requests today", aUsageTotal:"{n} of {m} free requests used", aUpgrade:"Upgrade to Pro", aManage:"Manage subscription", aOwnKey:"Using your own key", aOffline:"Offline right now. I'll try again shortly.", aSetup:"Setting up your account…", aTooMany:"This account already has too many Macs.", aPayOff:"Payments aren't available right now. Try again later.", aOpenFail:"I couldn't open the page. Try again.",
      ready:"listening", think:"one moment", working:"Working on it", acting:"here you go", off:"touch to speak",
-      idle:"touch to speak", idlePanel:"hold right ⌥ option and talk", wake:"say micmic",
+      idle:"touch to speak", idlePanel:"hold {key} and talk", idlePress:"press {key} and talk", idleNoKey:"type below, or click the circle", wake:"say micmic",
       foot:"touch the circle, or press the space bar", footWake:"say micmic to begin",
       footAlways:"just talk", mic:"allow the microphone, then reload",
-      sent:"sent", cancelled:"cancelled", sending:"sending to", joiner:" ", say:'say "cancel" to stop',
+      sent:"sent", cancelled:"cancelled", sending:"Sending to", joiner:" ", say:'say "cancel" to stop',
       cancelBtn:"Cancel", neterr:"I can't reach the computer, one moment",
       timerPrefix:"In ", timerSuffix:" minutes", allDone:"All done",
       typehere:"or just type here", newchat:"new conversation", fresh:"starting fresh", youSaid:"you asked",
@@ -820,11 +960,13 @@ const COPY = {
       obAx:"Accessibility", obAxWhy:"For ⌥ in every app", obTurnOn:"Turn on", obAsked:"Click Allow when macOS asks",
       obUnknown:"Can't check this from here", obOn:"On", obOff:"Not yet",
       ob3Title:"Try it.", ob3Sub:"Hold ⌥ and say", ob3Phrase:"What time is it?", obWaiting:"Waiting for you",
-      obNoKey:"No ⌥ yet? Click the circle.", obSetTitle:"You're set.", obSetSub:"MicMic heard you.", obListen:"Start listening"},
+      obNoKey:"No ⌥ yet? Click the circle.", obSetTitle:"You're set.", obSetSub:"MicMic heard you.", obListen:"Start listening",
+      axNote:"{key} needs Accessibility before it can start MicMic.", axOpen:"Open Accessibility settings", send:"Send", language:"Language", secShort:"{n}s",
+      ob1TitleFn:"Double-tap Fn and talk.", ob1SubFn:"Press Fn once more to send.", ob3SubFn:"Double-tap Fn and say", ob1TitlePress:"Press ⌥ and talk.", ob1SubPress:"Press it again to send.", ob3SubPress:"Press ⌥ and say"},
   ar:{
-      settings:"الإعدادات", sHotkey:"اختصار لوحة المفاتيح", sHotkeyHint:"اضغط مطولاً واحكِ، واترك المفتاح للإرسال. أو نقرة للبدء ونقرة ثانية للإرسال. للتغيير: اضغط الزر ثم تركيبة مفاتيح أو مفتاح يمين واحد. Esc للإلغاء.", sRightCmd:"⌘ اليمين", sRightOpt:"⌥ اليمين", sFnTwice:"Fn مرتين", sTap:"نقرة", sFn:"نقرة مزدوجة على Fn", sPressNow:"بانتظار تركيبة مفاتيح…", sStart:"كيف يبدأ", sPush:"ضغطة", sWake:"كلمة تنبيه", sAlways:"يستمع دائماً", sDisplay:"شو بيظهر لما تحكي", sSend:"ابعت رسائل عني", sOn:"نعم", sOff:"لا", hSend:"كل رسالة بتنقرا قبل ما تنبعت، وإذا قلت لأ بتوقف.", sDispPanel:"نافذة كاملة", sDispBar:"شريط صغير", sDispNone:"ولا شي", hDisplay:"بدون شي عالشاشة، MicMic بيعمل الشغلة وبيقول بصوت عالي شو عمل.", sWords:"كلمات التنبيه", sLang:"لغة الكلام", sListen:"مدة الاستماع", sSeconds:"ثانية", sSaved:"تم الحفظ", sDone:"تم", sAccount:"الحساب", aFree:"مجاني", aPro:"Pro", aUsage:"{n} من {m} طلب اليوم", aUsageTotal:"{n} من {m} طلب مجاني للتجربة", aUpgrade:"الترقية إلى Pro", aManage:"إدارة الاشتراك", aOwnKey:"تستخدم مفتاحك الخاص", aOffline:"لا يوجد اتصال الآن، سأحاول مرة أخرى قريباً", aSetup:"جارٍ إعداد الحساب…", aTooMany:"هذا الحساب فيه أجهزة كثيرة أصلاً", aPayOff:"الدفع غير متاح الآن، حاول لاحقاً", aOpenFail:"لم أتمكن من فتح الصفحة، حاول مرة أخرى",
+      settings:"الإعدادات", sHotkey:"اختصار لوحة المفاتيح", sHotkeyHint:"اضغط مطولاً واحكِ، واترك المفتاح للإرسال. أو نقرة للبدء ونقرة ثانية للإرسال. للتغيير: اضغط الزر ثم تركيبة مفاتيح أو مفتاح يمين واحد. Esc للإلغاء.", sRightCmd:"⌘ اليمين", sRightOpt:"⌥ اليمين", sRightCtrl:"⌃ اليمين", sRightShift:"⇧ اليمين", sNotSaved:"ما قدرت احفظ هاد", sFnTwice:"Fn مرتين", sTap:"نقرة", sFn:"نقرة مزدوجة على Fn", sPressNow:"بانتظار تركيبة مفاتيح…", sStart:"كيف يبدأ", sPush:"ضغطة", sWake:"كلمة تنبيه", sAlways:"يستمع دائماً", sDisplay:"شو بيظهر لما تحكي", sSend:"ابعت رسائل عني", sOn:"نعم", sOff:"لا", hSend:"كل رسالة بتنقرا قبل ما تنبعت، وإذا قلت لأ بتوقف.", sDispPanel:"نافذة كاملة", sDispBar:"شريط صغير", sDispNone:"ولا شي", hDisplay:"بدون شي عالشاشة، MicMic بيعمل الشغلة وبيقول بصوت عالي شو عمل.", sLogin:"الفتح عند تسجيل الدخول", hLogin:"بيفتح تلقائياً لما تسجل دخول عالماك.", sWords:"كلمات التنبيه", sLang:"لغة الكلام", sListen:"مدة الاستماع", sSeconds:"ثانية", sSaved:"تم الحفظ", sDone:"تم", sAccount:"الحساب", aFree:"مجاني", aPro:"Pro", aUsage:"{n} من {m} طلب اليوم", aUsageTotal:"{n} من {m} طلب مجاني للتجربة", aUpgrade:"الترقية إلى Pro", aManage:"إدارة الاشتراك", aOwnKey:"تستخدم مفتاحك الخاص", aOffline:"لا يوجد اتصال الآن، سأحاول مرة أخرى قريباً", aSetup:"جارٍ إعداد الحساب…", aTooMany:"هذا الحساب فيه أجهزة كثيرة أصلاً", aPayOff:"الدفع غير متاح الآن، حاول لاحقاً", aOpenFail:"لم أتمكن من فتح الصفحة، حاول مرة أخرى",
      typehere:"أو اكتب هنا", newchat:"محادثة جديدة", fresh:"منبدأ من جديد", youSaid:"طلبت", ready:"أستمع", think:"لحظة", working:"عم أشتغل عليها", acting:"حالاً", off:"المس للتحدث",
-      idle:"المس للتحدث", idlePanel:"اضغط ⌥ اليمين مطولاً واحكِ", wake:"قل ميك ميك",
+      idle:"المس للتحدث", idlePanel:"اضغط {key} مطولاً واحكِ", idlePress:"اضغط {key} واحكِ", idleNoKey:"اكتب تحت أو اضغط على الدائرة", wake:"قل ميك ميك",
       foot:"المس الدائرة أو اضغط على مسطرة المسافة", footWake:"قل ميك ميك للبدء",
       footAlways:"فقط تحدث", mic:"اسمح بالميكروفون ثم أعد التحميل",
       sent:"تم الإرسال", cancelled:"أُلغي", sending:"جارٍ الإرسال إلى", joiner:" ", say:'قل "إلغاء" للإيقاف',
@@ -840,14 +982,16 @@ const COPY = {
       obAx:"إمكانية الوصول", obAxWhy:"لمفتاح ⌥ في كل التطبيقات", obTurnOn:"تشغيل", obAsked:'اضغط "السماح" لما يسألك macOS',
       obUnknown:"ما منقدر نتحقق من هون", obOn:"مفعّل", obOff:"مش بعد",
       ob3Title:"جرّبه.", ob3Sub:"اضغط ⌥ مطولاً وقل", ob3Phrase:"كم الساعة؟", obWaiting:"بانتظارك",
-      obNoKey:"⌥ لسا ما اشتغل؟ اضغط على الدائرة.", obSetTitle:"كل شي جاهز.", obSetSub:"MicMic سمعك.", obListen:"ابدأ الاستماع"},
+      obNoKey:"⌥ لسا ما اشتغل؟ اضغط على الدائرة.", obSetTitle:"كل شي جاهز.", obSetSub:"MicMic سمعك.", obListen:"ابدأ الاستماع",
+      axNote:"لازم تفعّل إمكانية الوصول حتى يشغّل {key} MicMic.", axOpen:"فتح إعدادات إمكانية الوصول", send:"إرسال", language:"اللغة", secShort:"{n} ث",
+      ob1TitleFn:"اضغط Fn مرتين واحكِ.", ob1SubFn:"ضغطة كمان على Fn للإرسال.", ob3SubFn:"اضغط Fn مرتين وقل", ob1TitlePress:"اضغط ⌥ واحكِ.", ob1SubPress:"اضغط مرة ثانية للإرسال.", ob3SubPress:"اضغط ⌥ وقل"},
   ru:{
-      settings:"Настройки", sHotkey:"Сочетание клавиш", sHotkeyHint:"Удерживайте клавишу и говорите, отпустите, чтобы отправить. Или нажмите один раз, чтобы начать, и ещё раз, чтобы отправить. Чтобы сменить: нажмите кнопку, затем сочетание или правую клавишу. Esc отменяет.", sRightCmd:"Правый ⌘", sRightOpt:"Правый ⌥", sFnTwice:"Fn дважды", sTap:"нажатие", sFn:"двойное нажатие Fn / Globe", sPressNow:"ждём сочетание клавиш…", sStart:"Как начинать", sPush:"нажатие", sWake:"слово-активатор", sAlways:"всегда слушает", sDisplay:"Что показывать, когда вы говорите", sSend:"Отправлять сообщения за меня", sOn:"да", sOff:"нет", hSend:"Каждое сообщение зачитывается перед отправкой, и «нет» его останавливает.", sDispPanel:"всё окно", sDispBar:"узкая полоса", sDispNone:"ничего", hDisplay:"Без окна MicMic просто делает и вслух говорит, что сделал.", sWords:"Слова-активаторы", sLang:"Язык речи", sListen:"Сколько слушать", sSeconds:"секунд", sSaved:"сохранено", sDone:"Готово", sAccount:"Аккаунт", aFree:"Бесплатно", aPro:"Pro", aUsage:"{n} из {m} запросов сегодня", aUsageTotal:"{n} из {m} бесплатных запросов", aUpgrade:"Перейти на Pro", aManage:"Управлять подпиской", aOwnKey:"Используется ваш собственный ключ", aOffline:"Нет связи, попробую ещё раз чуть позже", aSetup:"Настраиваю аккаунт…", aTooMany:"На этом аккаунте уже слишком много устройств", aPayOff:"Оплата сейчас недоступна, попробуйте позже", aOpenFail:"Не удалось открыть страницу, попробуйте ещё раз",
+      settings:"Настройки", sHotkey:"Сочетание клавиш", sHotkeyHint:"Удерживайте клавишу и говорите, отпустите, чтобы отправить. Или нажмите один раз, чтобы начать, и ещё раз, чтобы отправить. Чтобы сменить: нажмите кнопку, затем сочетание или правую клавишу. Esc отменяет.", sRightCmd:"Правый ⌘", sRightOpt:"Правый ⌥", sRightCtrl:"Правый ⌃", sRightShift:"Правый ⇧", sNotSaved:"Не удалось сохранить", sFnTwice:"Fn дважды", sTap:"нажатие", sFn:"двойное нажатие Fn / Globe", sPressNow:"ждём сочетание клавиш…", sStart:"Как начинать", sPush:"нажатие", sWake:"слово-активатор", sAlways:"всегда слушает", sDisplay:"Что показывать, когда вы говорите", sSend:"Отправлять сообщения за меня", sOn:"да", sOff:"нет", hSend:"Каждое сообщение зачитывается перед отправкой, и «нет» его останавливает.", sDispPanel:"всё окно", sDispBar:"узкая полоса", sDispNone:"ничего", hDisplay:"Без окна MicMic просто делает и вслух говорит, что сделал.", sLogin:"Запуск при входе в систему", hLogin:"Запускается автоматически при входе в Mac.", sWords:"Слова-активаторы", sLang:"Язык речи", sListen:"Сколько слушать", sSeconds:"секунд", sSaved:"сохранено", sDone:"Готово", sAccount:"Аккаунт", aFree:"Бесплатно", aPro:"Pro", aUsage:"{n} из {m} запросов сегодня", aUsageTotal:"{n} из {m} бесплатных запросов", aUpgrade:"Перейти на Pro", aManage:"Управлять подпиской", aOwnKey:"Используется ваш собственный ключ", aOffline:"Нет связи, попробую ещё раз чуть позже", aSetup:"Настраиваю аккаунт…", aTooMany:"На этом аккаунте уже слишком много устройств", aPayOff:"Оплата сейчас недоступна, попробуйте позже", aOpenFail:"Не удалось открыть страницу, попробуйте ещё раз",
      typehere:"или просто напишите здесь", newchat:"новый разговор", fresh:"начинаем заново", youSaid:"вы просили", ready:"слушаю", think:"секунду", working:"Работаю над этим", acting:"сейчас", off:"нажмите, чтобы говорить",
-      idle:"нажмите, чтобы говорить", idlePanel:"удерживайте правый ⌥ и говорите", wake:"скажите микмик",
+      idle:"нажмите, чтобы говорить", idlePanel:"удерживайте {key} и говорите", idlePress:"нажмите {key} и говорите", idleNoKey:"напишите ниже или нажмите на круг", wake:"скажите микмик",
       foot:"нажмите на круг или пробел", footWake:"скажите микмик, чтобы начать",
       footAlways:"просто говорите", mic:"разрешите микрофон и обновите страницу",
-      sent:"отправлено", cancelled:"отменено", sending:"отправка ", joiner:" ", say:'скажите "отмена", чтобы остановить',
+      sent:"отправлено", cancelled:"отменено", sending:"Отправка:", joiner:" ", say:'скажите "отмена", чтобы остановить',
       cancelBtn:"Отмена", neterr:"Не могу связаться с компьютером, секунду",
       timerPrefix:"Напомню через ", timerSuffix:" минут", allDone:"Всё сделано",
       undo:"Отменить", undoing:"отменяю", undone:"Отменено", undoFailed:"Не получилось отменить",
@@ -860,19 +1004,21 @@ const COPY = {
       obAx:"Универсальный доступ", obAxWhy:"Для ⌥ во всех приложениях", obTurnOn:"Включить", obAsked:"Нажмите «Разрешить» в окне macOS",
       obUnknown:"Отсюда это не проверить", obOn:"Включено", obOff:"Ещё нет",
       ob3Title:"Попробуйте.", ob3Sub:"Удерживайте ⌥ и скажите", ob3Phrase:"Который час?", obWaiting:"Жду вас",
-      obNoKey:"⌥ пока не работает? Нажмите на круг.", obSetTitle:"Всё готово.", obSetSub:"Получилось.", obListen:"Начать слушать"},
+      obNoKey:"⌥ пока не работает? Нажмите на круг.", obSetTitle:"Всё готово.", obSetSub:"Получилось.", obListen:"Начать слушать",
+      axNote:"Чтобы {key} запускал MicMic, включите универсальный доступ.", axOpen:"Открыть универсальный доступ", send:"Отправить", language:"Язык", secShort:"{n} с",
+      ob1TitleFn:"Дважды нажмите Fn и говорите.", ob1SubFn:"Нажмите Fn ещё раз, чтобы отправить.", ob3SubFn:"Дважды нажмите Fn и скажите", ob1TitlePress:"Нажмите ⌥ и говорите.", ob1SubPress:"Нажмите ещё раз, чтобы отправить.", ob3SubPress:"Нажмите ⌥ и скажите"},
 };
 // language_hint is one of four codes everywhere else in this system (router.py's own
 // taxonomy); collapsing ar/ru to "en" here was why an Arabic or Russian speaker saw
 // (and, for two router-side reply dicts, HEARD) English.
 function resolveLang(hint){
-  const h = String(hint||"he").toLowerCase();
+  const h = String(hint||"en").toLowerCase();
   if(h.startsWith("he")) return "he";
   if(h.startsWith("ar")) return "ar";
   if(h.startsWith("ru")) return "ru";
   return "en";
 }
-let LANG="he", CFG={language_hint:"he-IL"}, busy=false, devOn=false, specCtrl=null;
+let LANG="en", CFG={language_hint:"en-US"}, busy=false, devOn=false, specCtrl=null;
 // goIdle() wanted to paint idle while a request was still running; send() settles it.
 let idleDeferred = false;
 // ?panel=1 — this page is being shown inside MicMic.app's own window. The native
@@ -892,12 +1038,36 @@ let GENDER="f";
 // See send() below: this is a one-shot pairing, not a text blacklist.
 let lastHandledKey = null, lastHandledAt = 0;
 const t = k => {
+  let s;
   if(LANG === "he"){
     const m = GENDER === "m" ? COPY.he_m[k] : undefined;
-    return m !== undefined ? m : COPY.he_f[k];
-  }
-  return (COPY[LANG] && COPY[LANG][k] !== undefined) ? COPY[LANG][k] : COPY.en[k];
+    s = m !== undefined ? m : COPY.he_f[k];
+  } else s = (COPY[LANG] && COPY[LANG][k] !== undefined) ? COPY[LANG][k] : COPY.en[k];
+  return typeof s === "string" && s.includes("{key}") ? s.replace("{key}", hotkeyName()) : s;
 };
+// The shortcut she actually has. Copy that names a key names this one: "hold right ⌥"
+// was on screen whatever she had picked in Settings.
+let HOTKEY = "right-option";
+const TAP_NAME = {"right-command":"sRightCmd", "right-option":"sRightOpt",
+                  "right-control":"sRightCtrl", "right-shift":"sRightShift"};
+const MOD_GLYPH = {cmd:"⌘", ctrl:"⌃", alt:"⌥", shift:"⇧"};
+function hotkeyName(spec){
+  spec = spec || HOTKEY;
+  if(TAP_NAME[spec]) return t(TAP_NAME[spec]);
+  if(spec === "fn-fn") return t("sFnTwice");
+  // Isolated left to right: inside a Hebrew sentence ⌘⇧M otherwise reads M⇧⌘.
+  return "\u2066" + String(spec).split("+").map(p => MOD_GLYPH[p] || p.toUpperCase()).join("") + "\u2069";
+}
+// The key alone, for copy that shows the symbol (the onboarding's "Hold ⌥ and talk").
+function hotkeyGlyph(spec){
+  spec = spec || HOTKEY;
+  const tap = {"right-command":"⌘", "right-option":"⌥", "right-control":"⌃", "right-shift":"⇧"};
+  if(tap[spec]) return tap[spec];
+  if(spec === "fn-fn") return "Fn";
+  return hotkeyName(spec);
+}
+window.hotkeyGlyph = hotkeyGlyph;
+window.hotkeySpec = () => HOTKEY;
 // The browser's only voice when the server can't be reached at all (bug: total
 // silence on a fetch failure) or when a client-only correction has to be truthful
 // about something the server already announced as done (video never actually played,
@@ -920,18 +1090,30 @@ let STATE_KEY = null;
 // one place means adding a new one cannot quietly break the ones already there.
 // "panel" says which window this page is in, not what MicMic is doing, so it has
 // to survive every setState() — which rewrites body.className wholesale.
-const STICKY = ["hascard", "hasthread", "panel"];
+// "onboarding" is what hides the stage under the first-run screens. Dropped by the
+// first panelState() the listener sent, it put the typing box, the send button, "+"
+// and the gear back on screen underneath the onboarding's own footer and progress.
+// "noax": Accessibility is off, so the shortcut cannot reach MicMic (the notice shows).
+const STICKY = ["hascard", "hasthread", "panel", "onboarding", "noax"];
 function setState(cls, key){
   const keep = STICKY.filter(c => document.body.classList.contains(c));
   document.body.className = [cls, ...keep].join(" ");
   // In the app's window the page has no microphone of its own; the key does it.
-  if(key === "idle" && PANEL) key = "idlePanel";
+  if(key === "idle" && PANEL){
+    key = document.body.classList.contains("noax") ? "idleNoKey"
+        : TAP_NAME[HOTKEY] ? "idlePanel" : "idlePress";
+  }
   if(key){ STATE_KEY = key; $("state").textContent = t(key); }
 }
 // A fetch resolving, or a card's own countdown timer, must never paint "listening"
 // over a microphone goIdle() already closed - state is derived from whether she is
 // actually still armed, never written blind after an async completion.
-function paintReady(){ if(armed) setState("listening","ready"); }
+function paintReady(){
+  if(armed) setState("listening","ready");
+  // The panel never arms (the listener owns the microphone), so without this a typed
+  // request that came back with no card stayed on "one moment" and a spinner for good.
+  else if(PANEL && !busy) setState("idle","idle");
+}
 const norm = s => (s||"").toLowerCase().replace(/[^\p{L}\p{N} ]/gu,"").replace(/\s+/g," ").trim();
 
 /* ------------------------------------------------ talking to the server */
@@ -958,7 +1140,7 @@ async function send(text, speculative){
   let painted = false;
   const ctrl = speculative ? new AbortController() : null;
   if(speculative) specCtrl = ctrl;
-  if(!speculative) setState("thinking","think");
+  if(!speculative){ setState("thinking","think"); $("err").textContent = ""; }
   let errored = false, aborted = false;
   try{
     const res = await fetch("/api/utterance",{method:"POST",
@@ -981,16 +1163,22 @@ async function send(text, speculative){
       // cannot be reached there is otherwise zero audio output and only a red DOM
       // string a non-reading user cannot use. The browser must own a fallback voice.
       errored = true;
-      $("err").textContent = String(e);
+      // "TypeError: Load failed" is the browser talking to itself, not to her.
+      $("err").textContent = t("neterr");
       localSpeak(t("neterr"));
       clearTimeout(stateTimer); clearTimeout(cardTimer);
-      setState("error","neterr");
+      // Said once: the red line carries the sentence and the orb is red; the same words
+      // in the state line above it read as a stutter.
+      setState("error");
+      STATE_KEY = null; $("state").textContent = "";
     }
   }
   finally{
     if(speculative && specCtrl === ctrl) specCtrl = null;
     busy = false;
-    if(!errored && !aborted) paintReady();
+    // In the panel only a request still showing "thinking" is settled here; one that
+    // painted a card keeps "here you go" until the card's own timer settles it.
+    if(!errored && !aborted && (!PANEL || document.body.classList.contains("thinking"))) paintReady();
     // The mic closed mid-flight and goIdle() left the spinner up rather than painting
     // over it. Settle what it deferred — but only when nothing else painted a state,
     // or this would wipe the card that just arrived.
@@ -1019,12 +1207,26 @@ function card(show){
   requestAnimationFrame(()=>{
     const c = $("card");
     c.classList.toggle("compact", c.getBoundingClientRect().bottom > innerHeight - 12);
+    cardMore();
   });
 }
+// The panel's card scrolls inside itself when it is taller than the room it has; the
+// fade at its foot says so, and goes once she has scrolled to the end.
+function cardMore(){
+  const b = document.querySelector(".card .body");
+  b.classList.toggle("more", PANEL && b.scrollTop + b.clientHeight < b.scrollHeight - 1);
+}
+document.querySelector(".card .body").addEventListener("scroll", cardMore, {passive:true});
+// ...and again whenever the room it has changes, which it does as the column settles.
+new ResizeObserver(cardMore).observe(document.querySelector(".card .body"));
 
 let cardTimer = null, stateTimer = null;
 const esc = t => String(t==null?"":t).replace(/[&<>"]/g, c =>
   ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+// The card's big type is sized for the full window; 26px in a 380px panel ran an
+// answer off the bottom of it.
+const cardPx = px => (PANEL ? Math.max(15, Math.round(px * .72)) : px) + "px";
 
 function render(d){
   // a previous countdown must not rewrite the card that replaced it
@@ -1083,10 +1285,12 @@ function render(d){
     // hear it. Reopen it for exactly the countdown's length.
     if(MODE !== "always") listen(true, secs*1000);
 
-  } else if(d.did === "answered"){
+  } else if(d.did === "answered" || d.did === "weather_unavailable" || d.did === "chat_timeout"){
+    // The weather service not knowing the place, and small talk that timed out, are
+    // answers too (the router asks back in "say"); they get the same card.
     // She asked a question. The answer IS the content, so give it the big type.
     T.textContent = d.say || "";
-    T.style.fontSize = "26px"; T.style.fontWeight = "400"; T.style.lineHeight = "1.42";
+    T.style.fontSize = cardPx(26); T.style.fontWeight = "400"; T.style.lineHeight = "1.42";
     T.style.webkitLineClamp = "unset";
     M.textContent = "";
     $("reply").textContent = "";
@@ -1108,7 +1312,7 @@ function render(d){
     stateTimer = setTimeout(paintReady, 2400);
 
   } else if(d.did === "emergency" || d.did === "checking_on_her"){
-    T.textContent = d.say || ""; T.style.fontSize = "24px"; T.style.webkitLineClamp = "unset";
+    T.textContent = d.say || ""; T.style.fontSize = cardPx(24); T.style.webkitLineClamp = "unset";
     M.textContent = "";
     card(true);
 
@@ -1121,6 +1325,7 @@ function render(d){
   } else if(d.did === "did_several" && det){
     T.textContent = t("allDone");
     T.style.webkitLineClamp = "2";
+    $("reply").textContent = "";
     M.innerHTML = (det.results||[]).map(r =>
       `<div class="step">${esc(r.step)}</div>`).join("");
     setState("acting","acting"); card(true);
@@ -1138,7 +1343,7 @@ function render(d){
     // This is the moment the whole browser feature exists for, so it gets the clearest
     // card on the screen and it does not time out from under her.
     T.textContent = d.say || "";
-    T.style.fontSize = "19px"; T.style.fontWeight = "500"; T.style.lineHeight = "1.4";
+    T.style.fontSize = cardPx(19); T.style.fontWeight = "500"; T.style.lineHeight = "1.4";
     M.textContent = (det && (det.waiting_on || det.page)) || "";
     card(true); document.getElementById("card").classList.add("pay");
     clearTimeout(cardTimer);
@@ -1149,7 +1354,7 @@ function render(d){
     // she said stop, a call she just called off, a call that did not connect. The
     // spoken line is the answer, but these are the ones worth leaving on the screen.
     T.textContent = d.say || "";
-    T.style.fontSize = "19px"; T.style.fontWeight = "400"; T.style.lineHeight = "1.4";
+    T.style.fontSize = cardPx(19); T.style.fontWeight = "400"; T.style.lineHeight = "1.4";
     M.textContent = (det && (det.was_calling || det.to)) || "";
     card(true);
     if(d.did !== "emergency_cancelled") document.getElementById("card").classList.add("warn");
@@ -1159,7 +1364,7 @@ function render(d){
     // Who she will be calling for is worth showing back, because getting it wrong is
     // the difference between reaching her son and reaching a work colleague.
     T.textContent = d.say || "";
-    T.style.fontSize = "19px"; T.style.fontWeight = "500";
+    T.style.fontSize = cardPx(19); T.style.fontWeight = "500";
     M.textContent = (det && det.emergency_contact) || "";
     card(true); document.getElementById("card").classList.add("pay");
     cardTimer = setTimeout(()=>card(false), 7000);
@@ -1168,7 +1373,7 @@ function render(d){
     // Important enough that it must not read as an ordinary grey aside: the whole point
     // is that she should NOT believe the message went out.
     T.textContent = d.say || "";
-    T.style.fontSize = "19px"; T.style.fontWeight = "400"; T.style.lineHeight = "1.4";
+    T.style.fontSize = cardPx(19); T.style.fontWeight = "400"; T.style.lineHeight = "1.4";
     M.textContent = det && det.text ? det.text : "";
     card(true); document.getElementById("card").classList.add("warn");
     cardTimer = setTimeout(()=>card(false), 9000);
@@ -1192,6 +1397,12 @@ function render(d){
      && rep.textContent.trim() === $("cardT").textContent.trim()){
     rep.textContent = "";
   }
+  // The panel's column scrolls once a transcript and a card do not both fit: the newest
+  // answer is the one to see, so it comes into view above the typing box.
+  if(PANEL) requestAnimationFrame(() => {
+    const st = document.querySelector(".stage");
+    if(st.scrollHeight > st.clientHeight) st.scrollTo({top: st.scrollHeight});
+  });
 }
 
 
@@ -1335,7 +1546,7 @@ function start(){
   if(PANEL || BAR) return;
   if(!SR){ $("err").textContent = "Chrome is needed for the microphone."; return; }
   rec = new SR();
-  rec.lang = CFG.language_hint || "he-IL";
+  rec.lang = CFG.language_hint || "en-US";
   rec.continuous = true;   // never let Chrome end the session on its own
   rec.interimResults = true;
   rec.maxAlternatives = 1;
@@ -1509,6 +1720,8 @@ addEventListener("keydown", e=>{
     if(e.key === "Escape"){ e.target.blur(); }
     return;
   }
+  // A focused control (Tab reaches them now) takes Space and Enter for itself.
+  if((e.key === " " || e.key === "Enter") && e.target instanceof HTMLButtonElement) return;
   if(e.key === " " || e.key === "Enter"){ e.preventDefault(); poke(); }
   if(e.key === "Escape"){ goIdle(); }
 });
@@ -1570,7 +1783,7 @@ const LANGS = [
 const RTL = new Set(["he","ar"]);
 
 function applyLanguage(code, {remember=true}={}){
-  const pick = LANGS.find(l => l.code === code) || LANGS[0];
+  const pick = LANGS.find(l => l.code === code) || LANGS.find(l => l.code === "en") || LANGS[0];
   LANG = pick.code;
   if(remember){ try{ localStorage.setItem("micmic.lang", LANG); }catch(_){} }
 
@@ -1587,6 +1800,12 @@ function applyLanguage(code, {remember=true}={}){
   $("langnow").textContent = pick.tag;
   $("typebox").placeholder = t("typehere");
   $("newchatw").textContent = t("newchat");
+  // Named in her language for VoiceOver and the hover tip; the panel shows "+" only.
+  $("newchat").setAttribute("aria-label", t("newchat")); $("newchat").title = t("newchat");
+  $("gear").setAttribute("aria-label", t("settings")); $("gear").title = t("settings");
+  $("tsend").setAttribute("aria-label", t("send"));
+  $("langbtn").setAttribute("aria-label", t("language")); $("langbtn").title = t("language");
+  $("axnotew").textContent = t("axNote"); $("axbtn").textContent = t("axOpen");
   paintSettingsCopy();
   $("foot").textContent = MODE === "wake" ? t("footWake")
                         : MODE === "always" ? t("footAlways") : t("foot");
@@ -1630,6 +1849,10 @@ function paintSettingsCopy(){
   $("wDispBar").textContent   = t("sDispBar");
   $("wDispNone").textContent  = t("sDispNone");
   $("hDisplay").textContent   = t("hDisplay");
+  $("lLogin").textContent     = t("sLogin");
+  $("wLoginOn").textContent   = t("sOn");
+  $("wLoginOff").textContent  = t("sOff");
+  $("hLogin").textContent     = t("hLogin");
   $("wWake").textContent    = t("sWake");
   $("wAlways").textContent  = t("sAlways");
   $("lWords").textContent   = t("sWords");
@@ -1642,7 +1865,7 @@ function paintSettingsCopy(){
   $("wRightOpt").textContent = t("sRightOpt");
   $("wFnTwice").textContent  = t("sFnTwice");
   paintAccount();
-  if(!recordingHotkey) paintHotkey(SETTINGS.hotkey || "fn-fn");
+  if(!recordingHotkey) paintHotkey(SETTINGS.hotkey || "right-option");
 }
 
 let SETTINGS = {};
@@ -1735,8 +1958,8 @@ function paintHotkey(spec){
   let label;
   if(spec === "fn-fn" || !spec) label = t("sFn");
   else if(TAP_LABEL[spec]) label = `${t(TAP_LABEL[spec])} · ${t("sTap")}`;
-  else if(spec === "right-control") label = `Right ⌃ · ${t("sTap")}`;
-  else if(spec === "right-shift")   label = `Right ⇧ · ${t("sTap")}`;
+  else if(spec === "right-control") label = `${t("sRightCtrl")} · ${t("sTap")}`;
+  else if(spec === "right-shift")   label = `${t("sRightShift")} · ${t("sTap")}`;
   else label = spec.replace(/\+/g, " + ");
   $("hotkeyw").textContent = label;
   if($("segHotkey")) seg("segHotkey", spec || "fn-fn");
@@ -1751,21 +1974,25 @@ function seg(id, value){
 function paintSettingsValues(){
   seg("segStart", SETTINGS.activation || "push");
   seg("segDisplay", SETTINGS.display || "bar");
+  seg("segLogin", SETTINGS.open_at_login ? "on" : "off");
   seg("segSend", SETTINGS.allow_send === false ? "off" : "on");
-  seg("segLang", SETTINGS.language_hint || "he-IL");
+  seg("segLang", SETTINGS.language_hint || CFG.language_hint || "en-US");
   const n = SETTINGS.listen_seconds || 12;
   $("listenRange").value = n;
   $("listenVal").textContent = n;
   $("wordsBox").value = (SETTINGS.wake_words || []).join(", ");
   // Wake words only mean anything when a wake word is what starts it.
   $("rowWords").hidden = (SETTINGS.activation || "push") !== "wake";
-  paintHotkey(SETTINGS.hotkey || "fn-fn");
+  paintHotkey(SETTINGS.hotkey || "right-option");
 }
 
-function flashSaved(){
-  $("savedw").classList.add("on");
+function flashSaved(bad){
+  const w = $("savedw");
+  w.textContent = t(bad || "sSaved");
+  w.classList.toggle("bad", !!bad);
+  w.classList.add("on");
   clearTimeout(flashSaved._t);
-  flashSaved._t = setTimeout(()=>$("savedw").classList.remove("on"), 1400);
+  flashSaved._t = setTimeout(()=>w.classList.remove("on"), bad ? 4000 : 1400);
 }
 
 async function saveSettings(changes){
@@ -1776,10 +2003,19 @@ async function saveSettings(changes){
     // Trust the server's echo, never the local guess: a value it rejected must not
     // keep showing as if it had been accepted.
     SETTINGS = d.settings || SETTINGS;
+    if(SETTINGS.hotkey && SETTINGS.hotkey !== HOTKEY){ HOTKEY = SETTINGS.hotkey; repaintKeyCopy(); }
     paintSettingsValues();
-    if((d.saved || []).length) flashSaved();
-    if((d.rejected || []).length) $("err").textContent = "could not save: " + d.rejected.join(", ");
-  }catch(e){ $("err").textContent = String(e); }
+    // Said in the sheet she is looking at, in her language. "could not save: hotkey"
+    // went to the page behind the sheet, in English, and stayed there.
+    if((d.rejected || []).length) flashSaved("sNotSaved");
+    else if((d.saved || []).length) flashSaved();
+  }catch(_){ flashSaved("neterr"); }
+}
+// Everything on screen that names the shortcut, after it changes.
+function repaintKeyCopy(){
+  if(STATE_KEY) $("state").textContent = t(STATE_KEY);
+  $("axnotew").textContent = t("axNote");
+  if(window.onboardingLanguage) window.onboardingLanguage();
 }
 
 async function openSettings(){
@@ -1787,7 +2023,8 @@ async function openSettings(){
     const d = await (await fetch("/api/config")).json();
     SETTINGS = {activation: d.activation, language_hint: d.language_hint,
                 listen_seconds: d.listen_seconds, wake_words: d.wake_words,
-                hotkey: d.hotkey, display: d.display, allow_send: d.allow_send};
+                hotkey: d.hotkey, display: d.display, allow_send: d.allow_send,
+                open_at_login: d.open_at_login};
   }catch(_){}
   paintSettingsCopy();
   paintSettingsValues();
@@ -1798,7 +2035,7 @@ function closeSettings(){
   recordingHotkey = false;
   $("hotkeybtn").classList.remove("recording");
   $("settings").classList.remove("on");
-  paintHotkey(SETTINGS.hotkey || "fn-fn");
+  paintHotkey(SETTINGS.hotkey || "right-option");
 }
 
 /* e.code, not e.key: Option+M on a Mac produces "µ", and a hotkey recorded from the
@@ -1836,6 +2073,13 @@ $("segStart").addEventListener("click", e=>{
   paintSettingsValues();
   saveSettings({activation: b.dataset.v});
 });
+$("segLogin").addEventListener("click", e=>{
+  const b = e.target.closest("button"); if(!b) return;
+  e.stopPropagation();
+  SETTINGS.open_at_login = b.dataset.v === "on";
+  paintSettingsValues();
+  saveSettings({open_at_login: SETTINGS.open_at_login});
+});
 $("segSend").addEventListener("click", e=>{
   const b = e.target.closest("button"); if(!b) return;
   e.stopPropagation();
@@ -1859,6 +2103,7 @@ $("segHotkey").addEventListener("click", e=>{
 $("segLang").addEventListener("click", e=>{
   const b = e.target.closest("button"); if(!b) return;
   e.stopPropagation();
+  applyLanguage(resolveLang(b.dataset.v));
   saveSettings({language_hint: b.dataset.v});
 });
 $("listenRange").addEventListener("input", e=>{
@@ -1883,7 +2128,13 @@ function buildLangMenu(){
     b.setAttribute("aria-checked", l.code === LANG ? "true" : "false");
     b.innerHTML = `<span>${l.name}</span>`
       + `<svg class="tick" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg>`;
-    b.addEventListener("click", ()=>{ applyLanguage(l.code); closeLang(); });
+    // The pill and Settings > Speech language are one setting: picking here is also
+    // what the listener will hear in.
+    b.addEventListener("click", ()=>{
+      const was = CFG.language_hint;
+      applyLanguage(l.code); closeLang();
+      if(!BAR && was !== l.speech) saveSettings({language_hint: l.speech});
+    });
     menu.appendChild(b);
   }
 }
@@ -1903,7 +2154,7 @@ document.addEventListener("keydown", e=>{
   if(e.key === "Escape"){
     recordingHotkey = false;
     $("hotkeybtn").classList.remove("recording");
-    paintHotkey(SETTINGS.hotkey || "fn-fn");
+    paintHotkey(SETTINGS.hotkey || "right-option");
     e.preventDefault(); e.stopPropagation();
     return;
   }
@@ -1944,27 +2195,37 @@ document.addEventListener("keyup", e=>{
 document.addEventListener("keydown", e=>{ if(e.key === "Escape") closeLang(); }, true);
 
 (async ()=>{
+  // Until the server answers, the language she last saw, so the first paint is not a
+  // flash of the wrong one. The server's setting is the one that counts.
+  let chosen = null;
+  try{ chosen = localStorage.getItem("micmic.lang"); }catch(_){}
+  if(!LANGS.some(l => l.code === chosen)) chosen = null;
+  buildLangMenu();
+  applyLanguage(chosen || LANG, {remember:false});
+  let served = false;
   try{
-    CFG = await (await fetch("/api/config")).json();
-    LANG = resolveLang(CFG.language_hint);
+    const cfg = await (await fetch("/api/config")).json();
+    CFG = cfg;
+    served = !!cfg.language_hint;
+    LANG = resolveLang(cfg.language_hint);
     // /api/config does not send the stored profile gender yet - this stays "f" (the
     // default MicMic already assumed everywhere) until it does; see the he_m table.
     // The server sends the word the profile stores — "masculine" / "feminine" — not "m".
   GENDER = (CFG.gender || "").startsWith("m") ? "m" : "f";
     MODE = CFG.activation || "push";
+    HOTKEY = CFG.hotkey || HOTKEY;
   }catch(_){
-    // The rest of the app still has usable defaults (Hebrew, push mode) on this
+    // The rest of the app still has usable defaults (English, push mode) on this
     // failure, but she gets no indication anything went wrong and no voice at all -
     // exactly the silent-failure this product must never allow.
     $("err").textContent = t("neterr");
     localSpeak(t("neterr"));
   }
-  // A language the user picked by hand outranks the profile's hint — that choice
-  // is the whole reason the switcher exists, and it has to survive a reload.
-  let chosen = null;
-  try{ chosen = localStorage.getItem("micmic.lang"); }catch(_){}
-  buildLangMenu();
-  applyLanguage(LANGS.some(l => l.code === chosen) ? chosen : LANG, {remember:false});
+  // The server's speech language is the page's language (the pill and Settings both
+  // save it there, and the listener hears in it). Where the browser remembered another
+  // one, the server wins and the browser is corrected, which also moves the bar.
+  if(served) applyLanguage(LANG, {remember: chosen !== LANG});
+  else applyLanguage(chosen || LANG, {remember:false});
   // The bar has no typing box to focus, and by the time this fetch resolves native may
   // already have painted "listening"; an idle painted over it here would wipe that.
   if(!BAR){
@@ -1987,9 +2248,13 @@ document.addEventListener("keydown", e=>{ if(e.key === "Escape") closeLang(); },
    while the wake word was busy — the exact blindness the window exists to remove. */
 if(PANEL){
   document.body.classList.add("panel");
+  // Each state brings its own line. Called with no text, the label of whatever came
+  // before stayed up: "hold right ⌥ and talk" under a spinning "thinking" ring.
+  const PANEL_KEY = {listening:"ready", thinking:"think", acting:"acting", error:"neterr"};
   window.panelState = (state, text) => {
-    setState(["idle","listening","thinking","acting","error"].includes(state) ? state : "idle");
-    if(text) $("state").textContent = text;
+    const s = ["idle","listening","thinking","acting","error"].includes(state) ? state : "idle";
+    setState(s, s === "idle" ? (MODE === "wake" ? "wake" : "idle") : PANEL_KEY[s]);
+    if(text){ STATE_KEY = null; $("state").textContent = text; }
   };
   window.panelHeard = t => {
     $("heard").textContent = t || "";
@@ -1997,6 +2262,78 @@ if(PANEL){
     $("reply").textContent = "";
   };
   window.panelReply = t => { $("reply").textContent = t || ""; };
+
+  // Moving the window. The web view takes every mouse event, so AppKit's "movable by
+  // background" never sees one; the page says when a press on its background has
+  // turned into a drag and native/panel.py hands that press to the window server.
+  // Only once it has MOVED: a plain click on the background still arms the listener,
+  // and controls, the typing box and the text worth selecting never start a drag.
+  const NODRAG = "button,input,textarea,select,a,label,[role=listbox],.orb,.ob-orb," +
+                 ".langmenu,.thread,.heard,.reply,.card .body,#dev";
+  let press = null, dragged = false;
+  addEventListener("mousedown", e => {
+    dragged = false;
+    press = e.button === 0 && !e.target.closest(NODRAG) ? {x:e.screenX, y:e.screenY} : null;
+  }, true);
+  // Whether the button is still down is native's to decide (it asks the system), so a
+  // release this page never heard cannot leave the window following the pointer.
+  addEventListener("mousemove", e => {
+    if(!press) return;
+    if(Math.abs(e.screenX - press.x) + Math.abs(e.screenY - press.y) < 4) return;
+    press = null; dragged = true;
+    try{ window.webkit.messageHandlers.micmic.postMessage("drag"); }catch(_){}
+  }, true);
+  addEventListener("mouseup", () => { press = null; }, true);
+
+  // Tab. WebKit in an app moves focus only between text fields unless the Mac's own
+  // keyboard setting says otherwise, so "+", the language pill and the gear could not
+  // be reached from the keyboard. The panel walks its own controls instead. The
+  // onboarding has its own loop and the settings sheet keeps focus inside itself.
+  addEventListener("keydown", e => {
+    if(e.key !== "Tab" || e.defaultPrevented || document.body.classList.contains("onboarding")) return;
+    const sheet = $("settings").classList.contains("on") ? $("settings") : null;
+    const open = $("lang").dataset.open === "1";
+    const list = [...(sheet || document).querySelectorAll("button,input,[tabindex]:not([tabindex='-1'])")]
+      .filter(el => !el.disabled && !el.hidden && el.getClientRects().length
+        && getComputedStyle(el).visibility === "visible" && !el.closest("[inert],#dev")
+        && (sheet || !el.closest("#settings")) && (open || !el.closest("#langmenu")));
+    if(!list.length) return;
+    const i = list.indexOf(document.activeElement);
+    const n = e.shiftKey ? (i <= 0 ? list.length - 1 : i - 1) : (i + 1) % list.length;
+    e.preventDefault();
+    list[n].focus();
+  }, true);
+
+  // Accessibility. Without it the shortcut never reaches MicMic, and the onboarding lets
+  // her go on with "Later", so the window says so, calmly, with the one button that
+  // fixes it, and stops promising the key, until it is on. Checked every few seconds
+  // while it is off (a local call) and whenever the window comes back to the front.
+  let axTimer = null;
+  async function checkAx(){
+    let p = null;
+    try{ const r = await fetch("/api/permissions", {cache:"no-store"}); if(r.ok) p = await r.json(); }catch(_){}
+    if(!p) return;
+    const off = p.accessibility === "denied" || p.accessibility === "not_asked";
+    if(off !== document.body.classList.contains("noax")){
+      document.body.classList.toggle("noax", off);
+      if(STATE_KEY && STATE_KEY.startsWith("idle")) setState("idle", "idle");
+    }
+    clearTimeout(axTimer);
+    if(off) axTimer = setTimeout(checkAx, 4000);
+  }
+  window.addEventListener("focus", checkAx);
+  checkAx();
+  $("axbtn").addEventListener("click", e => {
+    e.stopPropagation();
+    fetch("/api/permissions/open", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({pane:"accessibility"})}).catch(()=>{});
+    setTimeout(checkAx, 1500);
+  });
+  // The release at the end of a drag is not a click on the page: it must not arm the
+  // microphone wherever the pointer happens to let go.
+  addEventListener("click", e => {
+    if(dragged){ dragged = false; e.stopPropagation(); e.preventDefault(); }
+  }, true);
 }
 
 /* ---------------------------------------------------------------- bar bridge
@@ -2040,7 +2377,7 @@ if(BAR){
   let WORK_T0 = 0, WORK_TIMER = null;
   const paintWork = () => {
     const sec = Math.round((Date.now() - WORK_T0) / 1000);
-    $("work").textContent = t("working") + (sec >= 3 ? ` · ${sec}s` : "");
+    $("work").textContent = t("working") + (sec >= 3 ? " · " + t("secShort").replace("{n}", sec) : "");
     $("work").dataset.long = sec >= 3 ? "1" : "";
   };
   const stopWork = () => { clearInterval(WORK_TIMER); WORK_TIMER = null; $("work").textContent = ""; };

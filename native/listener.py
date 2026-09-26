@@ -72,10 +72,21 @@ except Exception as _panel_err:  # noqa: BLE001
 else:
     _PANEL_IMPORT_ERROR = ""
 
+try:
+    from ServiceManagement import SMAppService   # launch-at-login (macOS 13+)
+except Exception as _sm_err:  # noqa: BLE001
+    SMAppService = None          # older macOS, or the framework was left off the build
+    _SM_IMPORT_ERROR = repr(_sm_err)
+else:
+    _SM_IMPORT_ERROR = ""
+
 # --------------------------------------------------------------------------- config
 SERVER = os.environ.get("MICMIC_SERVER", "http://127.0.0.1:8799")
 UTTERANCE_URL = SERVER.rstrip("/") + "/api/utterance"
-CONFIG_URL = SERVER.rstrip("/") + "/api/config"
+CONFIG_URL = SERVER.rstrip("/") + "/api/config?contacts=1"   # names for the recogniser
+LOGIN_ITEM_URL = SERVER.rstrip("/") + "/api/login_item_status"
+HELP_URL = "https://getmicmic.vercel.app"
+SUPPORT_EMAIL = "Zoharmosseri@gmail.com"
 
 DEFAULT_LOCALE = os.environ.get("MICMIC_LOCALE", "")       # "" = ask the server
 DEFAULT_WAKE = ["מיקמיק", "מיק מיק", "micmic", "mic mic", "hey micmic"]
@@ -90,11 +101,14 @@ TASK_MAX = 45.0         # and recycle an idle session before Apple's ~1 min cap
 MUTE_MAX = 20.0         # never deafen ourselves for longer than this
 POST_TIMEOUT = 45.0     # the router can take a few seconds (LLM step)
 TICK = 0.2              # watchdog cadence
+SETTINGS_POLL = 3.0     # how soon a language or hotkey chosen in the page takes effect
 # A turn: she pressed the key (or MicMic asked her something) and the microphone is
 # hers until she says she is done. Silence never ends a key turn: she was cut off
 # mid-thought by the 1.2s endpoint above, which is for the wake word only.
 HOLD_MIN = 0.35         # held at least this long = hold-to-talk; shorter = tap-toggle
-PTT_MAX = 120.0         # a turn nobody ends is ended here
+PTT_MAX = 30.0          # a turn nobody ends is ended here. At 120 s a tap turn
+                        # nobody tapped again sent two minutes of the room.
+TAP_SILENCE = 1.8       # a TAP turn (not a held key) ends this long after her words stop
 FINAL_WAIT = 1.2        # after the key: how long to wait for the recogniser's final words
 ALT_WAIT = 2.0          # ...and for the second language to read the whole turn
 FOLLOWUP_WINDOW = 8.0   # MicMic asked a question: how long to wait for the first word
@@ -113,7 +127,12 @@ PRIMARY_SURE = float(os.environ.get("MICMIC_PRIMARY_SURE", "1.01"))
 ALT_LOCALE = os.environ.get("MICMIC_ALT_LOCALE", "en-US")
 
 DUP_WINDOW = 4.0        # drop a second POST of the identical command inside this long
-ENGINE_STALL = 6.0      # no new audio buffers for this long (while not muted/paused)
+ENGINE_STALL = 2.0      # no audio buffer at all for this long means the engine is dead
+                        # (it delivers ~23 a second, muted or not). Was 6 s, and only
+                        # counted while unmuted: a send's countdown hid a dead engine.
+ENGINE_STALL_MAX = 60.0 # a rebuild that brings nothing back waits twice as long each time
+STAND_IN = 0.5          # the confidence of text the recogniser never scored
+TURN_AUDIO_FRESH = 0.5  # a turn opening with no buffer this recent rebuilds the engine first
                         # means the engine died under us, not that the room is quiet
 HEALTH_POLL = 20.0      # how often to re-probe /api/health once we're up and running
 INTERRUPT_CAP = 5.0     # cap our own self-mute at this; listen for a stop word after
@@ -180,6 +199,18 @@ LANG = {
         "thinking": "חושבת…",
         "countdown": "סופרת לאחור {s:.0f} שניות: תגידי עצרי כדי לבטל",
         "paused": "בהשהיה",
+        "one_moment": "רגע אחד…",
+        "menu_listen": "להקשיב עכשיו",
+        "menu_pause": "השהיית האזנה",
+        "menu_resume": "חידוש האזנה",
+        "menu_show": "הצגת החלון של מיקמיק",
+        "menu_browser": "פתיחה בדפדפן",
+        "menu_shortcut": "הגדרת קיצור מקלדת…",
+        "menu_log": "הצגת היומן",
+        "menu_about": "אודות מיקמיק",
+        "menu_help": "עזרה ותמיכה",
+        "menu_quit": "יציאה ממיקמיק",
+        "hotkey_ax": "⚠ קיצור המקלדת צריך הרשאת נגישות",
     },
     "ar": {
         "speech_denied": "لا أملك إذن التعرف على الصوت. يجب الموافقة في إعدادات النظام.",
@@ -196,6 +227,18 @@ LANG = {
         "thinking": "أفكر…",
         "countdown": "أعد العد {s:.0f} ثوانٍ: قولي توقفي للإلغاء",
         "paused": "متوقفة مؤقتًا",
+        "one_moment": "لحظة…",
+        "menu_listen": "استمع الآن",
+        "menu_pause": "إيقاف الاستماع مؤقتًا",
+        "menu_resume": "استئناف الاستماع",
+        "menu_show": "إظهار نافذة ميك ميك",
+        "menu_browser": "فتح في المتصفح",
+        "menu_shortcut": "إعداد اختصار لوحة المفاتيح…",
+        "menu_log": "عرض السجل",
+        "menu_about": "حول ميك ميك",
+        "menu_help": "المساعدة والدعم",
+        "menu_quit": "إنهاء ميك ميك",
+        "hotkey_ax": "⚠ الاختصار يحتاج إذن تسهيلات الاستخدام",
     },
     "ru": {
         "speech_denied": "Нет разрешения на распознавание речи. Разрешите его в настройках системы.",
@@ -212,6 +255,18 @@ LANG = {
         "thinking": "Думаю…",
         "countdown": "Обратный отсчёт {s:.0f} секунд: скажите стоп для отмены",
         "paused": "На паузе",
+        "one_moment": "Секунду…",
+        "menu_listen": "Слушать сейчас",
+        "menu_pause": "Приостановить прослушивание",
+        "menu_resume": "Возобновить прослушивание",
+        "menu_show": "Показать окно МикМик",
+        "menu_browser": "Открыть в браузере",
+        "menu_shortcut": "Настроить сочетание клавиш…",
+        "menu_log": "Показать журнал",
+        "menu_about": "О МикМик",
+        "menu_help": "Помощь и поддержка",
+        "menu_quit": "Выйти из МикМик",
+        "hotkey_ax": "⚠ Сочетанию клавиш нужен универсальный доступ",
     },
     "en": {
         "speech_denied": "Speech recognition is not allowed. Please approve it in System Settings.",
@@ -228,6 +283,18 @@ LANG = {
         "thinking": "thinking",
         "countdown": "counting down {s:.0f}s: say stop to cancel",
         "paused": "paused",
+        "one_moment": "one moment…",
+        "menu_listen": "Listen now",
+        "menu_pause": "Pause listening",
+        "menu_resume": "Resume listening",
+        "menu_show": "Show MicMic window",
+        "menu_browser": "Open in browser",
+        "menu_shortcut": "Set up keyboard shortcut…",
+        "menu_log": "Show log",
+        "menu_about": "About MicMic",
+        "menu_help": "Help and support",
+        "menu_quit": "Quit MicMic",
+        "hotkey_ax": "⚠ Hotkey needs Accessibility permission",
     },
 }
 
@@ -398,7 +465,7 @@ def is_stop_word(text: str) -> bool:
 
 
 def lang_code(locale: str) -> str:
-    return (locale or "he-IL").split("-")[0].lower()
+    return (locale or "en-US").split("-")[0].lower()
 
 
 def L(key: str, locale: str, **kw) -> str:
@@ -574,6 +641,87 @@ def is_bundled() -> bool:
     return ".app/Contents/" in os.path.realpath(__file__)
 
 
+def app_version() -> str:
+    """CFBundleShortVersionString for the About panel. A dev checkout has no
+    Info.plist to read it from, so it asks the server instead for the same
+    field check_update() already reads off savta/account.py's APP_VERSION."""
+    if is_bundled():
+        try:
+            info = AppKit.NSBundle.mainBundle().infoDictionary() or {}
+            v = str(info.get("CFBundleShortVersionString") or "")
+            if v:
+                return v
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        with urllib.request.urlopen(SERVER.rstrip("/") + "/api/update", timeout=4) as r:
+            d = json.loads(r.read() or b"{}")
+        return str(d.get("current") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+# What SMAppService.status() reports, kept as strings so the server and the page
+# never need to know the raw Objective-C enum values.
+LOGIN_STATUS = {0: "not_registered", 1: "enabled", 2: "requires_approval", 3: "not_found"}
+
+
+def login_item_status() -> str:
+    """Read-only: what SMAppService currently reports, without registering or
+    unregistering anything. Polled every SETTINGS_POLL (see refresh_settings) so a
+    login item she switched off in System Settings > General > Login Items is
+    noticed even when nothing changed on MicMic's side."""
+    if SMAppService is None:
+        return "not_supported"
+    if not is_bundled():
+        return "dev_checkout"
+    try:
+        return LOGIN_STATUS.get(SMAppService.mainAppService().status(), "unknown")
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def apply_login_item(desired: bool) -> str:
+    """Register or unregister MicMic as a login item, and hand back what actually
+    happened. Only a signed, bundled .app has an identity SMAppService can register
+    at all — `python3 listener.py` from a checkout is a no-op, logged rather than
+    silently doing nothing (so a broken switch in dev is at least explainable)."""
+    if SMAppService is None:
+        log(f"login item: ServiceManagement unavailable ({_SM_IMPORT_ERROR}); ignoring")
+        return "not_supported"
+    if not is_bundled():
+        log(f"login item: dev checkout, no-op (would {'register' if desired else 'unregister'})")
+        return "dev_checkout"
+    service = SMAppService.mainAppService()
+    # Nothing to take away: unregistering a login item that was never added is an
+    # error ("Operation not permitted") on every launch with the switch off.
+    if not desired and login_item_status() not in ("enabled", "requires_approval"):
+        return login_item_status()
+    try:
+        if desired:
+            ok, err = service.registerAndReturnError_(None)
+        else:
+            ok, err = service.unregisterAndReturnError_(None)
+        if not ok:
+            log(f"login item: {'register' if desired else 'unregister'} failed: {err}")
+    except Exception as e:  # noqa: BLE001
+        log(f"login item: could not apply: {e!r}")
+    return login_item_status()
+
+
+def post_login_item_status(status: str) -> None:
+    """Tell the server what SMAppService actually reports, so the Settings switch
+    shows the real state — not just what was last requested — the next time it
+    opens (see savta/server.py's /api/login_item_status and /api/config)."""
+    try:
+        req = urllib.request.Request(
+            LOGIN_ITEM_URL, data=json.dumps({"status": status}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        urllib.request.urlopen(req, timeout=4).close()
+    except Exception as e:  # noqa: BLE001
+        log(f"login item: could not report status: {e!r}")
+
+
 def ensure_server() -> None:
     """Make sure something is answering /api/health before the listener starts.
 
@@ -617,6 +765,41 @@ def server_duck(on: bool) -> None:
         except Exception:  # noqa: BLE001
             pass                      # the server's own 75s failsafe restores it anyway
     threading.Thread(target=go, daemon=True).start()
+
+
+def post_turn_open(ts: float, kind: str) -> None:
+    """Tell the server a turn just opened, before any audio: a message counting down is
+    paused while she talks (she pressed the key to stop one, the engine was dead, her
+    "no" was never heard, and it went out). kind is "hold" (the key is down), "tap"
+    (Listen now, a double Fn), or "followup" (MicMic asked her something). Fire and
+    forget, off the main thread, short timeout: nothing may delay the microphone.
+    Contract: convo-fix's savta/server.py /api/turn_open."""
+    def go():
+        try:
+            req = urllib.request.Request(
+                SERVER.rstrip("/") + "/api/turn_open",
+                data=json.dumps({"ts": ts, "kind": kind}).encode(), method="POST",
+                headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=1.5).read()
+        except Exception:  # noqa: BLE001
+            pass
+    threading.Thread(target=go, daemon=True).start()
+
+
+def post_turn_closed(ts: float, why: str) -> dict:
+    """A turn that ended WITHOUT an /api/utterance: "nothing" (nothing heard, cancelled,
+    paused) or "error" (the utterance never reached the server). A message paused on
+    turn_open is then asked about ("Should I still send it?") instead of sent, and the
+    reply says so like any asked_back reply. Blocking: call it off the main thread."""
+    try:
+        req = urllib.request.Request(
+            SERVER.rstrip("/") + "/api/turn_closed",
+            data=json.dumps({"ts": ts, "heard": False, "why": why}).encode(),
+            method="POST", headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=POST_TIMEOUT) as r:
+            return json.loads(r.read().decode() or "{}")
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def stop_speaking() -> None:
@@ -666,7 +849,7 @@ def get_config() -> dict:
         return {}
 
 
-def post_utterance(text: str, activation: str = "") -> dict:
+def post_utterance(text: str, activation: str = "", asr_confidence=None) -> dict:
     # "client": "native" tells the router this has no browser window to play a
     # video in — without it the server defaults to "web" and a music/video
     # request here says "here you go" and then plays nothing at all (bug #17).
@@ -682,6 +865,10 @@ def post_utterance(text: str, activation: str = "") -> dict:
     body = {"text": text, "speak": True, "client": "native"}
     if activation:
         body["activation"] = activation
+    # How sure the recogniser was of this transcript (0.5 when it gave no score): a
+    # message heard below 0.5 is confirmed with a yes instead of a countdown.
+    if asr_confidence is not None:
+        body["asr_confidence"] = round(float(asr_confidence), 3)
     body = json.dumps(body, ensure_ascii=False).encode()
     req = urllib.request.Request(
         UTTERANCE_URL, data=body,
@@ -733,7 +920,8 @@ class Listener:
     def __init__(self) -> None:
         self.lock = threading.RLock()
         self.cfg = {}
-        self.locale = DEFAULT_LOCALE or "he-IL"
+        # English until the server says she chose otherwise in Settings.
+        self.locale = DEFAULT_LOCALE or "en-US"
         self.variants = wake_variants(DEFAULT_WAKE)
         self.contextual: list[str] = []
 
@@ -750,6 +938,8 @@ class Listener:
         self.alt_gen = 0
         self.alt_parts: list = []      # (text, confidence, words) per utterance of the file read
         self.turn_prefix = ""         # what earlier recognition sessions of this turn heard
+        self.alt_placeholder = False  # the second read's confidence includes a 0.5 stand-in
+        self.pick_conf = None         # the chosen transcript's confidence, sent with it
         self.turn_audio_path = ""
         self.input_format = None
         self.swallow_release = False  # the press that ENDED a tap turn: ignore its release
@@ -778,6 +968,9 @@ class Listener:
         self.paused = False
         self.running = False
         self.buffers = 0
+        self.audio_at = 0.0           # the tap's last call, muted or not: the engine's pulse
+        self.engine_started_at = 0.0  # last (re)start, so a fresh engine is given a moment
+        self.stall_rebuilds = 0       # rebuilds in a row that brought no audio back
         self.last_buffers = 0         # engine-stall detection (bugs #2)
         self.last_buffers_at = 0.0
         self.tap_error = ""
@@ -798,7 +991,11 @@ class Listener:
 
         self.server_healthy = None    # None = not checked yet; see watchdog
         self.last_health_check = 0.0
+        self.last_settings_poll = 0.0
         self.last_failure_spoken: dict[str, float] = {}  # per-key speech cooldown
+
+        self.login_item_requested = None  # None until the first poll: always applies once
+        self.login_item_last_status = None
 
         self.speech_auth = 0
         self.mic_auth = False
@@ -809,6 +1006,12 @@ class Listener:
         item = bar.statusItemWithLength_(AppKit.NSVariableStatusItemLength)
         _apply_glyph(item.button(), "◉")
         menu = AppKit.NSMenu.alloc().init()
+
+        about = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "About MicMic", objc.selector(delegate.aboutMicMic_, signature=b"v@:@"), "")
+        about.setTarget_(delegate)
+        menu.addItem_(about)
+        menu.addItem_(AppKit.NSMenuItem.separatorItem())
 
         line = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("starting…", None, "")
         line.setEnabled_(False)
@@ -862,12 +1065,23 @@ class Listener:
         menu.addItem_(logi)
 
         menu.addItem_(AppKit.NSMenuItem.separatorItem())
+        helpi = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Help and support", objc.selector(delegate.openHelp_, signature=b"v@:@"), "")
+        helpi.setTarget_(delegate)
+        menu.addItem_(helpi)
+
+        menu.addItem_(AppKit.NSMenuItem.separatorItem())
         quit_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "Quit MicMic", objc.selector(delegate.quitApp_, signature=b"v@:@"), "q")
         quit_item.setTarget_(delegate)
         menu.addItem_(quit_item)
 
         item.setMenu_(menu)
+        # Titled in her language by paint_menu(), like the status line, and again
+        # whenever the speech language changes.
+        self.menu_items = {"menu_about": about, "menu_listen": listen_now, "menu_show": showp,
+                           "menu_browser": openw, "menu_shortcut": keyset,
+                           "menu_log": logi, "menu_help": helpi, "menu_quit": quit_item}
         if MicMicPanel is not None and self.panel is None:
             try:
                 self.panel = MicMicPanel(SERVER, on_listen=lambda: on_main(self.push_to_talk))
@@ -887,6 +1101,23 @@ class Listener:
         self.status_line = line
         self.hotkey_line = hotkey_line
         self.pause_item = pause
+        self.paint_menu()
+
+    def paint_menu(self) -> None:
+        """Every menu title in the speech language. They were English whatever she
+        spoke, while the status line above them was already translated."""
+        items = dict(getattr(self, "menu_items", {}) or {})
+        pause = getattr(self, "pause_item", None)
+        loc = self.locale
+
+        def apply():
+            for key, it in items.items():
+                it.setTitle_(L(key, loc))
+            if pause is not None:
+                pause.setTitle_(L("menu_resume" if self.paused else "menu_pause", loc))
+            if self.hotkey_line is not None:
+                self.hotkey_line.setTitle_(L("hotkey_ax", loc))
+        on_main(apply)
 
     # ---------------------------------------------------------------- what she sees
     # Settings > display: "panel" (the full window), "bar" (the slim strip at the top,
@@ -924,6 +1155,16 @@ class Listener:
             on_main(lambda: self.bar.set_result(say, undo_label))
         else:
             on_main(lambda: self.bar.set_state("idle"))   # ignored or not for us: go away
+
+    def view_wait(self, text: str) -> None:
+        """"One moment": the microphone is being brought back before she can talk."""
+        if self.bar is not None and self.display_mode() == "bar":
+            def show():
+                self.bar.set_state("thinking", text)
+                self.bar.show()
+            on_main(show)
+        elif self.panel is not None:
+            on_main(lambda: self.panel.set_state("thinking", text))
 
     def view_working(self) -> None:
         if self.bar is not None and self.display_mode() == "bar":
@@ -997,7 +1238,7 @@ class Listener:
             if trusted:
                 self.hotkey_line.setHidden_(True)
             else:
-                self.hotkey_line.setTitle_("⚠ Hotkey needs Accessibility permission")
+                self.hotkey_line.setTitle_(L("hotkey_ax", self.locale))
                 self.hotkey_line.setHidden_(False)
         on_main(apply)
         if not trusted:
@@ -1075,7 +1316,8 @@ class Listener:
         # lists. A config that forgets them should not leave her unable to call it.
         self.variants = wake_variants(DEFAULT_WAKE + list(self.cfg.get("wake_words") or []))
         if not DEFAULT_LOCALE:
-            self.locale = self.cfg.get("language_hint") or "he-IL"
+            self.locale = self.cfg.get("language_hint") or "en-US"
+        self.paint_menu()
         # Contact names as contextual strings measurably help the recognizer get
         # a name right. They come from the server, which already knows them.
         self.contextual = [str(c) for c in (self.cfg.get("contacts") or [])][:80]
@@ -1158,6 +1400,10 @@ class Listener:
         if self._make_recognizers():
             log(f"speech language {old} -> {locale}")
             self.start_task(force=True)
+            # The menu and the status line speak her language too, not the old one.
+            self.paint_menu()
+            if not self.paused:
+                self.set_status(L("listening", self.locale), "◉")
         else:
             self.locale = old
             self._make_recognizers()
@@ -1171,6 +1417,8 @@ class Listener:
             log(f"input format: {fmt.sampleRate():.0f} Hz, {fmt.channelCount()} ch")
 
             def tap(buf, when):
+                self.audio_at = time.time()      # alive, whatever happens to the buffer
+                self.stall_rebuilds = 0
                 # Dropping the buffer is how we avoid hearing our own voice.
                 if self.muted_until > time.time() or self.paused:
                     return
@@ -1204,6 +1452,7 @@ class Listener:
                 self.set_status(L("mic_failed", self.locale), "⚠")
                 return False
             log("audio engine running")
+            self.engine_started_at = time.time()
             return True
         except Exception as e:  # noqa: BLE001
             log(f"audio engine exception: {e!r}")
@@ -1278,6 +1527,24 @@ class Listener:
         if variants != self.variants:
             self.variants = variants
             log(f"wake words updated: {words}")
+        self.refresh_login_item(cfg)
+
+    def refresh_login_item(self, cfg: dict) -> None:
+        """"Open at login": desired comes from Settings, by way of the server (see
+        savta/login_item.py); applying it and reading back what actually happened is
+        this listener's job, since only it can import ServiceManagement. Registered
+        or unregistered only when the desired value changes; the actual status is
+        re-checked every poll regardless, so a login item she disabled herself in
+        System Settings is noticed too."""
+        desired = bool(cfg.get("open_at_login_desired", cfg.get("open_at_login", False)))
+        if desired != self.login_item_requested:
+            self.login_item_requested = desired
+            status = apply_login_item(desired)
+        else:
+            status = login_item_status()
+        if status != self.login_item_last_status:
+            self.login_item_last_status = status
+            post_login_item_status(status)
 
     # ------------------------------------------------------------------ push-to-talk
     def register_hotkey(self, force: bool = False) -> None:
@@ -1414,8 +1681,28 @@ class Listener:
         if t is not None and t["kind"] == "ptt" and t["finish_at"] == 0.0:
             self.finish_turn("pressed again")
             return
-        if self.start_turn("ptt"):
+        if self._take_over_followup("toggle"):
+            return
+        if self.start_turn("ptt", "tap"):
             self.turn["mode"] = "toggle"
+
+    def _take_over_followup(self, mode) -> bool:
+        """MicMic had opened the microphone for her answer and she pressed the key as
+        well (the log shows it every time: "turn open (followup)", 0.3-0.7 s later
+        "turn open (ptt)"). It is the same turn, now hers: restarting it threw away
+        whatever she had already said, and told the server a second turn had opened."""
+        t = self.turn
+        if t is None or t["kind"] != "followup" or t["finish_at"]:
+            return False
+        now = time.time()
+        with self.lock:
+            t.update(kind="ptt", down_at=now, mode=mode, deadline=now + PTT_MAX)
+            self.last_change = now
+        stop_speaking()
+        if mode is None:
+            self.swallow_release = False          # its release decides hold or tap
+        log("turn: the key took over the open followup turn")
+        return True
 
     # --- the hotkey as a key: hold to talk, or tap to start and tap to send --------
     def press(self) -> None:
@@ -1428,6 +1715,8 @@ class Listener:
                 and t["finish_at"] == 0.0:
             self.swallow_release = True
             self.finish_turn("tapped again")
+            return
+        if self._take_over_followup(None):     # release() decides hold or tap
             return
         self.swallow_release = False
         self.start_turn("ptt")
@@ -1454,17 +1743,38 @@ class Listener:
         log("turn: the hotkey was part of a chord, cancelled")
         self.end_turn_empty(sound=False)
 
-    def start_turn(self, kind: str) -> bool:
+    def start_turn(self, kind: str, wire: str = "") -> bool:
+        """wire is what the server is told the turn is: "hold" for a key that is down,
+        "tap" for Listen now or a double Fn, "followup" when MicMic asked."""
         if not self.running:
             log("turn requested before the listener finished starting")
             return False
         if self.paused:
             log("turn requested while paused, ignoring")
             return False
+        # The server hears of it first, before any audio and before a rebuild.
+        open_ts = time.time()
+        post_turn_open(open_ts, wire or ("followup" if kind == "followup" else "hold"))
+        quiet = time.time() - max(self.audio_at, self.engine_started_at)
+        if self.engine is not None and quiet > TURN_AUDIO_FRESH:
+            # The engine died without a word (02:26:27: she pressed the key to stop a
+            # send, the turn heard nothing, the message went out). Rebuild it now,
+            # before the turn's session and audio file are made from it, instead of
+            # waiting for the watchdog; the turn then opens on the live engine and
+            # hears what she says next.
+            log(f"turn open: no audio for {quiet:.1f}s, rebuilding the engine first")
+            self.view_wait(L("one_moment", self.locale))
+            self.recover_engine("no audio when a turn opened")
+        # Taken after any rebuild: its time must not count as holding the key.
         now = time.time()
+        if self.turn is not None:
+            # A new turn over an open one: its own turn_open keeps anything paused, so
+            # the old one is not reported as "nothing heard".
+            self.turn["closed"] = True
         with self.lock:
             self.turn = {"kind": kind, "down_at": now, "mode": None, "finish_at": 0.0,
-                         "deadline": now + (PTT_MAX if kind == "ptt" else FOLLOWUP_WINDOW)}
+                         "deadline": now + (PTT_MAX if kind == "ptt" else FOLLOWUP_WINDOW),
+                         "open_ts": open_ts}
             self.transcript = ""
             self.alt_text = ""
             self.turn_prefix = ""
@@ -1540,6 +1850,7 @@ class Listener:
                     req.setContextualStrings_(self.contextual)
                 self.alt_gen += 1
                 self.alt_parts = []
+                self.alt_placeholder = False
                 self._alt_live = ""
                 gen = self.alt_gen
                 self.alt_task = self.recognizer_alt.recognitionTaskWithRequest_resultHandler_(
@@ -1571,7 +1882,23 @@ class Listener:
         self.view_working()
         self.consider()
 
-    def end_turn_empty(self, sound: bool = True) -> None:
+    def _closed(self, t, why: str) -> None:
+        """A turn ended without an utterance reaching the server: say so, once, with the
+        ts it opened with. If a message was held for it, the server asks her whether to
+        still send it, and that reply is handled like any asked_back answer."""
+        if not t or t.get("closed") or "open_ts" not in t:
+            return
+        t["closed"] = True
+        ts = t["open_ts"]
+
+        def go():
+            res = post_turn_closed(ts, why)
+            if isinstance(res, dict) and res.get("did") not in (None, "", "nothing_held"):
+                self.handle_reply(res)
+        threading.Thread(target=go, daemon=True).start()
+
+    def end_turn_empty(self, sound: bool = True, why: str = "nothing", turn=None) -> None:
+        self._closed(turn or self.turn, why)
         with self.lock:
             self._drop_turn_audio()
             self.turn = None
@@ -1615,6 +1942,14 @@ class Listener:
             self.gen += 1
             gen = self.gen
             self.request = req
+            if self.turn is not None and self.transcript:
+                # A turn's session is being replaced before it gave a final (Apple
+                # ended it, or the watchdog found it missing): what it heard is on the
+                # bar and belongs to the turn. Dropping it here is how a long tap turn
+                # showed "מה השעה מיקמק" and then ended with nothing said.
+                self.turn.setdefault("confs", []).append((0.5, len(self.transcript.split())))
+                self.turn["placeholder"] = True
+                self.turn_prefix = (self.turn_prefix + " " + self.transcript).strip()
             self.transcript = ""
             self.last_change = now
             self.task_started = now
@@ -1685,6 +2020,7 @@ class Listener:
                     live = getattr(self, "_alt_live", "")
                     if new_utterance(live, norm):
                         self.alt_parts.append((live, 0.5, len(live.split())))
+                        self.alt_placeholder = True
                     self._alt_live = norm
                     self.alt_text = " ".join([x[0] for x in self.alt_parts] + [norm])
             if result.isFinal():
@@ -1707,6 +2043,9 @@ class Listener:
                         # Finishing and the session ended with no final: what it heard
                         # so far is all there is.
                         self.primary_final = ((self.turn_prefix + " " + self.transcript).strip(), 0.0)
+                if t is not None and not t["finish_at"]:
+                    log(f"turn: recognition session ended mid-turn ({code}), "
+                        f"keeping {len((self.turn_prefix + ' ' + self.transcript).split())} words")
                 if code == 1110:
                     # "No speech detected" — routine. Apple closes a session that
                     # heard nothing; the watchdog opens the next one.
@@ -1734,6 +2073,12 @@ class Listener:
                 words = len(norm.split())
                 if t is not None and final and words:
                     t.setdefault("confs", []).append((conf, words))
+                if t is not None and final and not norm and self.transcript:
+                    # A final with no words after partials that had some (seen after a
+                    # long tap turn): the partial is what she saw, and what she said.
+                    norm = self.transcript
+                    t.setdefault("confs", []).append((0.5, len(norm.split())))
+                    t["placeholder"] = True
                 if t is not None and final and not t["finish_at"]:
                     # Speech ended one utterance at her pause; the turn is not over.
                     # Keep what it heard and open the next session, or everything
@@ -1745,6 +2090,7 @@ class Listener:
                 else:
                     if t is not None and new_utterance(self.transcript, norm):
                         t.setdefault("confs", []).append((0.5, len(self.transcript.split())))
+                        t["placeholder"] = True
                         self.turn_prefix = (self.turn_prefix + " " + self.transcript).strip()
                     if norm != self.transcript:
                         self.transcript = norm
@@ -1760,6 +2106,12 @@ class Listener:
                             self.primary_final = (norm, conf)
                 armed = self.armed_until > time.time()
                 shown = (self.turn_prefix + " " + text).strip() if t is not None else text
+                if t is not None and not result.isFinal():
+                    # What the bar showed before any final. A final that comes back
+                    # empty, or short, cannot take away words she watched appear.
+                    seen = (self.turn_prefix + " " + self.transcript).strip()
+                    if seen:
+                        t["shown"] = seen
             if restart:
                 self.start_task(force=True)
                 return
@@ -1909,7 +2261,10 @@ class Listener:
             on_main(lambda: self.panel.set_heard(to_send))
         self.view_heard(to_send)
         self.set_status(L("thinking", self.locale), "◐")
-        threading.Thread(target=self.send, args=(to_send, activation), daemon=True).start()
+        pf = self.primary_final
+        conf = pf[1] if pf and pf[1] > 0 else STAND_IN      # a wake-word sentence, same rule
+        threading.Thread(target=self.send, args=(to_send, activation, 0.0, None, conf),
+                         daemon=True).start()
 
     def _open_followup(self, spoken: float) -> None:
         """Wait for the question to finish being spoken, then listen for the answer."""
@@ -1923,7 +2278,19 @@ class Listener:
 
     def _consider_turn(self, now: float, final: bool) -> None:
         """A turn is open: nothing is sent on a pause (unless MicMic asked a question
-        and is waiting for the answer); it is sent when she ends it."""
+        and is waiting for the answer, or it was a tap turn); it is sent when she ends
+        it. A held key is never ended by silence: she is holding it."""
+        t = self.turn
+        if t is not None and not t["finish_at"] and t["kind"] == "ptt" and t["mode"] == "toggle":
+            # A tap turn she never tapped closed stayed open for the whole cap and then
+            # sent everything the room said ("מה השעה מיקמק סורי siri ... like button").
+            # Once she has said something, a pause as long as a followup answer's ends it.
+            with self.lock:
+                said = (self.turn_prefix + " " + self.transcript).strip()
+                quiet = now - self.last_change
+            if said and quiet >= TAP_SILENCE:
+                self.finish_turn("silence after speech")
+                return
         with self.lock:
             t = self.turn
             if t is None:
@@ -1968,6 +2335,7 @@ class Listener:
             if unsure and now < t["alt_at"] + ALT_WAIT and not self._alt_done():
                 return
             to_send, lang_won = self._pick_transcript()
+            conf_won = self.pick_conf
             self._drop_turn_audio()
             self.turn_prefix = ""
             self.turn = None
@@ -1983,14 +2351,15 @@ class Listener:
                 self.last_sent_at = now
         if not to_send:
             log("turn ended with nothing said")
-            self.end_turn_empty()
+            self.end_turn_empty(turn=t)
             return
         log(f"→ {to_send!r} (turn, {lang_won})")
         if self.panel is not None:
             on_main(lambda: self.panel.set_heard(to_send))
         self.view_heard(to_send)
         self.set_status(L("thinking", self.locale), "◐")
-        threading.Thread(target=self.send, args=(to_send, "push", t["finish_at"]),
+        threading.Thread(target=self.send, args=(to_send, "push", t["finish_at"], t,
+                                                 conf_won),
                          daemon=True).start()
 
     def _alt_done(self) -> bool:
@@ -2004,24 +2373,41 @@ class Listener:
 
     def _pick_transcript(self) -> tuple[str, str]:
         """Her language or English, by the recognisers' own final confidence. Falls
-        back to whatever text there is when a final never came."""
+        back to whatever text there is when a final never came, and to what the bar
+        showed when the final is empty or lost most of it: a turn that put words on
+        screen is never "nothing said"."""
         prim = self.primary_final or ((self.turn_prefix + " " + self.transcript).strip(), 0.0)
+        # The confidence sent with every turn: the recogniser's own when it gave one,
+        # else STAND_IN (the shown partial text, unscored pieces, or no final at all,
+        # whose 0.0 would read as "heard nothing").
+        prim_real = (self.primary_final is not None and prim[1] > 0
+                     and not (self.turn or {}).get("placeholder"))
+        shown = str((self.turn or {}).get("shown") or "")
+        if shown and len(prim[0].split()) * 2 < len(shown.split()):
+            log(f"turn: final {prim[0]!r} fell short of what was shown, keeping {shown!r}")
+            prim, prim_real = (shown, max(prim[1], 0.5)), False
         alt = self.alt_final or (self.alt_text, 0.0)
+        alt_real = self.alt_final is not None and alt[1] > 0 and not self.alt_placeholder
+        self.pick_conf = prim[1] if prim_real else STAND_IN
         if not alt[0]:
             return prim[0], self.locale
         if not prim[0]:
+            self.pick_conf = alt[1] if alt_real else STAND_IN
             return alt[0], self.alt_locale
         log(f"turn: {self.locale} {prim[1]:.2f} {prim[0]!r} vs {self.alt_locale} {alt[1]:.2f} {alt[0]!r}")
         if alt[1] > prim[1]:
+            self.pick_conf = alt[1] if alt_real else STAND_IN
             return alt[0], f"{self.alt_locale} {alt[1]:.2f} over {prim[1]:.2f}"
         return prim[0], f"{self.locale} {prim[1]:.2f} over {alt[1]:.2f}"
 
-    def send(self, text: str, activation: str = "wake", released_at: float = 0.0) -> None:
+    def send(self, text: str, activation: str = "wake", released_at: float = 0.0,
+             turn=None, asr_confidence=None) -> None:
         server_duck(False)            # she has finished speaking: bring the music back
         posted_at = time.time()
         try:
-            res = post_utterance(text, activation=activation)
+            res = post_utterance(text, activation=activation, asr_confidence=asr_confidence)
         except urllib.error.URLError as e:
+            self._closed(turn, "error")
             log(f"server unreachable: {e!r}  (is `python3 -m savta.server` running?)")
             self.set_status(L("server_down", self.locale), "⚠")
             self.announce_failure("server_down")
@@ -2030,12 +2416,22 @@ class Listener:
             self.schedule_restart(0.2)
             return
         except Exception as e:  # noqa: BLE001
+            self._closed(turn, "error")
             log(f"post failed: {e!r}")
             self.set_status(L("unreachable", self.locale), "⚠")
             self.announce_failure("unreachable")
             self.schedule_restart(0.2)
             return
 
+        if turn is not None:
+            turn["closed"] = True     # the utterance itself tells the server the turn ended
+        self.handle_reply(res, released_at, posted_at)
+
+    def handle_reply(self, res: dict, released_at: float = 0.0,
+                     posted_at: float = 0.0) -> None:
+        """Show, log and act on a server reply: an utterance's, or the "Should I still
+        send it?" that /api/turn_closed answers with when it held a message."""
+        posted_at = posted_at or time.time()
         did = res.get("did")
         said = str(res.get("say") or "")
         # A reply read off the screen is the screen: the log keeps its length only,
@@ -2156,14 +2552,17 @@ class Listener:
                             self.set_status(L("server_down", self.locale), "⚠")
                             self.announce_failure("server_down")
                         self.server_healthy = healthy
-                    # Settings are changed in a web page, not here, so the listener has
-                    # to notice. Same cadence as the health probe: a hotkey the user
-                    # just chose should start working without quitting the app.
                     if healthy:
-                        self.refresh_settings()
                         if now - self.last_update_check > 600:
                             self.last_update_check = now
                             self.check_update()
+
+                # Settings are changed in a web page, not here, so the listener has
+                # to notice, and soon: the language pill and a new hotkey should work
+                # within seconds, not after the 20 s health probe.
+                if self.server_healthy and now - self.last_settings_poll > SETTINGS_POLL:
+                    self.last_settings_poll = now
+                    self.refresh_settings()
 
                 if now - self.last_hotkey_check > 5.0:
                     self.last_hotkey_check = now
@@ -2174,20 +2573,21 @@ class Listener:
 
                 # A recognition session staying open is not proof the microphone
                 # is alive: AVAudioEngine does not restart itself after a route
-                # change or sleep, and buffers (already tracked, just never
-                # checked outside MICMIC_DEBUG) is the one signal that actually
-                # moves only when real audio is arriving (bugs #2).
-                if self.muted_until <= now and not self.paused:
-                    if self.buffers != self.last_buffers:
-                        self.last_buffers = self.buffers
-                        self.last_buffers_at = now
-                    elif now - self.last_buffers_at > ENGINE_STALL:
-                        # AVAudioEngine setup elsewhere always runs on the main
-                        # thread (begin() is reached via on_main); stay consistent
-                        # rather than touching the engine from this watchdog thread.
-                        self.last_buffers_at = now   # don't re-fire every tick while it rebuilds
-                        on_main(lambda: self.recover_engine(
-                            f"no audio buffers for {ENGINE_STALL:.0f}s — engine looks dead"))
+                # change or sleep (bugs #2). The tap's own pulse is: it is called for
+                # every buffer the microphone delivers, muted or not. It used to be
+                # read only while unmuted, so a send's read-back hid a dead engine
+                # until she pressed the key to stop it (02:26:27, "jet" went out).
+                limit = min(ENGINE_STALL_MAX, ENGINE_STALL * (2 ** self.stall_rebuilds))
+                if (self.engine is not None
+                        and now - max(self.audio_at, self.engine_started_at) > limit):
+                    # A rebuild that brings nothing back (no microphone at all) waits
+                    # twice as long before the next one: never churn the engine.
+                    self.stall_rebuilds += 1
+                    self.engine_started_at = now     # don't re-fire while it rebuilds
+                    # AVAudioEngine setup elsewhere always runs on the main thread
+                    # (begin() is reached via on_main); stay consistent.
+                    on_main(lambda lim=limit: self.recover_engine(
+                        f"no audio buffers for {lim:.0f}s: engine looks dead"))
 
                 self.consider(final=False)   # may send, and may clear the transcript
 
@@ -2223,6 +2623,8 @@ class Listener:
     def set_paused(self, paused: bool) -> None:
         self.paused = paused
         if paused:
+            if self.turn is not None:         # the watchdog stops while paused: close it
+                self.end_turn_empty(sound=False)
             self.stop_task()
             self.set_status(L("paused", self.locale), "○")
         else:
@@ -2241,25 +2643,71 @@ class Listener:
 
 # A menu bar is thirty small grey shapes in a row. "◉" was one more of them, so
 # "I opened MicMic and nothing happened" really meant "I could not find it".
-# An SF Symbol mic reads as a microphone at a glance and matches every other
-# native icon up there. The text glyphs stay as the fallback for macOS versions
-# without a given symbol, so this can only ever improve on what was there.
+# Idle and hearing-you are HERS: the twin-capsule mark (brand/micmic-mark.svg,
+# simplified for 16px in brand/menubar/*.svg — see brand/menubar/render.py),
+# outlined at idle and filled solid the moment she is heard, so the two states
+# read apart at a glance without needing color (a template image only ever
+# shows its alpha mask). Thinking, counting down and needing attention are
+# transient, not her identity, so they stay plain SF Symbols. The text glyphs
+# remain the last-resort fallback, so this can only ever improve on what was
+# there.
+_MENU_ICONS = {
+    "◉": "mic-idle",      # idle, listening for the wake word
+    "●": "mic-active",    # hearing you right now
+}
 _SYMBOLS = {
-    "◉": "mic",                             # idle, listening for the wake word
-    "●": "mic.fill",                        # hearing you right now
+    "◉": "mic",                             # fallback if the branded PNG is missing
+    "●": "mic.fill",                        # ditto
     "◐": "ellipsis.circle",                 # thinking
     "◼": "stop.circle",                     # counting down
     "⚠": "exclamationmark.triangle.fill",   # something needs attention
 }
+_MENU_ICON_CACHE: dict[str, object] = {}
+
+
+def _menubar_dir() -> str:
+    """Where the branded menu-bar PNGs live: Contents/Resources/menubar in the
+    signed app (see native/build.sh), or brand/menubar next to the checkout."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if is_bundled():
+        return os.path.join(os.path.dirname(here), "menubar")   # .../Resources/menubar
+    return os.path.join(os.path.dirname(here), "brand", "menubar")
+
+
+def _load_menu_icon(name: str):
+    """A template NSImage built from name.png / name@2x.png (see render.py).
+    None if neither file is there, so a missing or broken asset falls back to
+    the SF Symbol instead of crashing (see _apply_glyph)."""
+    if name in _MENU_ICON_CACHE:
+        return _MENU_ICON_CACHE[name]
+    folder = _menubar_dir()
+    img = AppKit.NSImage.alloc().initWithSize_(AppKit.NSMakeSize(18, 18))
+    found = False
+    for suffix in ("", "@2x"):
+        path = os.path.join(folder, f"{name}{suffix}.png")
+        if os.path.exists(path):
+            rep = AppKit.NSBitmapImageRep.imageRepWithContentsOfFile_(path)
+            if rep is not None:
+                rep.setSize_(AppKit.NSMakeSize(18, 18))
+                img.addRepresentation_(rep)
+                found = True
+    if not found:
+        return None
+    img.setTemplate_(True)   # so it follows light/dark menu bars and the highlight
+    _MENU_ICON_CACHE[name] = img
+    return img
 
 
 def _apply_glyph(button, glyph: str) -> None:
-    name = _SYMBOLS.get(glyph)
-    image = None
-    if name and hasattr(AppKit.NSImage, "imageWithSystemSymbolName_accessibilityDescription_"):
-        image = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, "MicMic")
+    icon_name = _MENU_ICONS.get(glyph)
+    image = _load_menu_icon(icon_name) if icon_name else None
+    if image is None:
+        name = _SYMBOLS.get(glyph)
+        if name and hasattr(AppKit.NSImage, "imageWithSystemSymbolName_accessibilityDescription_"):
+            image = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, "MicMic")
+            if image is not None:
+                image.setTemplate_(True)   # so it follows light/dark menu bars
     if image is not None:
-        image.setTemplate_(True)   # so it follows light/dark menu bars
         button.setImage_(image)
         button.setTitle_("")
     else:
@@ -2302,10 +2750,26 @@ class Delegate(AppKit.NSObject):
         self.showPanel_(None)
         return True
 
+    def aboutMicMic_(self, sender):
+        credit = "Understands you with Jev, by TypeSafe.\n" + HELP_URL + \
+                 "\nSupport: " + SUPPORT_EMAIL
+        options = {
+            AppKit.NSAboutPanelOptionApplicationName: "MicMic",
+            AppKit.NSAboutPanelOptionApplicationVersion: app_version(),
+            AppKit.NSAboutPanelOptionCredits: AppKit.NSAttributedString.alloc()
+                .initWithString_(credit),
+        }
+        AppKit.NSApp().orderFrontStandardAboutPanelWithOptions_(options)
+        AppKit.NSApp().activateIgnoringOtherApps_(True)
+
+    def openHelp_(self, sender):
+        AppKit.NSWorkspace.sharedWorkspace().openURL_(
+            Foundation.NSURL.URLWithString_(HELP_URL))
+
     def togglePause_(self, sender):
         paused = not LISTENER.paused
         LISTENER.set_paused(paused)
-        sender.setTitle_("Resume listening" if paused else "Pause listening")
+        sender.setTitle_(L("menu_resume" if paused else "menu_pause", LISTENER.locale))
 
     def listenNow_(self, sender):
         LISTENER.push_to_talk()

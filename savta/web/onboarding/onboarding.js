@@ -22,7 +22,12 @@
     {k:"accessibility", label:"obAx",     why:"obAxWhy",     icon:"ax"},
   ];
   const SVG = {
-    mic:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M6 11a1 1 0 0 0-2 0 8 8 0 0 0 7 7.94V21H9a1 1 0 0 0 0 2h6a1 1 0 0 0 0-2h-2v-2.06A8 8 0 0 0 20 11a1 1 0 0 0-2 0 6 6 0 0 1-12 0z"/></svg>',
+    // The REAL brand mark, unmodified (source: brand/menubar/orb-mic.svg, kept
+    // in sync by hand): the exact paths from brand/micmic-mark.svg, wrapped in
+    // an outer transform mapping them into this 24x24 box. Same bounding box
+    // as the mic glyph it replaces, so every rule sizing/coloring
+    // .ob-mcore/.ob-ocore below keeps working unchanged.
+    mic:'<svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><g transform="translate(-3.604362,-3.597242) scale(0.01523844)"><g transform="translate(0.000000,2048.000000) scale(0.100000,-0.100000)"><path d="M8120 16399 c-247 -32 -522 -135 -729 -273 -387 -259 -651 -656 -752 -1131 l-24 -110 0 -2095 0 -2095 23 -108 c51 -242 158 -493 289 -677 83 -116 250 -291 358 -375 204 -159 442 -270 705 -327 93 -20 132 -22 335 -22 199 0 243 3 329 22 460 102 838 359 1098 749 118 176 217 421 260 647 22 111 22 115 26 2106 3 2073 3 2107 -39 2308 -167 812 -882 1399 -1694 1391 -66 -1 -149 -5 -185 -10z"/><path d="M11960 16400 c-495 -68 -937 -343 -1211 -752 -171 -257 -267 -525 -299 -837 -14 -141 -14 -3884 0 -4036 29 -299 121 -571 273 -803 263 -401 642 -663 1107 -764 92 -19 133 -22 330 -22 252 0 336 12 539 80 653 217 1131 843 1169 1531 4 66 6 1000 6 2075 -1 1802 -3 1961 -19 2057 -46 282 -153 539 -318 771 -77 107 -266 299 -375 378 -203 149 -436 251 -691 303 -111 22 -406 33 -511 19z"/><path d="M5275 13021 c-150 -54 -249 -174 -275 -333 -13 -83 -13 -1862 0 -2063 27 -400 122 -745 306 -1107 489 -962 1578 -1749 2964 -2143 405 -115 920 -209 1313 -240 l87 -7 0 -1114 0 -1113 -777 -3 -778 -3 -65 -23 c-176 -64 -308 -193 -378 -370 -24 -61 -26 -82 -30 -244 l-4 -178 2601 0 2601 0 0 150 c0 180 -9 229 -63 339 -76 156 -214 268 -383 311 -74 19 -113 20 -831 20 l-753 0 0 1115 c0 1114 0 1115 20 1115 106 0 558 60 793 106 1223 236 2275 764 2982 1495 274 283 509 627 647 947 137 318 205 605 228 958 14 221 13 1992 -1 2069 -24 131 -109 242 -227 298 l-67 32 -502 3 -503 3 0 -411 0 -410 235 0 235 0 0 -784 c0 -858 -2 -905 -59 -1127 -69 -274 -224 -574 -427 -829 -95 -120 -349 -370 -479 -474 -143 -114 -415 -294 -585 -388 -634 -352 -1405 -578 -2260 -665 -247 -25 -919 -25 -1170 0 -554 55 -1088 170 -1549 333 -645 230 -1237 591 -1622 991 -312 325 -516 672 -610 1042 -56 221 -59 269 -59 1122 l0 779 235 0 235 0 0 410 0 410 -487 0 c-445 -1 -492 -2 -538 -19z"/></g></g></svg>',
     wave:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 10v4M8.25 7v10M12 3.5v17M15.75 7v10M19.5 10v4" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"/></svg>',
     ax:'<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="4.4" r="2.2"/><path d="M4.1 8.4a1.1 1.1 0 0 1 1.3-.9l6.6 1.3 6.6-1.3a1.1 1.1 0 1 1 .4 2.2l-4.9 1v3.2l2 6.4a1.1 1.1 0 0 1-2.1.7L12 15.4l-2 5.6a1.1 1.1 0 0 1-2.1-.7l2-6.4v-3.2l-4.9-1a1.1 1.1 0 0 1-.9-1.3z"/></svg>',
     check:'<svg viewBox="0 0 24 24" aria-hidden="true"><path class="ck" d="M5 12.6l4.3 4.3L19 7.2"/></svg>',
@@ -82,17 +87,7 @@
               </span>
             </div>
             <div class="ob-kbd">
-              <div class="ob-row">
-                <span class="ob-key ob-space"></span>
-                <span class="ob-key ob-mod"><em>⌘</em><small>command</small></span>
-                <span class="ob-key ob-hot"><em>⌥</em><small>option</small><span class="ob-ripple"></span></span>
-                <span class="ob-arrows">
-                  <span class="ob-key ob-half">${SVG.tri}</span>
-                  <span class="ob-col"><span class="ob-key ob-half ob-up">${SVG.tri}</span>
-                    <span class="ob-key ob-half ob-down">${SVG.tri}</span></span>
-                  <span class="ob-key ob-half ob-right">${SVG.tri}</span>
-                </span>
-              </div>
+              <div class="ob-row"></div>
             </div>
           </div>
         </div>
@@ -122,7 +117,8 @@
         <h2 class="ob-title" tabindex="-1" data-t="ob3Title"></h2>
         <p class="ob-sub" data-t="ob3Sub"></p>
         <p class="ob-quote"><span class="ob-qcheck">${SVG.check}</span><span class="ob-qtext" data-t="ob3Phrase"></span></p>
-        <p class="ob-hint ob-nokey" data-t="obNoKey" hidden></p>
+        <p class="ob-hint ob-nokey" hidden><span data-t="obNoKey"></span>
+          <button type="button" class="ob-on ob-axon" data-pane="accessibility" data-t="obTurnOn"></button></p>
       </section>
     </div>
     <div class="ob-foot">
@@ -137,10 +133,67 @@
     <p class="ob-sr" aria-live="polite"></p>`;
   }
 
+  // ------------------------------------------------------------------ the keyboard
+  // The part of a Mac keyboard around the shortcut she has, with that key (or every
+  // key of a combination) the one that presses. Right Option is where a new Mac starts.
+  const KEY = {
+    cmd:   {em:"⌘", sm:"command", w:"ob-mod"},
+    alt:   {em:"⌥", sm:"option",  w:"ob-mod"},
+    ctrl:  {em:"⌃", sm:"control", w:"ob-mod"},
+    shift: {em:"⇧", sm:"shift",   w:"ob-wide"},
+    fn:    {em:"fn", sm:"globe",  w:"ob-fn"},
+  };
+  const ROWS = {
+    "right-option":  [["cmd"], ["alt", 1], "arrows"],
+    "right-command": [["cmd", 1], ["alt"], "arrows"],
+    "right-control": [["alt"], ["ctrl", 1], "arrows"],
+    "right-shift":   [["shift", 1], "arrows"],
+    "fn-fn":         [["fn", 1], ["ctrl"], ["alt"], ["cmd"]],
+  };
+  function keyHTML(k, hot){
+    const d = KEY[k] || {em:String(k).toUpperCase(), sm:"", w:"ob-letter"};
+    return `<span class="ob-key ${d.w}${hot ? " ob-hot" : ""}"><em>${d.em}</em>` +
+      (d.sm ? `<small>${d.sm}</small>` : "") + (hot ? '<span class="ob-ripple"></span>' : "") + "</span>";
+  }
+  function kbdRow(){
+    const spec = window.hotkeySpec ? window.hotkeySpec() : "right-option";
+    // a combination (cmd+shift+m): just its keys, all of them pressed together
+    const row = ROWS[spec] || String(spec).split("+").map(k => [k, 1]);
+    return row.map(k => k === "arrows" ? `
+      <span class="ob-arrows">
+        <span class="ob-key ob-half">${SVG.tri}</span>
+        <span class="ob-col"><span class="ob-key ob-half ob-up">${SVG.tri}</span>
+          <span class="ob-key ob-half ob-down">${SVG.tri}</span></span>
+        <span class="ob-key ob-half ob-right">${SVG.tri}</span>
+      </span>` : keyHTML(k[0], k[1])).join("");
+  }
+
   // ------------------------------------------------------------------ copy
+  // The copy is written for ⌥, the shortcut a new Mac starts with. Anything else she
+  // has picked is the key these screens name instead.
+  // Fn is a double tap and a combination is a press, not a key held on the right, so
+  // those get their own sentences, and the tap-once hint (a right-hand key's) goes.
+  const TOGGLE = {
+    fn:    {ob1Title:"ob1TitleFn", ob1Sub:"ob1SubFn", ob3Sub:"ob3SubFn", ob1Tap:null},
+    combo: {ob1Title:"ob1TitlePress", ob1Sub:"ob1SubPress", ob3Sub:"ob3SubPress", ob1Tap:null},
+  };
+  function say(k){
+    const spec = window.hotkeySpec ? window.hotkeySpec() : "right-option";
+    const kind = spec === "fn-fn" ? "fn" : /^right-/.test(spec) ? null : "combo";
+    if(kind && k in TOGGLE[kind]){
+      if(TOGGLE[kind][k] === null) return "";
+      k = TOGGLE[kind][k];
+    }
+    const s = t(k), g = window.hotkeyGlyph ? window.hotkeyGlyph() : "⌥";
+    return g === "⌥" || typeof s !== "string" ? s : s.split("⌥").join(g);
+  }
+
   function paint(){
     if(!root) return;
-    for(const el of qa("[data-t]")) el.textContent = t(el.dataset.t);
+    for(const el of qa("[data-t]")) el.textContent = say(el.dataset.t);
+    q('[data-t="ob1Tap"]').hidden = !q('[data-t="ob1Tap"]').textContent;
+    const row = q(".ob-row"), keys = kbdRow();
+    if(row.dataset.keys !== keys){ row.innerHTML = keys; row.dataset.keys = keys; }
     for(const el of qa("[data-aria]")) el.setAttribute("aria-label", t(el.dataset.aria));
     root.setAttribute("aria-label", t("obDialog"));
     const prog = q(".ob-prog");
@@ -195,7 +248,7 @@
       row.dataset.s = s;
       const why = row.querySelector("small");
       why.dataset.t = s === "not_asked" ? "obAsked" : s === "unknown" ? "obUnknown" : p.why;
-      why.textContent = t(why.dataset.t);
+      why.textContent = say(why.dataset.t);
       row.querySelector(".ob-sr").textContent =
         `${t(p.label)}: ${t(s === "granted" ? "obOn" : "obOff")}`;
     }
@@ -256,7 +309,7 @@
     pill.dataset.live = s;
     const label = pill.querySelector("span");
     label.dataset.t = s === "thinking" ? "think" : "obWaiting";
-    label.textContent = t(label.dataset.t);
+    label.textContent = say(label.dataset.t);
   }
 
   function success(heard){
@@ -270,7 +323,7 @@
     const qt = s3.querySelector(".ob-qtext");
     delete qt.dataset.t; qt.textContent = heard;
     for(const el of [title, sub]){
-      el.textContent = t(el.dataset.t);
+      el.textContent = say(el.dataset.t);
       el.classList.remove("ob-swap"); void el.offsetWidth; el.classList.add("ob-swap");
     }
     q(".ob-nokey").hidden = true;
@@ -355,14 +408,19 @@
     document.removeEventListener("keydown", swallow);
     removeEventListener("pointerdown", onPointer, true);
     // The language pill slides home rather than jumping when the gear comes back.
-    const lang = $("lang");
+    // "+" and the gear wait until it has passed: shown at once, the pill slid across
+    // the gear on its way.
+    const lang = $("lang"), after = [$("gear"), $("newchat")];
     lang.style.transition = "right .45s cubic-bezier(.22,1,.36,1)";
+    after.forEach(el => { el.style.transition = "opacity .3s ease"; el.style.opacity = "0"; });
     root.classList.add("out");
     document.body.classList.remove("onboarding");
     const r = root;
     setTimeout(() => {
       r.remove();
       lang.style.transition = "";
+      after.forEach(el => { el.style.opacity = ""; });
+      setTimeout(() => after.forEach(el => { el.style.transition = ""; }), 320);
       root = null;
       window.onboardingLanguage = null;
       try{ $("typebox").focus(); }catch(_){}

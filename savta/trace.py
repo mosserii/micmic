@@ -26,7 +26,12 @@ SIGNALS = ("intent", "intent_confidence", "is_complete", "noise", "emergency",
            "distress", "rejects_last", "is_compound", "needs_knowledge",
            "asking_for_notes", "about_clock", "about_weather", "control_action",
            "control_confidence", "inside_an_app", "money_involved", "sounds_coached",
-           "speaker_gender", "setting_emergency_contact")
+           "speaker_gender", "setting_emergency_contact",
+           # Where a message's person and words came from. Without these the owner's
+           # "send her on WhatsApp" asking who could not be told apart in the trace
+           # from a name that was not in her book.
+           "contact_named", "refers_back", "has_message_content", "amends_message",
+           "write_in")
 
 
 def write(turn: dict) -> None:
