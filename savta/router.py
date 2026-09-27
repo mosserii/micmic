@@ -15,13 +15,18 @@ from . import trace
 from . import memory as longterm
 from .brain import understand, pick_span, pick_result, pick_from
 from .actions import youtube as yt
+from .actions import music as am
+from .actions import targets as tg
 from .actions import mac
 from .actions import contacts as book
 from .actions import facts
+from .actions import live
 from .actions import web
+from .actions.guide import GUIDE
 from .llm import LLM
 from . import profile as prof
 from . import paths
+from . import prefs
 
 ACT_ON_INTENT = 0.55        # below this we ask her instead of guessing
 # Deliberately NOT gating on the Choice confidence here. When twenty classical-music
@@ -257,6 +262,42 @@ _TRAILER_WORDS = ("trailer", "טריילר", "קדימון", "трейлер", "
 _TRAILER_HINT = {"hebrew": "טריילר", "arabic": "تريلر", "russian": "трейлер",
                  "english": "official trailer"}
 
+# "screenshot" and its translations, matched literally rather than asked of Jev.
+# brain.understand() sends every question in one request, and Jev's answers are keyed
+# in tests/replay.py by state+questions together: adding a question here would change
+# that shape for every single call this codebase makes, which would invalidate the
+# whole recorded suite. These words are specific enough (no other command in this file
+# uses them) that a plain substring match is exactly as reliable, and it costs nothing.
+_SCREENSHOT_WORDS = (
+    "screenshot", "screen shot", "screen-shot",
+    "capture the screen", "capture my screen",
+    "picture of the screen", "picture of my screen",
+    "צילום מסך", "צילום המסך", "לצלם את המסך", "צלמי מסך", "צלם מסך",
+    "תצלמי את המסך", "תצלם את המסך", "תצלמי מסך", "תצלם מסך",
+    "لقطة شاشة", "لقطة للشاشة", "صورة للشاشة", "صورة الشاشة",
+    "التقطي لقطة", "التقط لقطة", "خذ لقطة", "خدي لقطة",
+    "скриншот", "снимок экрана",
+)
+# Only consulted once _SCREENSHOT_WORDS has already matched: which part of the screen.
+_SCREENSHOT_WINDOW_WORDS = (
+    "this window", "the window", "front window", "current window",
+    "החלון הזה", "את החלון", "לחלון הזה", "החלון הנוכחי",
+    "هالشباك", "هذه النافذة", "النافذة هاي", "النافذة الحالية",
+    "это окно", "текущее окно", "данное окно", "этого окна",
+)
+
+# She dragged a region (or selected text) herself while the interactive capture below
+# was still waiting for her, and says so instead of waiting for the crosshair. Kept
+# literal, like the two tuples above, for the same reason: no new Jev question.
+_I_SELECTED_WORDS = (
+    "i selected it", "i selected", "selected it", "i picked it", "i chose it",
+    "this, i selected", "i already selected",
+    "בחרתי", "בחרתי את זה", "סימנתי", "סימנתי את זה", "כבר בחרתי", "כבר סימנתי",
+    "خيرتها", "اخترتها", "حددتها", "انتقيتها", "خيرت", "حددت",
+    "я выделил", "я выделила", "я выбрал", "я выбрала", "выделила это", "выбрала это",
+    "уже выделил", "уже выделила",
+)
+
 
 def _says_any(utterance: str, words) -> bool:
     low = (utterance or "").lower()
@@ -300,6 +341,173 @@ def save_settings(changes: dict) -> dict:
     return merged
 
 
+# ---------------------------------------------------------------------------
+# Standing preferences (savta/prefs.py). The questions ride in the one understanding
+# request, and only when her words could be about a preference; this turns the
+# answers into a stored choice and a line to say. Templates only: no model writes
+# anything here, and the knobs are applied by plain code where each decision is made.
+# Measured 2026-09-27, n=2 each, live: pref_kind read 1.00 on all eight rule, recall
+# and preference sentences (EN, HE). pref_breaks_rule read 0.02-0.03 for "call Dana"
+# at 10:00 against "don't call anyone after 10pm". Neither has a measured opposite
+# side yet (an ordinary "always" sentence; a call at 23:00), so both gates sit at a
+# conservative middle until that run exists.
+PREF_GATE = 0.6
+RULE_BREAK_GATE = 0.6
+# She named text messages rather than leaving the app unsaid: the channel question
+# answers "imessage" for both, so only these words make it her choice this time.
+_TEXT_WORDS = ("text", "sms", "imessage", "i message", "טקסט", "סמס", "מסרון",
+               "نصية", "sms", "смс", "эсэмэс")
+
+
+def _pref_names(canonical: str, lang: str) -> dict:
+    who = display_name(canonical, lang)
+    return {"who": who, "at_he": with_prefix("ל", who, "hebrew"),
+            "at_ar": with_prefix("لـ", who, "arabic")}
+
+
+def _standing_turn(j: Jev, u: dict, utterance: str, lang: str) -> dict | None:
+    """She stated, asked about, or asked to forget a standing preference. Returns
+    {"did", "say", "detail", "lang"?, "undo"?}, or None when this is not such a turn."""
+    st = u.get("standing") or {}
+    k = st.get("pref_kind") or {}
+    kind, conf = k.get("choice"), float(k.get("confidence") or 0.0)
+    if kind in (None, "none") or conf < PREF_GATE:
+        return None
+
+    def pick(q: str) -> str:
+        return (st.get(q) or {}).get("choice") or "not_said"
+
+    before_prefs, before_hint = prefs.load(), load_settings().get("language_hint")
+    before_habits = longterm.load() if kind == "forget_all" else None
+
+    def put_back():
+        prefs.save(before_prefs)
+        if kind == "speech_language":
+            save_settings({"language_hint": before_hint or "en-US"})
+        if before_habits is not None:
+            longterm.restore(before_habits)
+        return True
+
+    def done(did: str, text: str, undoable: bool = True, **detail) -> dict:
+        out = {"did": did, "say": text,
+               "detail": {"preference": kind, "confidence": round(conf, 2), **detail}}
+        if undoable:
+            out["undo"] = _offer_undo("preference", detail.get("lang_to") or lang,
+                                      put_back, prefs.UNDONE)
+        return out
+
+    def huh() -> dict:
+        return done("preference_unclear", prefs.say(lang, "huh"), undoable=False)
+
+    if kind == "message_app":
+        app = pick("pref_app")
+        if app not in prefs.APPS:
+            app = "whatsapp" if u.get("channel") == "whatsapp" else None
+        if not app:
+            return huh()
+        who = None
+        if u.get("contact_named", 0) >= 0.5 and u.get("contact") not in (None, "nobody"):
+            # Jev picks the nearest row even for a name not in her book.
+            if _same_person(j, utterance, u["contact"]) < SAME_PERSON_GATE:
+                return done("preference_unclear", prefs.say(lang, "who_unknown"),
+                            undoable=False, why="could not match that name to a contact")
+            who = u["contact"]
+        prefs.set_app(app, who)
+        by = prefs.BY.get(lang, prefs.BY["english"])[app]
+        text = (prefs.say(lang, "app_one", by=by, **_pref_names(who, lang)) if who
+                else prefs.say(lang, "app_all", by=by))
+        return done("preference_set", text, app=app, person=who)
+
+    if kind == "video_site" and pick("pref_site") in prefs.SITES:
+        site = pick("pref_site")
+        prefs.set_site(site)
+        # Only YouTube is searched. Say so rather than pretend.
+        text = (prefs.say(lang, "site_youtube") if site == "youtube" else
+                prefs.say(lang, "site_only_youtube",
+                          site=prefs.SITE_NAME.get(lang, prefs.SITE_NAME["english"])[site]))
+        return done("preference_set", text, site=site, searchable=site == "youtube")
+
+    if kind == "music_app":
+        app = pick("pref_music")
+        if app not in prefs.MUSIC_APPS:
+            return huh()
+        prefs.set_music_app(app)
+        return done("preference_set", prefs.say(
+            lang, "music_set", app=prefs.MUSIC_NAME.get(lang, prefs.MUSIC_NAME["english"])[app]),
+            music_app=app)
+
+    if kind == "speech_language":
+        to = pick("pref_language")
+        if to not in prof.LANG_TO_SPEECH:
+            return huh()
+        # The Settings value itself: the listener reads it on its next turn.
+        save_settings({"language_hint": prof.LANG_TO_SPEECH[to]})
+        out = done("preference_set",
+                   prefs.say(to, "language", lang_in=prefs.LANG_IN[to][to]),
+                   language_hint=prof.LANG_TO_SPEECH[to], lang_to=to)
+        out["lang"] = to
+        return out
+
+    if kind == "confirm_send":
+        c = pick("pref_confirm")
+        if c not in ("always_ask", "no_need"):
+            return huh()
+        prefs.set_confirm(c == "always_ask")
+        return done("preference_set", prefs.say(
+            lang, "confirm_always" if c == "always_ask" else "confirm_normal"), confirm=c)
+
+    if kind == "volume_limit":
+        v = pick("pref_volume")
+        if v not in ("low", "medium", "no_limit"):
+            return huh()
+        prefs.set_volume_cap(v)
+        cap, now = prefs.volume_cap(), None
+        if cap:
+            now = mac.get_volume()
+            if now is not None and now > cap:
+                mac.set_volume(cap)       # "keep it low" starts now
+        return done("preference_set", prefs.say(
+            lang, {"low": "volume_low", "medium": "volume_medium"}.get(v, "volume_free")),
+            volume_max=cap, lowered_from=now if cap and now and now > cap else None)
+
+    if kind in ("other_rule", "video_site"):
+        # Her own words: the span Jev picked from this sentence, else the sentence.
+        span = ((u.get("spans") or {}).get("pref_rule") or (None, 0.0))[0]
+        if span:
+            # The candidates drop punctuation ("don't" became "don t"): keep the words
+            # exactly as the sentence has them.
+            m = re.search(r"\W+".join(map(re.escape, span.split())), utterance, re.I)
+            span = m.group(0) if m else span
+        rule = prefs.add_rule(span or utterance)
+        if not rule:
+            return huh()
+        return done("preference_set", prefs.say(lang, "rule", rule=rule), rule=rule)
+
+    if kind == "recall":
+        hint = str(load_config().get("language_hint") or "")
+        text = prefs.recall(lang, _pref_names, prof.load(), prof.SPEECH_TO_LANG.get(hint),
+                            longterm.summary(), shown=display_name)
+        return done("recalled", text, undoable=False, items=len(prefs.items()))
+
+    if kind == "forget_one":
+        if not prefs.items():
+            return done("nothing_to_forget", prefs.say(lang, "forget_nothing"),
+                        undoable=False)
+        target = prefs.forget_target(st)
+        gone = prefs.forget(target) if target else None
+        if not gone:
+            return done("forget_which", prefs.say(lang, "forget_which"), undoable=False)
+        return done("forgot", prefs.say(lang, "forgot",
+                                        what=prefs.item_line(gone, lang, _pref_names)),
+                    forgot=gone["id"])
+
+    if kind == "forget_all":
+        prefs.forget_all()
+        longterm.forget_all()
+        return done("forgot_all", prefs.say(lang, "forgot_all"))
+    return None
+
+
 # When she asks for music and names nothing. Neutral, and in her language, because a
 # mixed-language query ranks badly on YouTube.
 _ANY_MUSIC = {"hebrew": "שירים יפים", "english": "popular songs",
@@ -316,6 +524,214 @@ def _something_she_likes(kind: str, lang: str) -> str:
         if fav.strip().lower() != now:
             return fav
     return _ANY_MUSIC.get(lang, _ANY_MUSIC["english"])
+
+
+# ---------------------------------------------------------------- music apps
+# "please put 1969 song on apple music" played "1969" on YouTube: nothing asked where.
+# A player she names wins; otherwise her stored preference for songs; otherwise
+# YouTube, as before. See actions/music.py for what each app can and cannot do.
+PLAYER_GATE = 0.5          # also for any named place (_named_place, actions/targets.py)
+IN_APP = ("apple_music", "spotify")
+_SONG_PICK = (
+    "She asked for: {want}. Choose the one song that is what she asked for. Prefer the "
+    "original recording by the artist she named, or else by the best-known artist, over "
+    "a cover, karaoke, instrumental, tribute, remix or live version, unless she asked "
+    "for one of those. If she named only a singer, choose one of that singer's "
+    "best-known songs. A song already in her library is as good as the catalog one.")
+
+
+def _music_pref() -> str:
+    """Where she likes songs played, if she has said (savta/prefs.py)."""
+    try:
+        return prefs.music_app()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _named_place(u: dict) -> str:
+    """The app, website or service she named as where to do it, or "" (see
+    actions/targets.py). Asked only when her words hold such a name."""
+    k = u.get("named_app", "none")
+    return k if k != "none" and u.get("named_app_confidence", 0.0) >= PLAYER_GATE else ""
+
+
+def _media_player(u: dict, intent: str, correcting: bool) -> str:
+    named = _named_place(u)
+    if named in tg.PLAYERS + tg.VIDEO:
+        return named
+    # "No, I meant ...", "change it to <someone else>" over what MicMic put on stays
+    # where that is playing: Music, Spotify, YouTube, or the service it opened. And
+    # while a song plays in Music or Spotify, the next song asked for goes there too.
+    # The owner's session (1.1.0): after a song in Apple Music, asking for another
+    # artist had no player to go to.
+    last = (MEM.last_played or {}).get("player")
+    if last in tg.PLAYERS + tg.VIDEO and (correcting or (intent == "music"
+                                                          and last in IN_APP)):
+        return last
+    if intent == "music" and _music_pref() in IN_APP:
+        return _music_pref()
+    return "youtube"
+
+
+# Intents a named website or program is done for here. Watching and music go to the
+# media path, messages and calls to theirs; closing, stopping, the screen, notes and
+# the rest are not about a place at all ("close Spotify" must still close it).
+_PLACE_INTENTS = ("look_up", "do_online", "open_app", "chitchat", "unclear", "help")
+_PLACE_FITS = {"video": ("watch", "music"), "music": ("watch", "music"),
+               "messenger": ("message", "call")}
+
+
+def _app_query(u: dict, utterance: str, place: str = "") -> str:
+    """What to look for in the place she named: the part of the sentence chosen as
+    that, else her words without the place and the asking words, else, for "search it
+    on eBay", what was last looked for or played."""
+    got = ((u.get("spans") or {}).get("app_query") or (None, 0.0))[0]
+    q = tg.without_place(got or "", place)
+    q = "" if tg.is_pronoun(q) else q
+    q = q or tg.query_from(utterance, place)
+    if not q and u.get("refers_back", 0) > 0.5:
+        q = MEM.app_query or MEM.play_query or ""
+    return q
+
+
+def _open_chat(chan: str, contact: str, text: str, lang: str,
+               picture: bool = False) -> tuple[str, str, dict]:
+    """Telegram or Signal: MicMic has no way to send through them, so the words go on
+    the clipboard, her chat with that person is opened (or the app, or its website),
+    and she is told the two keys that send it. Never said to be sent. `picture`: a
+    screenshot is already on the clipboard, and it is what she pastes."""
+    who = display_name(contact, lang)
+    res = tg.open_chat(chan, contact_number(contact), "" if picture else text)
+    det = {"to": contact, "display": who, "channel": chan, "text": text, **res}
+    if not res["opened"]:
+        return (("not_installed", tg.chat_line(chan, "missing", lang, who), det)
+                if res["how"] == "missing"
+                else ("app_failed", tg.line("chat_failed", lang, app=tg.label(chan, lang)), det))
+    if picture:
+        return "opened_chat", _sp(lang, "paste_it", who=for_speech("sent", contact, lang)), det
+    return "opened_chat", tg.chat_line(chan, res["how"], lang, who), det
+
+
+def _song_label(r: dict) -> str:
+    s = f"{r['title']}, by {r['artist'] or 'unknown'}"
+    if r.get("album") and r["album"] != r["title"]:
+        s += f", from {r['album']}"
+    if r.get("year"):
+        s += f" ({r['year']})"
+    return s + (" [already in her library]" if r["where"] == "library" else "")
+
+
+def _catalog_for(terms: list[str]) -> tuple[list[dict] | None, str]:
+    """Every search at once; the songs found, each marked with the words that found
+    it, and the first words that found anything. None when Apple was unreachable."""
+    later = [(t, _in_parallel(am.catalog, t)) for t in terms]
+    rows, reached, first = [], False, ""
+    for t, got in later:
+        found = got()
+        reached = reached or found is not None
+        if found and not first:
+            first = t
+        rows += [{**r, "term": t} for r in found or []
+                 if not any(r["id"] == o["id"] for o in rows)]
+    return (rows if reached else None), first
+
+
+def _play_in_app(j: Jev, app: str, subject: str, utterance: str, lang: str,
+                 named: bool = True) -> tuple[str, str, dict]:
+    """Find the song and play it in Music, or open it in Spotify (its web player when
+    the app is not on this Mac).
+
+    Returns (did, say, detail). One Jev round trip, the same
+    as the YouTube path: her library and Apple's catalog are searched at once, and
+    Jev picks among the real songs found, against her whole sentence.
+
+    `named`: `subject` is the name she said, not a guess from what she likes.
+    Measured (6 real calls): with "on apple music" in the sentence the name span
+    came back empty for "put 1969 song on apple music" and as "תשימי 1969" for
+    "תשימי 1969 באפל מיוזיק", so the catalog is also searched for her own words
+    without the asking ones (am.search_terms)."""
+    web = app == "spotify" and not am.spotify_installed()
+    phrases, words = am.search_terms(subject if named else None, utterance)
+    if not phrases:
+        phrases = [am.without_player(subject) or subject]    # what she likes
+    lib_later = _in_parallel(am.library, phrases[-1]) if app == "apple_music" else None
+    found, term = _catalog_for(phrases)
+    if found is not None and not found and words:
+        found, term = _catalog_for(words)
+    term = term or phrases[0]
+    lib = lib_later() if lib_later else []
+    base = {"player": app, "query": term, "searched": phrases + words,
+            "library_hits": len(lib), "catalog_hits": -1 if found is None else len(found),
+            **({"web": True} if web else {})}
+
+    def words_only() -> tuple[str, str, dict]:
+        am.spotify_search(term, web=web)
+        MEM.played(term, "song_or_music", False,
+                   {"id": f"sp:{term}", "title": term, "player": "spotify"}, lang)
+        return "opened_in_app", am.line("spotify_web_words" if web else "spotify_words",
+                                        lang, q=term), base
+
+    if found is None and not lib:
+        return (words_only() if app == "spotify"
+                else ("not_found", am.line("unreachable", lang), base))
+    rows = [r for r in lib if r["id"] not in MEM.rejected]
+    rows += [r for r in found or [] if r["id"] not in MEM.rejected
+             and not any(am.same_song(r, o) for o in lib)]
+    pick = None
+    if rows:
+        pick, pconf, good = pick_from(j, rows, _song_label,
+                                      _SONG_PICK.format(want=f"{term}, as a song"),
+                                      {"she_asked_for": term, "her_words": utterance})
+        base.update(pick_conf=round(pconf, 2), any_good=round(good, 2))
+    if not pick:
+        return (words_only() if app == "spotify"
+                else ("not_found", am.line("not_found", lang, q=term), base))
+    # "Another one" searches again for the words that found this one.
+    query = pick.get("term") or term
+    said = {"title": pick["title"], "artist": pick["artist"] or "?"}
+    # The page's card shows `thumb` for anything playing: the album cover here.
+    base.update(title=pick["title"], artist=pick["artist"], album=pick.get("album"),
+                **({"thumb": pick["art"]} if pick.get("art") else {}))
+    if app == "spotify":
+        am.spotify_search(f"{pick['title']} {pick['artist']}", web=web)
+        MEM.played(query, "song_or_music", False, {**pick, "player": "spotify"}, lang)
+        return "opened_in_app", am.line("spotify_web" if web else "spotify_search",
+                                        lang, **said), base
+    own = pick if pick["where"] == "library" else (am.in_library(pick, lib)
+                                                     or am.in_library(pick))
+    if own:
+        ok, info = am.play_library(own["pid"])
+        base.update(where="library", **info)
+        if ok:
+            MEM.played(query, "song_or_music", False, {**pick, "player": app}, lang)
+            return "playing", am.line("playing", lang, **said), base
+        if not pick.get("url"):
+            return "not_started", am.line("not_started", lang, **said), base
+    # Only in the catalog, or her copy would not start: Music is put on the song and
+    # she presses play. Music cannot be told to play a catalog song from outside it
+    # (see actions/music.py), so she is not told it is playing.
+    base.update(where="catalog", opened=am.open_in_music(pick["url"]))
+    MEM.played(query, "song_or_music", False,
+               {**pick, "player": app, "open_only": True}, lang)
+    return "opened_in_app", am.line("press_play", lang, **said), base
+
+
+def _in_app_control(act: str, lang: str) -> tuple[str, str, dict] | None:
+    """pause / carry on / start again / skip for a song MicMic put on in an app.
+    None when what is playing is not in one."""
+    last = MEM.last_played or {}
+    app = last.get("player")
+    if app not in IN_APP:
+        return None
+    if last.get("open_only") and act not in ("pause", "stop"):
+        # Music is on the song but was never started; "play" there would start
+        # whatever it played last, not this.
+        return "opened_in_app", am.line("press_play", lang, title=last.get("title", ""),
+                                        artist=last.get("artist") or "?"), {"player": app}
+    ok, _ = (am.control if app == "apple_music" else am.spotify_control)(act)
+    return ("stopped" if act in ("pause", "stop") else act,
+            am.line("stopped", lang) if act in ("pause", "stop") else _sp(lang, "ok"),
+            {"player": app, "control": act, "done": ok})
 
 
 # ---------------------------------------------------------------- undo
@@ -399,6 +815,7 @@ _DONE = {
                 "russian": "Вернула яркость.", "english": "I put the brightness back."},
     "video":   {"hebrew": "סגרתי את הסרטון.", "arabic": "سكّرت الفيديو.",
                 "russian": "Закрыла видео.", "english": "I closed the video."},
+    "music":   am.LINES["stopped"],
     "timer":   {"hebrew": "ביטלתי את התזכורת.", "arabic": "لغيت التذكير.",
                 "russian": "Отменила напоминание.", "english": "I cancelled the reminder."},
     "send":    {"hebrew": "ביטלתי. ההודעה לא נשלחה.", "arabic": "لغيتها. الرسالة ما انبعتت.",
@@ -494,10 +911,14 @@ _SCREEN_SAY = {
                 "arabic": "حدّد«ي|» شو بدّك تبعت«ي|»، وبعدين اطلب«ي|» مرة تانية.",
                 "russian": "Выделите то, что хотите отправить, и попросите ещё раз.",
                 "english": "Select what you want to send, then ask me again."},
-    "no_event": {"hebrew": "לא מצאתי על המסך תאריך ושעה שאפשר להכניס ליומן.",
-                 "arabic": "ما لقيت عالشاشة تاريخ وساعة بنحطّهم بالرزنامة.",
-                 "russian": "Я не нашла на экране дату и время для календаря.",
-                 "english": "I could not find a date and time on the screen to put in your calendar."},
+    "no_event": {"hebrew": "לא מצאתי על המסך תאריך שאפשר להכניס ליומן.",
+                 "arabic": "ما لقيت عالشاشة تاريخ بنحطّه بالرزنامة.",
+                 "russian": "Я не нашла на экране дату для календаря.",
+                 "english": "I could not find a date on the screen to put in your calendar."},
+    "cal_time_ask": {"hebrew": "באיזו שעה? או שאני יכולה להוסיף את זה ליום שלם.",
+                     "arabic": "بأي ساعة؟ أو فيني ضيفها ليوم كامل.",
+                     "russian": "В какое время? Или я могу добавить на весь день.",
+                     "english": "What time? Or I can add it for the whole day."},
 }
 _SCREEN_SYSTEM = (
     "You are helping someone who is using a Mac. You are given what is on their screen "
@@ -522,6 +943,10 @@ _SCREEN_SAY.update({
                  "arabic": "بضيف عالرزنامة {title}، {when} الساعة {start}؟",
                  "russian": "Добавить в календарь «{title}», {when} в {start}?",
                  "english": "Shall I add {title} to your calendar, {when} at {start}?"},
+    "cal_ask_allday": {"hebrew": "להוסיף ליומן את {title}, {when}, ליום שלם?",
+                       "arabic": "بضيف عالرزنامة {title}، {when}، ليوم كامل؟",
+                       "russian": "Добавить в календарь «{title}», {when}, на весь день?",
+                       "english": "Shall I add {title} to your calendar, {when}, for the whole day?"},
     "cal_done": {"hebrew": "הוספתי ליומן את {title}.",
                  "arabic": "ضفت {title} عالرزنامة.",
                  "russian": "Добавила в календарь: {title}.",
@@ -550,6 +975,52 @@ _SCREEN_SAY.update({
                   "arabic": "ببعت {at_ar} رابط الصفحة المفتوحة. احكيلي«|» لأ وبوقّف.",
                   "russian": "Отправляю {who} ссылку на открытую страницу. Скажите «нет», и я не отправлю.",
                   "english": "Sending {who} the link to the page you have open. Say no and I will stop."},
+    # Screenshots have no undo: this project keeps no delete path anywhere (rule 2,
+    # tests/test_micmic.py t_no_delete_path), so a saved screenshot stays on the
+    # Desktop and nothing here ever offers to take that back.
+    "screenshot_saved": {"hebrew": "שמרתי צילום מסך בשולחן העבודה.",
+                         "arabic": "حفظت لقطة شاشة عالديسكتوب.",
+                         "russian": "Я сохранила скриншот на Рабочий стол.",
+                         "english": "Saved a screenshot to your Desktop."},
+    "screenshot_perm": {"hebrew": "אני עדיין לא יכולה לצלם את המסך. בהגדרות המערכת, תחת פרטיות ואבטחה ואז הקלטת מסך, צריך להדליק את MicMic.",
+                        "arabic": "لسا ما بقدر ألتقط صورة للشاشة. بإعدادات النظام، الخصوصية والأمان ثم تسجيل الشاشة، شغّل«ي|» MicMic.",
+                        "russian": "Я пока не могу сделать снимок экрана. В Системных настройках, в разделе Конфиденциальность и безопасность, Запись экрана, включите MicMic.",
+                        "english": "I cannot take a screenshot yet. In System Settings, under Privacy and Security then Screen Recording, turn MicMic on."},
+    "screenshot_failed": {"hebrew": "לא הצלחתי לצלם את המסך הפעם.",
+                          "arabic": "ما قدرت ألتقط صورة للشاشة هالمرة.",
+                          "russian": "На этот раз не получилось сделать снимок экрана.",
+                          "english": "I could not take a screenshot this time."},
+    # A short noun phrase, not a sentence: dropped into send_screenshot's {what}.
+    "this_screen": {"hebrew": "המסך", "arabic": "الشاشة", "russian": "экрана",
+                    "english": "your screen"},
+    "send_screenshot": {"hebrew": "שולחת {at_he} צילום מסך של {what}. תגיד«י|» לי לא ואני עוצרת.",
+                        "arabic": "ببعت {at_ar} صورة شاشة لـ {what}. احكيلي«|» لأ وبوقّف.",
+                        "russian": "Отправляю {who} скриншот {what}. Скажите «нет», и я не отправлю.",
+                        "english": "Sending {who} a screenshot of {what}. Say no and I will stop."},
+    # "ask before sending" (prefs.always_confirm()) reaching a screen-sourced send:
+    # no words of hers to quote, so {what} names what is being sent instead.
+    "what_selected": {"hebrew": "מה שסימנת", "arabic": "اللي حدّدت«ي|»ه",
+                      "russian": "то, что вы выделили", "english": "what you selected"},
+    "what_link": {"hebrew": "את הקישור לדף שפתוח", "arabic": "رابط الصفحة المفتوحة",
+                 "russian": "ссылку на открытую страницу",
+                 "english": "the link to the page you have open"},
+    "what_screenshot": {"hebrew": "צילום מסך של {what}", "arabic": "صورة شاشة لـ {what}",
+                        "russian": "скриншот {what}", "english": "a screenshot of {what}"},
+    "ask_screen_send": {"hebrew": "לשלוח {at_he} {what}? תגיד«י|» כן ואני שולחת.",
+                        "arabic": "أبعت {at_ar} {what}؟ قولي«|» نعم وببعتها.",
+                        "russian": "Отправить {who} {what}? Скажите «да», и я отправлю.",
+                        "english": "Shall I send {who} {what}? Say yes and I will send it."},
+    # What she gets when she drags a region herself, rather than a plain screenshot.
+    "the_part_you_picked": {"hebrew": "החלק שסימנת", "arabic": "الجزء اللي حدّدته",
+                            "russian": "выбранную часть", "english": "the part of the screen you picked"},
+    "drag_select": {"hebrew": "גרור/י על מה שאת«ה|» רוצה לשלוח.",
+                    "arabic": "اسحب«ي|» فوق اللي بدك تبعت«ي|»ه.",
+                    "russian": "Выделите то, что хотите отправить, перетащив рамку.",
+                    "english": "Drag over what you want to send."},
+    "select_cancelled": {"hebrew": "בסדר, לא שלחתי כלום.",
+                         "arabic": "ماشي، ما بعتت إشي.",
+                         "russian": "Хорошо, ничего не отправила.",
+                         "english": "Alright, nothing sent."},
 })
 def _ss(key: str, lang: str) -> str:
     t = _SCREEN_SAY[key]
@@ -568,6 +1039,15 @@ READ_ALOUD_MAX = 700
 SEND_SCREEN_MAX = 4000
 HIDDEN = "[hidden]"          # what screen.redact() puts where a secret was
 
+# A calendar event found on the screen with a date but no time ("Pyramids of Giza
+# (November 28, 2026)"): half-hour slots on the 24-hour clock, plain enough that no
+# per-language wording is needed (see "language" above for the same None-criteria
+# idiom), plus the two escapes. A Jev choice, never a second Gemini call.
+_TIME_CHOICES = {f"{h:02d}:{m:02d}": None for h in range(24) for m in (0, 30)}
+_TIME_CHOICES["all_day"] = ("The whole day, with no particular time: all day, the "
+                            "whole day, no specific time, any time.")
+_TIME_CHOICES["not_said"] = "She did not say a time and did not ask for the whole day."
+
 
 def _screen_context(max_chars: int = 6000) -> dict | None:
     """What is on her screen, or None when it cannot be read at all. Imported here so
@@ -585,6 +1065,47 @@ def _screen_shot(pid: int | None = None) -> bytes | None:
         return _scr.screenshot_png(pid=pid)
     except Exception:  # noqa: BLE001
         return None
+
+
+def _capture_screenshot(utterance: str) -> dict:
+    """Save a screenshot to the Desktop for `screen_task == "screenshot"`. The front
+    window when she asked for it ("this window", "החלון הזה", ...), the whole screen
+    otherwise. {"ok", "path", "why", "window", "app"} - "why" is only meaningful when
+    ok is False. Never raises: a build without the screen module still routes
+    everything else, exactly as _screen_context() already assumes."""
+    try:
+        from .actions import screen as _scr
+        fm = _scr.frontmost()
+        window = _says_any(utterance, _SCREENSHOT_WINDOW_WORDS)
+        pid = fm.get("pid") if window and fm.get("pid") else None
+        res = _scr.take_screenshot(pid=pid)
+    except Exception:  # noqa: BLE001
+        return {"ok": False, "why": "capture_failed", "window": False, "app": ""}
+    return {"ok": res.get("ok", False), "path": res.get("path", ""),
+            "why": res.get("why", ""), "window": window, "app": fm.get("app", "")}
+
+
+# The screenshot or dragged region she most recently captured, so "send it to
+# Dana" a few seconds after "take a screenshot" does not need the word
+# "screenshot" said again. Long enough to cover a genuine follow-up, short enough
+# that a screenshot from an hour ago never becomes "it" for an unrelated send.
+_LAST_SHOT: dict = {}
+LAST_SHOT_TTL = 300.0
+
+
+def _remember_shot(path: str, app: str, window: bool) -> None:
+    _LAST_SHOT.clear()
+    _LAST_SHOT.update(path=path, app=app, window=window, at=time.time())
+
+
+def _recent_screenshot() -> dict | None:
+    if not _LAST_SHOT.get("path"):
+        return None
+    if time.time() - _LAST_SHOT.get("at", 0) > LAST_SHOT_TTL:
+        return None
+    if not os.path.exists(_LAST_SHOT["path"]):
+        return None      # she may have moved or renamed it herself since
+    return dict(_LAST_SHOT)
 
 
 def _front_is_me(ctx: dict) -> bool:
@@ -630,19 +1151,24 @@ def _when_words(date: str, lang: str) -> str:
 
 
 def _event_from_screen(ctx: dict, lang: str) -> dict | None:
-    """One event with a date and a start time, read off the screen by the model, then
-    checked by code: a malformed date or a time like 25:00 is no event at all."""
+    """One event with a date, read off the screen by the model, then checked by
+    code: a malformed date or a time like 25:00 is no event at all. `start` may
+    come back "": "Pyramids of Giza (November 28, 2026)" names a day and nothing
+    else, and that is still an event - the caller asks her for a time, or for the
+    whole day, rather than throwing the date away because the model found no
+    clock reading anywhere near it."""
     import datetime as _dt
     import re as _re
     today = _dt.date.today()
     prompt = (
         f"Today is {today.isoformat()} ({today.strftime('%A')}).\n"
         "Find the one event on this screen she most likely means: a meeting, an "
-        "appointment, a flight, a booking, an invitation. Answer with JSON only, no "
-        'other words: {"title": short title in the language of the screen, "date": '
-        '"YYYY-MM-DD", "start": "HH:MM" in 24 hour time, "end": "HH:MM" or "", '
-        '"location": place or ""}. A relative date such as "next Tuesday" is resolved '
-        'from today. If there is no event with both a date and a start time, answer '
+        "appointment, a flight, a booking, an invitation, a show or a concert. "
+        "Answer with JSON only, no other words: {\"title\": short title in the "
+        'language of the screen, "date": "YYYY-MM-DD", "start": "HH:MM" in 24 hour '
+        'time or "" if no time is given anywhere near the date, "end": "HH:MM" or '
+        '"", "location": place or ""}. A relative date such as "next Tuesday" is '
+        'resolved from today. If there is no event with at least a date, answer '
         '{"none": true}.\n\n' + _screen_text(ctx))
     raw = _screen_llm(prompt, "You extract calendar events from screen text. JSON only.",
                       max_tokens=200)
@@ -660,7 +1186,8 @@ def _event_from_screen(ctx: dict, lang: str) -> dict | None:
     end, loc = str(ev.get("end") or ""), str(ev.get("location") or "").strip()[:160]
     try:
         d = _dt.date.fromisoformat(date)
-        _dt.time.fromisoformat(start if len(start) == 5 else "x")
+        if start:
+            _dt.time.fromisoformat(start if len(start) == 5 else "x")
         if end:
             _dt.time.fromisoformat(end if len(end) == 5 else "x")
     except ValueError:
@@ -985,6 +1512,7 @@ SPEECH = {
         "cant_search": "חיפשתי {q} ולא מצאתי כלום. אפשר להגיד את זה אחרת.",
         "exhausted": "זה כל מה שמצאתי על {q}. רוצה שאחפש משהו אחר?",
         "sent": "שלחתי {who}.", "send_failed": "ההודעה לא יצאה. תגיד«י|» לי שוב ואנסה עוד פעם.",
+        "paste_it": "צילום המסך מועתק. תלחצ«י|» Command-V ואז Enter כדי לשלוח אותו {who}.",
         "cancelled": "עצרתי. ההודעה לא נשלחה.",
         "who": "למי לשלוח?", "what": "מה לכתוב?",
         "not_sent": "בסדר, לא שלחתי.",
@@ -1007,6 +1535,7 @@ SPEECH = {
         "cant_search": "دوّرت على {q} وما لقيت إشي. احكيلي«|» بطريقة تانية.",
         "exhausted": "هاد كل اللي لقيته عن {q}. بدك أدوّر على إشي تاني؟",
         "sent": "بعتها {who}.", "send_failed": "ما قدرت أبعت الرسالة. احكيلي«|» وبجرّب كمان مرة.",
+        "paste_it": "صورة الشاشة منسوخة. اضغط«ي|» Command-V وبعدين Enter لتبعتها {who}.",
         "cancelled": "وقّفت. ما بعتت إشي.",
         "who": "لمين أبعت الرسالة؟", "what": "شو أكتب؟",
         "not_sent": "ماشي، ما بعتتها.",
@@ -1029,6 +1558,7 @@ SPEECH = {
         "cant_search": "Искала {q} и ничего не нашла. Скажите другими словами.",
         "exhausted": "Это всё, что я нашла по запросу {q}. Поискать что-то другое?",
         "sent": "Отправила {who}.", "send_failed": "Не получилось отправить. Скажите ещё раз, и я попробую.",
+        "paste_it": "Скриншот скопирован. Нажмите Command-V, потом Enter, чтобы отправить {who}.",
         "cancelled": "Остановила. Ничего не отправила.",
         "who": "Кому отправить?", "what": "Что написать?",
         "not_sent": "Хорошо, не отправила.",
@@ -1051,6 +1581,7 @@ SPEECH = {
         "cant_search": "I looked for {q} and found nothing. Try saying it another way.",
         "exhausted": "That is everything I found for {q}. Want me to look for something else?",
         "sent": "Sent to {who}.", "send_failed": "The message did not go out. Tell me again and I will try once more.",
+        "paste_it": "The screenshot is copied. Press Command-V then Enter to send it to {who}.",
         "cancelled": "Stopped. Nothing was sent.",
         "who": "Who should I send it to?", "what": "What should it say?",
         "not_sent": "Alright, I did not send it.",
@@ -1142,13 +1673,31 @@ def _fire_pending():
         timer.cancel()
     if not pend:
         return
-    if pend.get("channel") == "whatsapp":
-        ok, msg = mac.whatsapp(contact_number(pend["to"]) or pend["to"], pend["text"])
-    else:
-        ok, msg = mac.send_message(pend["to"], pend["text"])
     lang = pend.get("lang", "english")
-    mac.say(_sp(lang, "sent", who=for_speech("sent", pend["to"], lang)) if ok
-            else _sp(lang, "send_failed"), lang)
+    attachment = pend.get("attachment")
+    if attachment and pend.get("channel") == "whatsapp":
+        # WhatsApp desktop has no attach-a-file hook this project can drive (see
+        # mac.whatsapp_open_chat). The picture is already on the clipboard - copied
+        # the moment it was captured - so open the right chat and have her paste it
+        # herself, rather than announce a send that never actually happened.
+        ok, msg = mac.whatsapp_open_chat(contact_number(pend["to"]) or pend["to"])
+        said = (_sp(lang, "paste_it", who=for_speech("sent", pend["to"], lang)) if ok
+                else _sp(lang, "send_failed"))
+    elif pend.get("channel") in tg.OPEN_ONLY:
+        # Never sent by another app than the one she named: opened there, for her.
+        res = tg.open_chat(pend["channel"], contact_number(pend["to"]), pend["text"])
+        ok, msg = res["opened"], res["how"]
+        said = tg.chat_line(pend["channel"], res["how"] if ok else "missing", lang,
+                            display_name(pend["to"], lang))
+    elif pend.get("channel") == "whatsapp":
+        ok, msg = mac.whatsapp(contact_number(pend["to"]) or pend["to"], pend["text"])
+        said = (_sp(lang, "sent", who=for_speech("sent", pend["to"], lang)) if ok
+                else _sp(lang, "send_failed"))
+    else:
+        ok, msg = mac.send_message(pend["to"], pend["text"], attachment=attachment)
+        said = (_sp(lang, "sent", who=for_speech("sent", pend["to"], lang)) if ok
+                else _sp(lang, "send_failed"))
+    mac.say(said, lang)
     pend["result"] = msg
     _HISTORY.append({"did": "sent" if ok else "send_failed", **pend})
     # So a cancel that arrives a moment too late can tell her the truth instead of
@@ -1270,10 +1819,15 @@ SHORT_WORDS = 2          # a message this many words or fewer is confirmed first
 ASR_LOW_GATE = 0.5
 # Her answer to "send it?", a Jev choice of yes / no / neither. Only a sure yes sends.
 CONFIRM_YES_GATE = 0.6
+# Her answer to "what time, or the whole day?", a Jev choice among the half-hour
+# slots. Below this she is asked again rather than guessing a time she never said.
+EVENT_TIME_GATE = 0.4
 
 
 def _why_confirm(body: str, said_now: bool, asr_conf: float | None) -> str | None:
     """Why this message needs a yes rather than a countdown, or None if it does not."""
+    if prefs.always_confirm():
+        return "she_asked_to_be_asked"
     if not said_now:
         return "not_said_this_turn"
     if len(re.findall(r"\w+", body or "")) <= SHORT_WORDS:
@@ -1285,17 +1839,31 @@ def _why_confirm(body: str, said_now: bool, asr_conf: float | None) -> str | Non
 
 def _ask_to_send(to: str, body: str, lang: str, channel: str, why: str,
                  in_lang: str | None = None, held: bool = False,
-                 risky: bool = False) -> str:
+                 risky: bool = False, from_screen: str | None = None,
+                 shot_what: str | None = None, attachment: str | None = None) -> str:
     """Leave "send it?" open and return the line that asks it. A yes goes on to the
-    ordinary read-back and countdown (the longer one for a risky message)."""
+    ordinary read-back and countdown (the longer one for a risky message).
+
+    `from_screen` covers the case this was written for less than the one it grew
+    into: prefs.always_confirm() ("ask me before sending any message") now reaches
+    a screen-sourced send too (selected text, a link, or a screenshot), which has
+    no words of hers to quote back - so those get their own short description of
+    what is being sent instead of a quoted body.
+    """
     global AWAITING
     AWAITING = {"at": time.time(), "need": "confirm_send",
                 "question": "should I send this message", "contact": to, "body": body,
                 "channel": channel, "lang": lang, "in_lang": in_lang, "why": why,
-                "risky": risky, "intent": "message"}
-    MEM.remember_draft(to, body, channel, lang, in_lang)
+                "risky": risky, "intent": "message", "from_screen": from_screen,
+                "shot_what": shot_what, "attachment": attachment}
     who = display_name(to, lang)
     at_he, at_ar = with_prefix("ל", who, "hebrew"), with_prefix("لـ", who, "arabic")
+    if from_screen:
+        what_key = {"send_screen": "what_selected", "send_link": "what_link"}.get(from_screen)
+        what_txt = (_ss("what_screenshot", lang).format(what=shot_what or _ss("this_screen", lang))
+                   if from_screen == "send_screenshot" else _ss(what_key, lang))
+        return _ss("ask_screen_send", lang).format(who=who, at_he=at_he, at_ar=at_ar, what=what_txt)
+    MEM.remember_draft(to, body, channel, lang, in_lang)
     if held:
         return {
             "hebrew":  f"עצרתי את ההודעה {at_he}. לשלוח אותה בכל זאת? תגיד«י|» כן ואני שולחת.",
@@ -1406,7 +1974,7 @@ def turn_closed(speak: bool = True, turn_ts: float | None = None, sent: bool = F
 
 def _arm_send(to: str, text: str, lang: str, channel: str = "imessage",
               window: float | None = None, in_lang: str | None = None,
-              risky: bool = False):
+              risky: bool = False, attachment: str | None = None):
     global PENDING, _TIMER
     window = CANCEL_WINDOW if window is None else window
 
@@ -1431,7 +1999,7 @@ def _arm_send(to: str, text: str, lang: str, channel: str = "imessage",
             _TIMER = None
         PENDING = {"kind": "send", "to": to, "text": text, "lang": lang,
                    "channel": channel, "fires_at": time.time() + window,
-                   "in_lang": in_lang, "risky": risky}
+                   "in_lang": in_lang, "risky": risky, "attachment": attachment}
         _TIMER = threading.Timer(window, _fire_pending)
         _TIMER.daemon = True
         _TIMER.start()
@@ -1515,6 +2083,7 @@ NEED_KINDS = {
     "confirm_calendar":  "yesno",     # "add Dentist on Thursday at 10?"
     "confirm_send":      "yesno",     # "send 'yes' to Dana?" (see _why_confirm)
     "who_to_call":       "contact",   # urgent: her answer names who to call NOW
+    "event_time":        "event_time",  # "what time, or the whole day?"
 }
 
 
@@ -1589,6 +2158,29 @@ def _resume(j: Jev, utterance: str, contacts: list[str]) -> dict | None:
                              "false": "No, do not, I am fine, leave it."}}})
         slot["agreed"] = _n(yn, "agreed") > 0.5
         slot["body"] = None          # whatever she said is an answer, never a message
+    elif kind == "event_time":
+        # A second, dedicated ask - like "yesno" above - rather than folding a
+        # 50-option choice into the general "is this an answer" request every other
+        # need shares. Still a Jev choice, never a second Gemini call.
+        et = j.ask({"the_machine_asked": slot["question"], "her_answer": utterance}, {
+            "event_time": {"type": "choice",
+                "instructions": "The machine asked what time to put an event at on her "
+                                "calendar, or whether to add it for the whole day. Each "
+                                "choice below except the last two is a specific time on "
+                                "the 24-hour clock (HH:MM). Which is closest to what she "
+                                "said, or did she ask for the whole day?",
+                "criteria": _TIME_CHOICES}})
+        pick, pconf, _ = _c(et, "event_time")
+        ev = dict(slot.get("event") or {})
+        if pick == "all_day":
+            ev["start"], ev["end"], ev["all_day"] = "", "", True
+        elif pick != "not_said" and pconf >= EVENT_TIME_GATE:
+            ev["start"], ev["all_day"] = pick, False
+        else:
+            AWAITING = {**slot, "at": time.time()}   # still waiting for a time
+            return {"re_ask_time": True, "lang": slot.get("lang", "english")}
+        slot["event"] = ev
+        slot["body"] = None
     AWAITING = None
     return slot
 
@@ -1707,6 +2299,190 @@ def _cancel_check(j: Jev, utterance: str) -> tuple[bool, float, float]:
     return v > 0.5, v, _n(a, "says_what_instead")
 
 
+WEB_DONE_SAY = {
+    "needs_her": {"hebrew": "הגעתי עד לשלב שצריך אותך. תסתכלי על המסך.",
+                  "arabic": "وصلت للخطوة اللي بدها إياكي. شوفي الشاشة.",
+                  "russian": "Дошла до шага, который решаете вы. Посмотрите на экран.",
+                  "english": "I got it as far as the part only you should decide. "
+                             "Have a look at the screen."},
+    "human_check": {"hebrew": "האתר מבקש לוודא שאת לא רובוט. תסתכלי על המסך, "
+                              "זה משהו שרק «את יכולה|אתה יכול» לעשות.",
+                    "arabic": "الموقع بدو يتأكد إنك مش روبوت. شوفي الشاشة.",
+                    "russian": "Сайт просит подтвердить, что вы не робот. "
+                               "Посмотрите на экран.",
+                    "english": "The site wants to check you are not a robot. "
+                               "Have a look at the screen, that part is yours."},
+    "done":      {"hebrew": "מצאתי. זה על המסך.",
+                  "arabic": "لقيتها. هي عالشاشة.",
+                  "russian": "Нашла. Это на экране.",
+                  "english": "Found it. It is on the screen."},
+    "no_text_helper": {
+        "hebrew":  "אני לא יכולה למלא טפסים כרגע, כי השירות שכותב בשבילי לא זמין. "
+                   "פתחתי «לך|לך» את האתר על המסך.",
+        "arabic":  "ما بقدر أعبّي نماذج هلّق، لأنه الخدمة اللي بتكتب إلي مش شغّالة. "
+                   "فتحت «لك|لك» الموقع عالشاشة.",
+        "russian": "Сейчас я не могу заполнять формы: сервис, который пишет за "
+                   "меня, недоступен. Я открыла сайт на экране.",
+        "english": "I cannot fill in forms right now, because the service that writes "
+                   "for me is unavailable. I have opened the site on screen."},
+    "stuck":     {"hebrew": "נתקעתי באתר הזה. תגיד«י|» לי את זה אחרת.",
+                  "arabic": "علقت بهالموقع. احكيلي«|» إياها بطريقة تانية.",
+                  "russian": "Я застряла на этом сайте. Скажите это иначе.",
+                  "english": "I got stuck on that site. Tell me it another way."},
+    "needs_payment": {
+        "hebrew":  "הכנתי הכל. נשאר רק התשלום, וזה משהו שרק «את|אתה» «יכולה|יכול» "
+                   "לעשות. זה פתוח על המסך.",
+        "arabic":  "جهّزت كل إشي. بس ضل الدفع، وهاد إشي لازم تعمل«ي|»ه إنت«ي|». "
+                   "الصفحة مفتوحة عالشاشة.",
+        "russian": "Я всё подготовила. Остался только платёж, и это можете "
+                   "сделать только вы. Страница открыта на экране.",
+        "english": "I have set it all up. Only the payment is left, and that "
+                   "part is yours. It is open on the screen."},
+    "partly_done": {"hebrew": "הגעתי רוב הדרך. זה על המסך, ת«ראי|ראה» אם זה מה שרצית.",
+                    "arabic": "وصلت لمعظم الطريق. هي عالشاشة، شوف«ي|» إذا هاد اللي بدك.",
+                    "russian": "Я дошла почти до конца. Это на экране, посмотрите, "
+                               "то ли это, что вы хотели.",
+                    "english": "I got most of the way. It is on the screen, so "
+                               "have a look and see if that is what you wanted."},
+    "blocked":   {"hebrew": "לא הצלחתי לעשות את זה באתר.",
+                  "arabic": "ما قدرت أعملها بالموقع.",
+                  "russian": "У меня не получилось сделать это на сайте.",
+                  "english": "I could not get that done on the site."},
+    "waited_out": {"hebrew": "חיכיתי, אבל זה לא הסתיים, אז עצרתי. הדף פתוח על המסך.",
+                   "arabic": "استنيت، بس ما خلص، فوقّفت. الصفحة مفتوحة عالشاشة.",
+                   "russian": "Я подождала, но это не было сделано, и я остановилась. "
+                              "Страница открыта на экране.",
+                   "english": "I waited, but it was not finished, so I stopped. "
+                              "The page is open on the screen."},
+    "stopped":   {"hebrew": "בסדר, עצרתי.", "arabic": "ماشي، وقّفت.",
+                  "russian": "Хорошо, я остановилась.", "english": "Okay, I stopped."},
+}
+# What she has to do while the browser waits for her. Said once, when it starts.
+WEB_WAIT_SAY = {
+    "human_check": {
+        "hebrew":  "האתר רוצה לוודא שאת«|ה» לא רובוט. מחכה לך: «תפתרי|תפתור» את הבדיקה "
+                   "בדפדפן, ואני אמשיך לבד.",
+        "arabic":  "الموقع بدو يتأكد إنك مش روبوت. بستناك: حلّ التحقق بالمتصفح، وأنا بكمّل لحالي.",
+        "russian": "Сайт хочет убедиться, что вы не робот. Жду вас: пройдите проверку "
+                   "в браузере, и я продолжу сама.",
+        "english": "The site wants to check you are not a robot. Waiting for you: solve "
+                   "the check in the browser, and I will carry on by myself."},
+    "sign_in": {
+        "hebrew":  "האתר מבקש להתחבר. מחכה לך: «תתחברי|תתחבר» בדפדפן, ואני אמשיך לבד.",
+        "arabic":  "الموقع بدو تسجيل دخول. بستناك: سجّل الدخول بالمتصفح، وأنا بكمّل لحالي.",
+        "russian": "Сайт просит войти. Жду вас: войдите в браузере, и я продолжу сама.",
+        "english": "The site wants you to sign in. Waiting for you: sign in in the "
+                   "browser, and I will carry on by myself."},
+}
+WEB_RESUME_SAY = {"hebrew": "תודה, ממשיכה.", "arabic": "شكرًا، عم كمّل.",
+                  "russian": "Спасибо, продолжаю.", "english": "Thanks, carrying on."}
+WEB_WORKING_SAY = {"hebrew": "עובדת על זה בדפדפן.", "arabic": "عم بشتغل عليها بالمتصفح.",
+                   "russian": "Работаю над этим в браузере.",
+                   "english": "Working on it in the browser."}
+
+
+def _web_said(r: dict, lang: str) -> str:
+    """The line for how a browser task ended."""
+    why = r.get("why") or ""
+    key = ("no_text_helper" if why == "no_text_helper"
+           else "waited_out" if r.get("waited_out")
+           else "human_check" if why.startswith("the site asked for a human check")
+           else r["did"])
+    line = WEB_DONE_SAY.get(key, {"hebrew": "סיימתי.", "arabic": "خلصت.",
+                                  "russian": "Готово.", "english": "Done."})
+    return line.get(lang) or line["english"]
+
+
+# The browser task in progress, for GET /api/web_status. Every browser task answers
+# its turn at once (the listener gives up on an answer after 45 s, and a run plus an
+# image grid takes longer than that), then runs on its own thread; the bar follows it
+# here, and whatever it ends with is said out loud when it ends.
+_WEB: dict = {}
+_WEB_LOCK = threading.Lock()
+
+
+def web_status() -> dict:
+    """GET /api/web_status, polled by the bar while a browser task runs.
+
+    `id` the task, `running` until it ends, `waiting` what it is waiting for her to do
+    ("human_check", "sign_in" or null), `say` the line to keep on the bar while it
+    waits, `progress` its latest step in her words, `finished` {"id", "did", "say"}
+    once it has ended (`say` is empty when she stopped it and was already told)."""
+    kind = web.waiting()
+    with _WEB_LOCK:
+        lang = _WEB.get("lang") or "english"
+        shown = web.shown_steps(list(_WEB.get("log") or []), lang)
+        return {"id": _WEB.get("id"),
+                "running": bool(_WEB.get("id")) and not _WEB.get("finished"),
+                "waiting": kind,
+                "say": _WEB.get("say", "") if kind else "",
+                "progress": shown[-1] if shown else "",
+                "finished": _WEB.get("finished")}
+
+
+def _web_running() -> bool:
+    with _WEB_LOCK:
+        return bool(_WEB.get("id")) and not _WEB.get("finished")
+
+
+def _web_stop() -> bool:
+    """Stop the browser task that is running or waiting. True if there was one."""
+    with _WEB_LOCK:
+        ev = _WEB.get("stop") if not _WEB.get("finished") else None
+    if ev is None:
+        return False
+    ev.set()
+    return True
+
+
+def _stops_the_browser(j: Jev, utterance: str) -> float:
+    """While the browser waits for her: is she calling the task off?"""
+    a = j.ask({"the_machine_is": "waiting for her to finish something in the web "
+                                 "browser, then it will carry on the task by itself",
+               "utterance": utterance}, {
+        "stop_it": {"type": "noul",
+            "instructions": "She is telling the machine to stop that task",
+            "criteria": {
+                "true": "Stop, cancel, forget it, leave it, never mind, enough, or the "
+                        "same in her language: עצרי, די, עזבי, стоп, хватит, وقّف, خلص.",
+                "false": "She is asking for something else, saying she has done it, or "
+                         "talking to someone in the room."}}})
+    from .jev import noul as _n
+    return _n(a, "stop_it")
+
+
+def _web_finished(box: dict, run_id: str, lang: str, speak: bool,
+                  utterance: str, client: str, activation: str) -> None:
+    """A browser task has ended, after its turn answered: say how, and record it."""
+    err = box.get("err")
+    r = box.get("r") or {"did": "blocked", "steps": [], "why": repr(err)[:120]}
+    # She said stop, and was already told it stopped. Nothing more to say.
+    said = "" if r["did"] == "stopped" else degender(_web_said(r, lang),
+                                                    prof.load().get("gender", ""))
+    from .jev import QuotaExceeded
+    if isinstance(err, QuotaExceeded):
+        # The free allowance ran out mid-task. Off the request thread the server's own
+        # handler never sees this, so say what it would have said.
+        table = FREE_USED_SAY if getattr(err, "scope", "day") == "total" else limit_table()
+        said = degender((table.get(lang) or table["english"]).format(
+            t=local_hhmm(err.resets_at)), prof.load().get("gender", ""))
+    if speak and said:
+        mac.say(said, lang)
+    if said:
+        _LAST_SPOKEN["say"] = said
+    out = {"utterance": utterance, "did": f"web_{r['did']}", "say": said, "lang": lang,
+           "detail": {"steps": web.shown_steps(r.get("steps") or [], lang),
+                      "log": r.get("steps") or [], "page": r.get("title"),
+                      "url": r.get("url"), "why": r.get("why"), "later": True},
+           "understanding": {}}
+    with _WEB_LOCK:
+        if _WEB.get("id") == run_id:
+            _WEB["finished"] = {"id": run_id, "did": out["did"], "say": said}
+            _WEB["say"] = ""
+    trace.record(utterance, None, out, conversation=CONVERSATION,
+                 client=client, activation=activation, chose=out["did"])
+
+
 MAX_CONTACTS = 250
 LLM_CLIENT = LLM()
 
@@ -1799,11 +2575,14 @@ class Memory:
         self.last_app: str | None = None
         # The message being prepared, sent or stopped. See DRAFT_TTL.
         self.draft: dict | None = None
+        # What she last had searched for in an app or on a site she named. Not in the
+        # snapshot: that goes out with every request, and this is only for "on eBay too".
+        self.app_query: str | None = None
 
     def remember_draft(self, to: str | None, text: str | None, channel: str,
                        lang: str, in_lang: str | None = None) -> None:
         self.draft = {"to": to, "text": text,
-                      "channel": channel if channel == "whatsapp" else "imessage",
+                      "channel": channel if channel in tg.MESSENGERS else "imessage",
                       "lang": lang, "in_lang": in_lang, "at": time.time()}
 
     def live_draft(self) -> dict | None:
@@ -2169,6 +2948,190 @@ def _passage_answers(j: Jev, question: str, passage: str) -> float:
     return _n(a, "answers_it")
 
 
+# ---------------------------------------------------------------- live answers
+# "What was the score of Tel Aviv" was grounded in the Wikipedia article on the city and
+# answered "I do not know the score". A question about today goes to a live source
+# (actions/live.py): code lists what the source says, Jev picks the row that answers
+# her, and a sentence is written from that row alone. When there is no such row she is
+# told so; nothing is ever made up to fill the gap.
+LIVE_GATE = 0.5
+
+_LIVE_LINES = {
+    "unreachable": {"hebrew": "לא הצלחתי להגיע לחדשות כרגע. «נסי|נסה» שוב עוד מעט.",
+                    "arabic": "ما قدرت أوصل للأخبار هلّق. جرّب«ي|» كمان شوي.",
+                    "russian": "Сейчас не получается связаться с новостями. Попробуйте чуть позже.",
+                    "english": "I could not reach the news just now. Try again in a little while."},
+    "prices_unreachable": {"hebrew": "לא הצלחתי להגיע למחירים כרגע.",
+                           "arabic": "ما قدرت أوصل للأسعار هلّق.",
+                           "russian": "Сейчас не получается узнать цены.",
+                           "english": "I could not reach the prices just now."},
+    "no_result": {"hebrew": "לא מצאתי תוצאה עדכנית של {q}.",
+                  "arabic": "ما لقيت نتيجة جديدة لـ{q}.",
+                  "russian": "Я не нашла свежего результата для {q}.",
+                  "english": "I did not find a fresh result for {q}."},
+    "no_news": {"hebrew": "לא מצאתי חדשות עדכניות על {q}.",
+                "arabic": "ما لقيت أخبار جديدة عن {q}.",
+                "russian": "Я не нашла свежих новостей про {q}.",
+                "english": "I did not find any fresh news about {q}."},
+    "no_price": {"hebrew": "לא מצאתי מחיר עדכני לזה.",
+                 "arabic": "ما لقيت سعر جديد لهاد.",
+                 "russian": "Я не нашла актуальную цену на это.",
+                 "english": "I could not find a current price for that."},
+    "which_team": {"hebrew": "על איזו קבוצה «את שואלת|אתה שואל»?",
+                   "arabic": "عن أي فريق عم تسأل«ي|»؟",
+                   "russian": "О какой команде вы спрашиваете?",
+                   "english": "Which team do you mean?"},
+    "coin": {"hebrew": "{name} עומד עכשיו על {amt} דולר, לפי CoinGecko.",
+             "arabic": "سعر {name} هلّق {amt} دولار، حسب CoinGecko.",
+             "russian": "{name} сейчас стоит {amt} долларов, по данным CoinGecko.",
+             "english": "{name} is at {amt} US dollars right now, according to CoinGecko."},
+    "rate": {"hebrew": "שער {base}: {amt} {unit}, לפי הבנק המרכזי האירופי, {when}.",
+             "arabic": "سعر {base}: {amt} {unit}، حسب البنك المركزي الأوروبي، {when}.",
+             "russian": "Курс {base}: {amt} {unit}, по данным Европейского центрального банка, {when}.",
+             "english": "One {base} is {amt} {unit}, according to the European Central Bank, {when}."},
+    # Said instead of a model's sentence that did not hold up: the headline itself.
+    "reported": {"hebrew": "לפי {source}, {when}: {title}.",
+                 "arabic": "حسب {source}، {when}: {title}.",
+                 "russian": "По данным {source}, {when}: {title}.",
+                 "english": "According to {source}, {when}: {title}."},
+}
+_TODAY = {"hebrew": "היום", "arabic": "اليوم", "russian": "сегодня", "english": "today"}
+_YESTERDAY = {"hebrew": "אתמול", "arabic": "مبارح", "russian": "вчера", "english": "yesterday"}
+_ON_DAY = {
+    "hebrew": ("ביום שני", "ביום שלישי", "ביום רביעי", "ביום חמישי", "ביום שישי",
+               "בשבת", "ביום ראשון"),
+    "arabic": ("يوم الاثنين", "يوم الثلاثاء", "يوم الأربعاء", "يوم الخميس", "يوم الجمعة",
+               "يوم السبت", "يوم الأحد"),
+    "russian": ("в понедельник", "во вторник", "в среду", "в четверг", "в пятницу",
+                "в субботу", "в воскресенье"),
+    "english": ("on Monday", "on Tuesday", "on Wednesday", "on Thursday", "on Friday",
+                "on Saturday", "on Sunday"),
+}
+
+
+def _live_when(at: float, lang: str, now: float | None = None) -> str:
+    """When something was published, the way a person says it: today, yesterday, on
+    Friday. Days are this machine's days."""
+    now = time.time() if now is None else now
+    d_at, d_now = time.localtime(at), time.localtime(now)
+    days = (time.mktime((d_now.tm_year, d_now.tm_mon, d_now.tm_mday, 0, 0, 0, 0, 0, -1))
+            - time.mktime((d_at.tm_year, d_at.tm_mon, d_at.tm_mday, 0, 0, 0, 0, 0, -1)))
+    days = round(days / 86400)
+    lang = lang if lang in _TODAY else "english"
+    if days <= 0:
+        return _TODAY[lang]
+    if days == 1:
+        return _YESTERDAY[lang]
+    return _ON_DAY[lang][d_at.tm_wday]
+
+
+def _live_line(key: str, lang: str, **fmt) -> str:
+    table = _LIVE_LINES[key]
+    return table.get(lang, table["english"]).format(**fmt)
+
+
+def is_live(u: dict) -> bool:
+    """She asked for something only a fresh report can answer."""
+    return (u.get("live_kind", "not_live") not in ("not_live", None)
+            and u.get("live_kind_confidence", 0.0) >= LIVE_GATE)
+
+
+def _numbers_hold(said: str, sources: list[str]) -> bool:
+    """Every number in the sentence is one the headlines gave. A score or a date the
+    model added is the one kind of invention that sounds exactly like a fact."""
+    have = set(re.findall(r"\d+", " ".join(sources)))
+    return all(n in have for n in re.findall(r"\d+", said.replace(",", "")))
+
+
+def _price_line(row: dict, lang: str) -> str:
+    if row["kind"] == "coin":
+        return _live_line("coin", lang, name=row["name"], amt=live.amount(row["price"]))
+    try:
+        y, m, d = (int(x) for x in row["day"].split("-"))
+        when = _live_when(time.mktime((y, m, d, 12, 0, 0, 0, 0, -1)), lang)
+    except (ValueError, KeyError):
+        when = _TODAY.get(lang, "today")
+    base = (live.RATE_OF.get(lang) or {}).get(row["base"]) or live.CURRENCY_NAME[row["base"]]
+    unit = live.UNIT.get(lang, live.UNIT["english"])[row["quote"]]
+    return _live_line("rate", lang, base=base, amt=live.amount(row["price"]), unit=unit,
+                      when=when)
+
+
+def _live_answer(j: Jev, u: dict, utterance: str, lang: str) -> tuple[str, str, dict]:
+    """(did, what to say, detail) for a question about today."""
+    kind = u["live_kind"]
+    spans = u.get("spans") or {}
+    term = (spans.get("term") or (None, 0.0))[0]
+    subject = (spans.get("subject") or (None, 0.0))[0]
+    # "What's in the news today" came back with the term "news" (0.34, measured
+    # 2026-09-27) and searched Google News for the word news. The subject span's check
+    # is the sharp one, which a bare word for a kind of thing ("the news") does not
+    # pass, so a news topic comes from it alone. A team is named either way.
+    topic = (subject if kind == "news" else (term or subject)) or ""
+    det: dict = {"question": utterance, "live_kind": kind, "topic": topic or None,
+                 "live_confidence": round(u.get("live_kind_confidence", 0.0), 2)}
+    t0 = time.time()
+
+    if kind == "price":
+        rows = live.prices()
+        det.update(fetch_ms=round((time.time() - t0) * 1000), source="CoinGecko+ECB")
+        if rows is None:
+            return "live_unreachable", _live_line("prices_unreachable", lang), det
+        pick, conf, good = pick_from(
+            j, rows, live.price_label,
+            "Which of these is she asking the price or the rate of? Names may be said in "
+            "another language or spelled differently (ביטקוין is Bitcoin, דולר is the US "
+            "dollar). A currency asked about without saying in what is in shekels.",
+            {"she_said": utterance})
+        det.update(candidates=len(rows), pick_conf=round(conf, 2), any_good=round(good, 2))
+        if not pick:
+            return "live_not_found", _live_line("no_price", lang), det
+        det.update(source=pick["source"], price=pick["price"],
+                   picked=live.price_label(pick))
+        return "answered", _price_line(pick, lang), det
+
+    sport = kind == "sport_result"
+    if sport and not topic:
+        return "need_team", _live_line("which_team", lang), det
+    rows = live.headlines(topic, lang, sport=sport)
+    det.update(fetch_ms=round((time.time() - t0) * 1000), source="Google News")
+    if rows is None:
+        return "live_unreachable", _live_line("unreachable", lang), det
+    q = topic or utterance
+    if not rows:
+        return "live_not_found", _live_line("no_result" if sport else "no_news", lang, q=q), det
+    if topic:
+        pick, conf, good = pick_from(
+            j, rows, lambda r: f"{r['title']}  [{r['source']}, {_live_when(r['at'], 'english')}]",
+            ("Which headline reports the result of the most recent game she is asking "
+             "about: who won, or the score? " if sport else
+             "Which headline is the newest real news about what she asked? Not an "
+             "opinion piece, a list, a statistics page or an advert. ")
+            + "Team, people and place names may be in another language or spelled "
+              "differently. Prefer the newest. None, if no headline does.",
+            {"she_said": utterance})
+        det.update(candidates=len(rows), pick_conf=round(conf, 2), any_good=round(good, 2))
+        if not pick:
+            return ("live_not_found",
+                    _live_line("no_result" if sport else "no_news", lang, q=q), det)
+        chosen = [pick]
+    else:
+        # The news in general: nothing to match, so the top stories as they come.
+        chosen = rows[:2]
+    items = [{"title": r["title"], "source": r["source"],
+              "when": _live_when(r["at"], "english")} for r in chosen]
+    det.update(headlines=[f"{r['title']} ({r['source']})" for r in chosen])
+    said = (LLM_CLIENT.report(utterance, items, lang, gender=prof.load().get("gender", ""))
+            if LLM_CLIENT.available else None)
+    if said and _numbers_hold(said, [r["title"] for r in chosen]):
+        det.update(llm_ms=round(LLM_CLIENT.last_ms))
+        return "answered", said, det
+    det.update(written="from the headline", model_said=(said or "")[:160] or None)
+    return "answered", " ".join(
+        _live_line("reported", lang, source=r["source"], when=_live_when(r["at"], lang),
+                   title=r["title"].rstrip(".")) for r in chosen), det
+
+
 def _answers_the_question(j: Jev, question: str, utterance: str) -> bool:
     """Did she answer what was asked, or ask for something else entirely?
 
@@ -2344,6 +3307,82 @@ def onboarding(j: Jev, utterance: str, speak: bool) -> dict | None:
     return None
 
 
+# ---------------------------------------------------------------- guide mode
+# Gates on brain.understand()'s "guidance" and "guide_command" answers. Measured on
+# real phrasings: see the commit that introduced them and tests/test_guide.py.
+GUIDE_GATE = 0.55            # walk_me_through: start guiding
+CHIP_GATE = 0.45             # how_to_here: offer "Guide me" beside the answer
+GUIDE_COMMAND_GATE = 0.55    # next / why / back / repeat / stop while guiding
+# "guide me" said right after a chip: the goal is the question that got the chip.
+GUIDE_ME_WORDS = 5
+# Replies that are an answer to her: the chip rides on these, never on a refusal, a
+# question back, a limit or an emergency.
+_NO_CHIP = ("ignored", "waiting", "half_heard", "daily_limit", "emergency",
+            "checking_on_her", "offered_help", "not_configured", "error",
+            "screen_locked", "screen_unavailable")
+_GUIDE_SAY = {
+    "no_llm": {"hebrew": "אני לא יכולה להדריך כרגע, כי השירות שכותב בשבילי לא זמין.",
+               "arabic": "ما بقدر ساعد هلّق، لأنه الخدمة اللي بتكتب إلي مش شغّالة.",
+               "russian": "Сейчас я не могу подсказывать: сервис, который пишет за меня, недоступен.",
+               "english": "I cannot guide you right now, because the service that writes for me is unavailable."},
+}
+
+
+def _guide_offer(u: dict, utterance: str, lang: str, did, depth: int,
+                 speculative: bool, speak: bool) -> dict | None:
+    """The "Guide me" chip: only on a how-to question about the screen in front of
+    her, answered, with no guide already running."""
+    if (depth or speculative or not u or not did or str(did).startswith("guide_")
+            or did in _NO_CHIP or GUIDE.active()):
+        return None
+    if u.get("guidance") != "how_to_here" or u.get("guidance_confidence", 0.0) < CHIP_GATE:
+        return None
+    return GUIDE.offer(utterance, lang, speak=speak, gender=prof.load().get("gender", ""))
+
+
+def _guide_reply(st: dict) -> str:
+    return "guide_" + {"step": "step", "done": "done", "stopped": "stopped",
+                       "failed": "failed"}.get(st.get("status"), "thinking")
+
+
+def _start_guide(utterance: str, u: dict, lang: str, speak: bool, finish) -> dict:
+    """Begin guiding, and answer with the first step itself: she is waiting anyway,
+    and the first thing she hears should be what to do."""
+    goal = utterance
+    offered = GUIDE.take_offer()
+    if offered and (len(utterance.split()) <= GUIDE_ME_WORDS or u.get("refers_back", 0) > 0.5):
+        goal = offered["goal"]
+    if mac.screen_locked():
+        return finish("screen_locked", _ss("empty", lang), detail={"why": "the Mac is locked"})
+    if not GUIDE.model and not LLM_CLIENT.available:
+        limit = _llm_limit(lang)
+        return finish("daily_limit" if limit else "guide_failed",
+                      limit or _GUIDE_SAY["no_llm"].get(lang, _GUIDE_SAY["no_llm"]["english"]),
+                      detail={"why": "no model to write the steps"})
+    st = GUIDE.start(goal, lang, speak=speak, gender=prof.load().get("gender", ""),
+                     wait=True)
+    said = st.pop("said", "") or ""
+    return finish(_guide_reply(st), said, guide=st,
+                  detail={"goal": goal, "step": st.get("n"),
+                          "guidance": round(u.get("guidance_confidence", 0.0), 2)})
+
+
+def _guide_command(cmd: str, lang: str, finish, conf: float) -> dict:
+    if cmd == "stop":
+        st = GUIDE.stop()
+    elif cmd == "next":
+        st = GUIDE.next_step(wait=True)
+    elif cmd == "why":
+        st = GUIDE.explain()
+    elif cmd == "back":
+        st = GUIDE.back()
+    else:
+        st = GUIDE.repeat()
+    said = st.pop("said", "") or ""
+    return finish(_guide_reply(st) if cmd in ("next", "stop") else f"guide_{cmd}", said,
+                  guide=st, detail={"command": cmd, "confidence": conf})
+
+
 def handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
            depth: int = 0, inherited_risk: bool = False, client: str = "web",
            activation: str = "", reason: str = "", speculative: bool = False,
@@ -2476,6 +3515,15 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                     "ms": round((time.time() - t0) * 1000), "jev_calls": j.calls,
                     "cost_usd": round(j.cost_usd, 6), "understanding": {}}
 
+    # A browser task is running, or waiting for her to solve a check or sign in.
+    # "Stop" now means that task. Anything else is handled as usual and it goes on.
+    if _web_running() and not speculative and (utterance or "").strip():
+        if _stops_the_browser(j, utterance) > 0.5 and _web_stop():
+            with _WEB_LOCK:
+                wlang = language_of(utterance, _WEB.get("lang") or "english")
+            wsaid = WEB_DONE_SAY["stopped"]
+            return respond("web_stopped", wsaid.get(wlang) or wsaid["english"], wlang)
+
     # First run. It greets and learns as it goes, but it never swallows a request:
     # a step that has nothing to consume hands the turn straight back.
     onboarding_line = ""
@@ -2518,12 +3566,60 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                     "cost_usd": round(j.cost_usd, 6), "understanding": {}}
         # She is fine. Fall through and handle whatever she actually said.
 
+    # The interactive capture from _start_region_capture is still waiting for her
+    # drag, and instead she highlighted text herself and says so. A literal check,
+    # not _resume(): that would burn a Jev call to discover NEED_KINDS has nothing
+    # for "screen_select_pending" and drop it, which would also throw this away on
+    # the FIRST unrelated word she says while the crosshair is up, not just a
+    # mismatch - the capture has to survive an unrelated turn arriving in between.
+    if (AWAITING is not None and AWAITING.get("need") == "screen_select_pending"
+            and depth == 0 and _says_any(utterance, _I_SELECTED_WORDS)):
+        slot = AWAITING
+        AWAITING = None
+        proc = (slot.get("proc_box") or {}).get("p")
+        if proc is not None:
+            try:
+                proc.terminate()          # close the crosshair; she resolved it her way
+            except Exception:  # noqa: BLE001
+                pass
+        lang2 = slot.get("lang", "english")
+        ctx = _screen_context(max_chars=2000)
+        why = _screen_readable(ctx)
+        if why:
+            return respond("screen_unavailable", _ss(why, lang2), lang2, why=why)
+        sel = (ctx.get("selected") or "").strip()
+        if not sel:
+            AWAITING = slot            # still nothing selected: keep waiting
+            return respond("screen_select_wait", _ss("drag_select", lang2), lang2)
+        if HIDDEN in sel:
+            return respond("screen_secret", _ss("send_secret", lang2), lang2)
+        cut_long = len(sel) > SEND_SCREEN_MAX
+        if cut_long:
+            sel = sel[:SEND_SCREEN_MAX]
+        who = display_name(slot["to"], lang2)
+        if not mac.SEND_FOR_REAL:
+            return respond("send_disabled", _sp(lang2, "send_off"), lang2, to=slot["to"])
+        if prefs.always_confirm():
+            return {**respond("confirm_send",
+                              _ask_to_send(slot["to"], sel, lang2, slot.get("channel", "imessage"),
+                                           "she_asked_to_be_asked", from_screen="send_screen"),
+                              lang2, to=slot["to"]), "asked_back": True}
+        MEM.contact, MEM.channel = slot["to"], slot.get("channel", "imessage")
+        _arm_send(slot["to"], sel, lang2, channel=slot.get("channel", "imessage"),
+                  window=CANCEL_WINDOW)
+        said2 = ((_ss("send_long", lang2) + " ") if cut_long else "") + _ss("send_screen", lang2).format(
+            who=who, at_he=with_prefix("ל", who, "hebrew"), at_ar=with_prefix("لـ", who, "arabic"))
+        return respond("sending", said2, lang2, to=slot["to"], display=who,
+                       channel=slot.get("channel", "imessage"), from_screen="send_screen",
+                       countdown=CANCEL_WINDOW)
+
     # A compound request runs its steps back to back inside one turn. Step two must not
     # answer the question step one just asked: "message David and call Ruti" had step
     # two consumed as the BODY of the message to David.
     if AWAITING is not None and depth == 0:
         slot = _resume(j, utterance, contacts)
-        if slot and not slot.get("unresolved") and not slot.get("re_ask"):
+        if slot and not slot.get("unresolved") and not slot.get("re_ask") \
+                and not slot.get("re_ask_time"):
             lang = slot.get("lang", "english")
 
             # She was asked whether to call someone. Her answer is an answer, never a
@@ -2542,6 +3638,22 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                     LAST_EMERGENCY = {"at": time.time(), "who": out["who"], "lang": lang}
                 return respond(out["did"], out["say"], lang, **out["detail"])
 
+            # "What time, or the whole day?" answered: go on to the same
+            # "shall I add this?" confirmation a fully-timed event asks - never
+            # skip straight to adding it, whole day or not.
+            if slot["need"] == "event_time":
+                ev = slot.get("event") or {}
+                AWAITING = {"at": time.time(), "need": "confirm_calendar",
+                            "question": "shall I add this event to your calendar",
+                            "lang": lang, "event": ev, "body": None, "contact": None}
+                when = _when_words(ev.get("date", ""), lang)
+                say_cal = (_ss("cal_ask_allday", lang).format(title=ev.get("title", ""), when=when)
+                          if ev.get("all_day")
+                          else _ss("cal_ask", lang).format(title=ev.get("title", ""), when=when,
+                                                           start=ev.get("start", "")))
+                return {**respond("confirm_calendar", say_cal, lang, event=ev),
+                        "asked_back": True}
+
             # "Shall I add this to your calendar?" There is no undo for an event (this
             # code never deletes anything), which is why it asks first.
             if slot["need"] == "confirm_calendar":
@@ -2550,7 +3662,7 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                     return respond("calendar_declined", _ss("cal_no", lang), lang)
                 ok, msg = mac.add_event(ev.get("title", ""), ev.get("date", ""),
                                         ev.get("start", ""), ev.get("end", ""),
-                                        ev.get("location", ""))
+                                        ev.get("location", ""), all_day=bool(ev.get("all_day")))
                 if ok:
                     return respond("calendar_added",
                                    _ss("cal_done", lang).format(title=ev.get("title", "")),
@@ -2571,7 +3683,7 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                 MEM.contact = slot.get("contact") or MEM.contact
                 return respond(out["did"], out["say"], lang, **out["detail"])
 
-            if slot["need"] == "who" and not slot.get("body"):
+            if slot["need"] == "who" and not slot.get("body") and not slot.get("attachment"):
                 AWAITING = {**slot, "at": time.time(), "need": "what",
                             "question": "what should the message say"}
                 MEM.remember_draft(slot["contact"], None, slot.get("channel", "imessage"), lang)
@@ -2581,31 +3693,54 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             if slot["need"] == "confirm_send" and not slot.get("agreed"):
                 return respond("send_declined", _sp(lang, "not_sent"), lang,
                                to=slot["contact"], answer=slot.get("answer"))
+            if slot.get("chan_said") is False:
+                # She named nobody and no app; now that she has said who, her standing
+                # choice for that person applies.
+                slot["channel"] = prefs.channel_for(slot["contact"], None)[0]
             who = display_name(slot["contact"], lang)
             body = slot["body"]
-            narration = (_ss(slot["from_screen"], lang).format(
-                             who=who, at_he=with_prefix("ל", who, "hebrew"),
-                             at_ar=with_prefix("لـ", who, "arabic"))
+            _fmt_kw = dict(who=who, at_he=with_prefix("ל", who, "hebrew"),
+                           at_ar=with_prefix("لـ", who, "arabic"))
+            if slot.get("from_screen") == "send_screenshot":
+                _fmt_kw["what"] = slot.get("shot_what") or _ss("this_screen", lang)
+            narration = (_ss(slot["from_screen"], lang).format(**_fmt_kw)
                          if slot.get("from_screen")
                          else _narrate(who, body, lang, slot.get("in_lang")))
             if slot.get("cut_long"):
                 narration = _ss("send_long", lang) + " " + narration
+            if slot.get("channel") in tg.OPEN_ONLY:
+                MEM.contact, MEM.channel = slot["contact"], slot["channel"]
+                MEM.remember_draft(slot["contact"], body, slot["channel"], lang,
+                                   slot.get("in_lang"))
+                did_c, say_c, det_c = _open_chat(slot["channel"], slot["contact"], body or "",
+                                                 lang, picture=bool(slot.get("attachment")))
+                return respond(did_c, say_c, lang, **det_c, resumed=True)
             if not mac.SEND_FOR_REAL:
                 # NOTE: `finish` is defined further down inside handle(), so it does not
                 # exist here. This block builds its own dicts like its neighbours do.
                 return respond("send_disabled", _sp(lang, "send_off"), lang,
                                to=slot["contact"], text=body,
                                from_screen=slot.get("from_screen"),
+                               attachment=slot.get("attachment"),
                                fix="start the server with MICMIC_ALLOW_SEND=1")
             # Her answer to "what should it say?" is the message, said just now. Words
-            # kept from before she was asked who were not said this turn.
-            why = (None if slot["need"] == "confirm_send" or slot.get("from_screen")
-                   else _why_confirm(body, slot["need"] in ("what", "when"), asr_conf))
+            # kept from before she was asked who were not said this turn. A
+            # screen-sourced send skips the short/low-confidence checks (there are no
+            # spoken words of hers to mishear) but "ask me before sending" still reaches it.
+            if slot["need"] == "confirm_send":
+                why = None
+            elif slot.get("from_screen"):
+                why = "she_asked_to_be_asked" if prefs.always_confirm() else None
+            else:
+                why = _why_confirm(body, slot["need"] in ("what", "when"), asr_conf)
             if why:
                 return {**respond("confirm_send",
                                   _ask_to_send(slot["contact"], body, lang,
                                                slot.get("channel", "imessage"), why,
-                                               slot.get("in_lang")),
+                                               slot.get("in_lang"),
+                                               from_screen=slot.get("from_screen"),
+                                               shot_what=slot.get("shot_what"),
+                                               attachment=slot.get("attachment")),
                                   lang, to=slot["contact"], text=body, why=why),
                         "asked_back": True}
             # Remembered exactly as a message said in one breath is, so the next
@@ -2613,14 +3748,16 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             # used to remember nothing, and the next follow-up started from scratch.
             MEM.contact, MEM.channel = slot["contact"], slot.get("channel", "imessage")
             MEM.remember_draft(slot["contact"], body, MEM.channel, lang, slot.get("in_lang"))
-            _arm_send(slot["contact"], body, lang, channel=slot.get("channel", "imessage"),
+            _arm_send(slot["contact"], body or "", lang, channel=slot.get("channel", "imessage"),
                       window=SCAM_WINDOW if slot.get("risky") else CANCEL_WINDOW,
-                      in_lang=slot.get("in_lang"), risky=bool(slot.get("risky")))
+                      in_lang=slot.get("in_lang"), risky=bool(slot.get("risky")),
+                      attachment=slot.get("attachment"))
             if slot.get("risky"):
                 narration += " " + _MONEY_LINE.get(lang, _MONEY_LINE["english"])
             return respond("sending", narration, lang,
                            to=slot["contact"], display=who, text=body,
                            from_screen=slot.get("from_screen"),
+                           attachment=slot.get("attachment"),
                            channel=slot.get("channel", "imessage"),
                            countdown=CANCEL_WINDOW, resumed=True,
                            confirmed=slot["need"] == "confirm_send")
@@ -2629,6 +3766,10 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             return {**respond("need_what", _sp(lang, "what"), lang,
                               why="she repeated the instruction, not the message"),
                     "asked_back": True}
+        if slot and slot.get("re_ask_time"):
+            lang = slot.get("lang", "english")
+            return {**respond("need_event_time", _ss("cal_time_ask", lang), lang,
+                              why="could not tell the time she meant"), "asked_back": True}
         if slot and slot.get("unresolved"):
             lang = slot.get("lang", "english") if isinstance(slot, dict) else "english"
             return {**respond("need_who", _sp(lang, "who"), lang,
@@ -2651,11 +3792,29 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
     # "instead" only while something plays, so every other request is asked exactly
     # what it was before.
     folded = FOLDED_SPANS + (("instead",) if MEM.last_played and MEM.play_query else ())
+    folded_spans = {k: (SPANS[k], SPAN_EXISTS.get(k)) for k in folded}
+    # Standing preferences ride in this same request, and only when her words can
+    # state, recall or forget one, or a saved rule is relevant (see savta/prefs.py).
+    # Otherwise nothing is added and the request is exactly what it was.
+    standing = prefs.questions(utterance)
+    if standing and "pref_kind" in standing["questions"]:
+        folded_spans["pref_rule"] = (prefs.RULE_SPAN, prefs.RULE_EXISTS)
+    # "On Netflix", "search it on Amazon", "in Spotify": which named place, if any, is
+    # where she wants it done, and what to look for there. Asked only when her words
+    # hold such a name (actions/targets.py); otherwise the request is exactly what it was.
+    places = tg.mentions(utterance)
+    if places:
+        folded_spans["app_query"] = (tg.QUERY_SPAN, tg.QUERY_EXISTS)
     u = understand(j, utterance, contacts,
                    recent or json.dumps(MEM.snapshot(), ensure_ascii=False),
                    playing=now_playing, likes=longterm.summary(),
-                   spans={k: (SPANS[k], SPAN_EXISTS.get(k)) for k in folded},
-                   draft=MEM.live_draft())
+                   spans=folded_spans,
+                   draft=MEM.live_draft(),
+                   **({"standing": standing} if standing else {}),
+                   **({"guide": GUIDE.context()} if depth == 0 and GUIDE.active() else {}),
+                   # Passed only when there is one: a request naming no app goes out as
+                   # it always did, and stand-ins for understand() need not know of it.
+                   **({"named": tg.question(places)} if places else {}))
     # A guess from a half-finished sentence. Everything expensive has now been done —
     # the address book is warm, the connection is open, the understanding is cached —
     # which is the entire point of asking early. Nothing may be DONE with it: she has
@@ -2738,10 +3897,16 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
 
     out = {"utterance": utterance, "understanding": u, "lang": lang,
            "did": None, "say": None, "url": None, "detail": None, "asked_back": False}
+    # One short line in front of the answer when a standing preference was set aside
+    # for what she asked just now (see _standing_turn and the message and volume paths).
+    pref_note = ""
 
     def finish(did, say_text, **kw):  # noqa: ANN001
         if day_open:
             kw.setdefault("briefing", day_open)
+        if pref_note and say_text:
+            say_text = f"{pref_note} {say_text}"
+            kw.setdefault("preference_note", True)
         # Every line leaving this function is expanded here, whether it came from
         # SPEECH or from an inline dict three hundred lines away. Doing it only in
         # _sp() let a raw "«י|»" reach the screen from the browser agent's own copy.
@@ -2762,8 +3927,16 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                 vid = str(det_u["video_id"])
                 kw["undo"] = _offer_undo("playing", lang,
                                          lambda: mac.close_tab_with(vid), _DONE["video"])
+            elif did == "playing" and det_u.get("player") == "apple_music":
+                kw["undo"] = _offer_undo("playing", lang, lambda: am.control("pause")[0],
+                                         _DONE["music"])
             elif did == "sending":
                 kw["undo"] = _offer_undo("sending", lang, _undo_send, _DONE["send"])
+        offer = _guide_offer(u, utterance, lang, did, depth, speculative, speak)
+        if offer and "guide_offer" not in kw:
+            kw["guide_offer"] = offer
+        elif not offer and not depth and not speculative and did not in ("ignored", "waiting"):
+            GUIDE.clear_offer()          # a chip belongs to the answer it came with
         out.update(did=did, say=say_text, **kw)
         if not speculative and "undo" not in kw and did not in (
                 "ignored", "waiting", "half_heard"):
@@ -2782,6 +3955,55 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         if speak and say_text:
             mac.say(say_text, lang)
         return out
+
+    def _start_region_capture(to: str, chan2: str, lang2: str) -> dict:
+        """"Send this to Matan" with nothing selected and no page open: rather than
+        say "select what you want" and drop the request, open the crosshair herself.
+        Answers this turn at once ("Drag over what you want to send") and finishes
+        on its own thread - the same shape web tasks already use (_WEB / web_status),
+        just with nothing for the bar to poll: one more line, spoken when it ends,
+        is all this needs."""
+        global AWAITING
+        gender = prof.load().get("gender", "")
+        shot_id = f"{time.time():.6f}"
+        proc_box: dict = {}
+        AWAITING = {"at": time.time(), "need": "screen_select_pending", "id": shot_id,
+                    "to": to, "channel": chan2, "lang": lang2, "proc_box": proc_box,
+                    "contact": None, "body": None, "intent": "message"}
+
+        def work() -> None:
+            global AWAITING
+            from .actions import screen as _scr
+            res = _scr.capture_region(on_start=lambda p: proc_box.__setitem__("p", p))
+            mine = False
+            if AWAITING is not None and AWAITING.get("id") == shot_id:
+                AWAITING = None
+                mine = True
+            if not res.get("ok"):
+                if not mine:
+                    return   # she resolved it another way ("I selected it"); say nothing more
+                why = res.get("why", "")
+                key = ("screenshot_perm" if why == "screen_recording"
+                       else "select_cancelled" if why == "cancelled" else "screenshot_failed")
+                mac.say(degender(_ss(key, lang2), gender), lang2)
+                return
+            _remember_shot(res["path"], "", False)
+            if prefs.always_confirm():
+                q = _ask_to_send(to, "", lang2, chan2, "she_asked_to_be_asked",
+                                 from_screen="send_screenshot",
+                                 shot_what=_ss("the_part_you_picked", lang2))
+                mac.say(degender(q, gender), lang2)
+                return
+            who = display_name(to, lang2)
+            MEM.contact, MEM.channel = to, chan2
+            _arm_send(to, "", lang2, channel=chan2, window=CANCEL_WINDOW, attachment=res["path"])
+            said = _ss("send_screenshot", lang2).format(
+                who=who, what=_ss("the_part_you_picked", lang2),
+                at_he=with_prefix("ל", who, "hebrew"), at_ar=with_prefix("لـ", who, "arabic"))
+            mac.say(degender(said, gender), lang2)
+
+        threading.Thread(target=work, daemon=True, name="micmic-region-capture").start()
+        return finish("screen_select_wait", _ss("drag_select", lang2), detail={"to": to})
 
     # Before anything else. If she has fallen or cannot breathe, nothing else in this
     # function matters, and she must not have to phrase it correctly to be heard.
@@ -2847,6 +4069,15 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
     open_mic = (activation or load_config().get("activation", "push")) != "push"
     if open_mic and u["noise"] > NOISE_CEILING and u["intent"] in ("unclear", "chitchat"):
         return finish("ignored", None, detail="sounded like it was not aimed at the computer")
+
+    # --- a step-by-step guide is running ------------------------------------
+    # "next", "why", "go back", "stop" are about the step on screen. Asked in the same
+    # request (brain.GUIDE_QUESTIONS), so they cost nothing extra; anything else she
+    # says is handled as usual and the guide carries on beside it.
+    if (depth == 0 and GUIDE.active() and u.get("guide_command", "none") != "none"
+            and u.get("guide_command_confidence", 0.0) >= GUIDE_COMMAND_GATE):
+        return _guide_command(u["guide_command"], lang, finish,
+                              round(u["guide_command_confidence"], 2))
     # Two things said over a playing video are not "another one", however much
     # rejects_last says they are. The owner's session (1.0.2): after a film by an actor,
     # "what was his most famous film" and "give me a list of his movies" scored
@@ -2907,7 +4138,20 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             and not asks_about_it and not instead
             and u["describes_instead"] < DESCRIBES_GATE
             and u["control_action"] == "not_applicable"):
+        in_app = (MEM.last_played or {}).get("player")
         MEM.reject_current()
+        if in_app in IN_APP:
+            # Another song from the same search, in the same app, never the refused ones.
+            did_a, say_a, det_a = _play_in_app(j, in_app, MEM.play_query,
+                                               MEM.play_query, lang)
+            return finish(did_a or "not_found", say_a,
+                          detail={**det_a, "after_rejection": True,
+                                  "already_refused": len(MEM.rejected)})
+        if in_app in tg.VIDEO:
+            # Netflix and the rest were opened on a search, not on one title: the
+            # other results are on that page, so it is put back in front of her.
+            did_v, say_v, det_v = tg.open_there(in_app, MEM.play_query, lang)
+            return finish(did_v, say_v, detail={**det_v, "after_rejection": True})
         again = MEM.play_query
         if MEM.play_kind != "not_applicable":
             hints = HINTS.get(MEM.play_lang, HINTS["english"])
@@ -2926,8 +4170,8 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                 # replacement in a browser window without closing the first, so two
                 # videos played over each other.
                 mac.close_front_window()
-                MEM.played(MEM.play_query, MEM.play_kind, MEM.play_full, pick,
-                           MEM.play_lang)
+                MEM.played(MEM.play_query, MEM.play_kind, MEM.play_full,
+                           {**pick, "player": "youtube"}, MEM.play_lang)
                 url = yt.watch_url(pick["id"])
                 mac.open_url(url)
                 # Name it, for the same reason the first pick is named: "here you go"
@@ -3019,7 +4263,39 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                       detail={"why": "could not match that name to a contact",
                               "for": "emergency_contact"})
 
+    # --- standing preferences: set, read back, forget ------------------------
+    pref = _standing_turn(j, u, utterance, lang)
+    if pref:
+        lang = pref.get("lang") or lang
+        return finish(pref["did"], pref["say"], detail=pref["detail"], lang=lang,
+                      **({"undo": pref["undo"]} if pref.get("undo") else {}))
+    # A saved rule this request goes against: the request wins, and she hears the
+    # rule once, in front of the answer.
+    near = (standing or {}).get("rules") or []
+    broke = ((u.get("standing") or {}).get("pref_breaks_rule") or {}).get("noul", 0.0)
+    if near and broke > RULE_BREAK_GATE and u["intent"] not in (
+            "chitchat", "unclear", "help", "stop"):
+        pref_note = prefs.say(lang, "rule_note", rule=near[-1])
+
     intent, conf = u["intent"], u["intent_confidence"]
+
+    # --- screenshots --------------------------------------------------------
+    # A plain word match (see _SCREENSHOT_WORDS above), guarded by Jev's own intent so
+    # "find the screenshot I saved yesterday" (intent find_file/photos) is left alone.
+    # Whether this becomes a plain take-and-save or a send follows the same signal
+    # "send this to Matan" already uses below (screen_task "send", or intent already
+    # read as "message") rather than contact_named alone: "send a screenshot" names
+    # nobody yet and still has to ask who, exactly as an unresolved text send does,
+    # while a bare "take a screenshot" must never be read as wanting to send anything.
+    wants_shot = _says_any(utterance, _SCREENSHOT_WORDS) and u["intent"] in (
+        "screen", "message", "unclear", "chitchat", "again")
+    shot_send_shaped = u["intent"] == "message" or u.get("screen_task") == "send" or (
+        u["contact_named"] >= 0.5 and u["contact"] != "nobody")
+    if wants_shot:
+        if shot_send_shaped:
+            intent, conf = "message", max(conf, ACT_ON_INTENT)
+        else:
+            intent, conf = "screen", max(conf, ACT_ON_INTENT)
 
     # A change to the message this conversation just prepared, sent or stopped. "On
     # WhatsApp" on its own is not much of a request and can read as small talk or as
@@ -3030,6 +4306,24 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                 and intent in ("message", "chitchat", "unclear", "again"))
     if amending:
         intent, conf = "message", max(conf, ACT_ON_INTENT)
+
+    # --- walk me through it -------------------------------------------------
+    # "Guide me through adding the Maps API": she does every step herself, MicMic says
+    # the next one and rings it on the screen (savta/actions/guide.py). Not a message
+    # or a call, whatever the guidance question says: those have their own safeguards.
+    if (depth == 0 and not amending and u.get("guidance") == "walk_me_through"
+            and u.get("guidance_confidence", 0.0) >= GUIDE_GATE
+            and intent not in ("message", "call")):
+        return _start_guide(utterance, u, lang, speak, finish)
+    # "How do I add an API key here?" reads as asking what MicMic can do (help: 0.96
+    # measured) and was answered with the list of MicMic's own features. It is a
+    # question about the app in front of her: answered like any other question, from
+    # general knowledge (no screen content leaves the Mac for it), and "Guide me"
+    # beside the answer is how the screen itself gets looked at, if she wants that.
+    if (depth == 0 and intent in ("help", "chitchat", "unclear")
+            and u.get("guidance") == "how_to_here"
+            and u.get("guidance_confidence", 0.0) >= CHIP_GATE):
+        intent, conf = "look_up", max(conf, ACT_ON_INTENT)
 
     # --- undo, by voice ---------------------------------------------------
     # The same undo the bar's button does. Before this, "undo", "בטלי" or "put it
@@ -3051,6 +4345,42 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
     if (MEM.last_played and u.get("player_action") == "restart"
             and intent in ("player", "again", "chitchat", "unclear")):
         intent, conf = "again", max(conf, ACT_ON_INTENT)
+
+    # --- where she named it done -------------------------------------------
+    # "Friends on Netflix", "search headphones on Amazon", "in Maps", "in Safari": done
+    # THERE, never on whatever MicMic would have picked (actions/targets.py). Songs and
+    # films go on to the media path and messages to theirs, which read the same answer.
+    place = _named_place(u)
+    place_kind = tg.KIND_OF.get(place, "app") if place else ""
+    web_start: tuple[str, str] | None = None  # the website she named, for a web task
+    open_named = ""                           # the program she named, for open_app
+    if place and intent in _PLACE_FITS.get(place_kind, ()):
+        conf = max(conf, ACT_ON_INTENT)       # a named player or messenger is evidence
+    elif (place and not amending
+            and (intent in _PLACE_INTENTS or conf < ACT_ON_INTENT
+                 # "the film on Amazon", "play it in VLC": not a player the media path
+                 # knows, so it is found there rather than put on YouTube.
+                 or (intent in ("watch", "music") and place_kind in ("site", "app")))
+            and intent not in ("stop", "control", "player")
+            and not (place_kind == "app" and u.get("inside_an_app", 0) > 0.7)
+            and not mac.screen_locked()):
+        q = _app_query(u, utterance, place)
+        if place_kind == "music" and q:
+            intent, conf = "music", max(conf, ACT_ON_INTENT)
+        elif (intent == "do_online" and place_kind in ("site", "maps")
+              and u.get("named_app_only_look", 0.0) < 0.5 and tg.web_url(place, q, lang)[0]):
+            # Something to DO there (order, book, buy): the browser agent, started on
+            # that site rather than on one it would choose. Saves where_to_start's call.
+            web_start = (tg.web_url(place, q, lang)[0], place)
+        elif intent == "open_app" and not q and tg.installed(place):
+            open_named = tg.installed(place)          # opened below, with its undo
+        else:
+            if q:
+                MEM.app_query = q
+            did_p, say_p, det_p = tg.open_there(place, q, lang)
+            return finish(did_p, say_p, detail={**det_p, "intent": intent,
+                                                "named_conf": round(u.get("named_app_confidence", 0.0), 2),
+                                                "only_look": round(u.get("named_app_only_look", 0.0), 2)})
 
     # --- low confidence: ask, do not guess --------------------------------
     if conf < ACT_ON_INTENT and intent not in ("stop", "control"):
@@ -3088,6 +4418,10 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             and ((u.get("spans") or {}).get("weather_place") or (None, 0.0))[0]):
         intent = "look_up"
 
+    # "What's the score of Maccabi" read as small talk is still a question about today.
+    if intent in ("chitchat", "unclear") and is_live(u):
+        intent = "look_up"
+
     # While something plays, "something in English" or "something more manly" is about
     # the music even when the intent question calls it small talk. Measured: "something
     # in English" went to chitchat and MicMic chatted back instead of playing anything.
@@ -3107,15 +4441,36 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
     # calendar". A soft intent is rescued when the sentence clearly points at the
     # screen ("תסכמי את זה" came back chitchat on 3 of 4 runs). "Send this to Matan" is
     # a message whose words come from the screen, and is handled in the message branch.
-    screen_task = u.get("screen_task", "not_applicable")
+    screen_task = "screenshot" if wants_shot else u.get("screen_task", "not_applicable")
     if intent == "screen" and screen_task == "send":
         intent = "message"
     elif (intent == "screen"
           or (intent in ("unclear", "chitchat")
-              and u.get("refers_to_screen", 0) > SCREEN_SOFT_GATE)):
+              and (u.get("refers_to_screen", 0) > SCREEN_SOFT_GATE
+                   # "add to the calendar concert in giza" names no "screen" or "this"
+                   # at all, so refers_to_screen never fires - but Jev's own screen_task
+                   # already read "add to the calendar" as being about the screen (it is
+                   # asked on every turn, unconditionally), which is exactly as strong a
+                   # signal and costs nothing extra to check.
+                   or screen_task != "not_applicable"))):
         if mac.screen_locked():
             return finish("screen_locked", _ss("empty", lang),
                           detail={"why": "the Mac is locked"})
+        if screen_task == "screenshot":
+            # No contact was named (that case became intent "message" above and is
+            # handled there, alongside a normal send): just take it and say where it
+            # went. No undo is offered - see _SCREEN_SAY["screenshot_saved"].
+            shot = _capture_screenshot(utterance)
+            if not shot["ok"]:
+                if shot["why"] == "screen_recording":
+                    return finish("screenshot_no_permission", _ss("screenshot_perm", lang),
+                                  detail={"why": shot["why"]})
+                return finish("screenshot_failed", _ss("screenshot_failed", lang),
+                              detail={"why": shot["why"], "window": shot["window"]})
+            _remember_shot(shot["path"], shot["app"], shot["window"])
+            return finish("screenshot_saved", _ss("screenshot_saved", lang),
+                          detail={"path": shot["path"], "window": shot["window"],
+                                  "app": shot["app"]})
         ctx = _screen_context()
         why = _screen_readable(ctx)
         if why:
@@ -3155,6 +4510,14 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                 if limit:
                     return finish("daily_limit", limit, detail={"llm": "quota"})
                 return finish("screen_no_event", _ss("no_event", lang), detail=det)
+            if not ev.get("start"):
+                # A date with nothing that reads as a time near it: ask, rather than
+                # refuse the whole thing for want of a clock reading.
+                AWAITING = {"at": time.time(), "need": "event_time",
+                            "question": "what time, or the whole day", "lang": lang,
+                            "event": ev, "body": None, "contact": None}
+                return finish("need_event_time", _ss("cal_time_ask", lang),
+                              asked_back=True, detail={**det, "event": ev})
             AWAITING = {"at": time.time(), "need": "confirm_calendar",
                         "question": "shall I add this event to your calendar",
                         "lang": lang, "event": ev, "body": None, "contact": None}
@@ -3272,7 +4635,14 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             # the Messages app instead of being read out.
             and intent not in ("message", "call", "stop", "player", "read_msgs", "note",
                                "timer", "look_up", "help", "chitchat", "screen",
-                               "close_app", "read_notes")):
+                               "close_app", "read_notes")
+            # Nor a song or a film, nor anything for a player or service she named:
+            # the media path plays those itself. The owner's session (1.1.0): over a
+            # song in Apple Music, asking for another artist (inside_an_app 0.75), and
+            # again naming Apple Music (0.83), both intent music, came here and got
+            # the in-app refusals instead of the song.
+            and intent not in ("watch", "music")
+            and place_kind not in ("music", "video")):
         from .actions import apps as _apps
         open_now = _apps.running_apps()
         which = None
@@ -3323,6 +4693,10 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
 
     # --- stop / control ---------------------------------------------------
     if intent == "stop":
+        # A song in Music or Spotify is paused there, not by closing her front window.
+        in_app = _in_app_control("stop", lang)
+        if in_app:
+            return finish(in_app[0], in_app[1], detail=in_app[2])
         if MEM.last_played:
             MEM.last_played = None
             # It is in a real browser window; only closing that window stops it.
@@ -3357,6 +4731,9 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
 
     if intent == "player" and MEM.last_played:
         act = u["player_action"]
+        in_app = _in_app_control(act, lang) if act != "not_applicable" else None
+        if in_app:
+            return finish(in_app[0], in_app[1], detail=in_app[2])
         if act != "not_applicable":
             if act == "stop":
                 MEM.last_played = None
@@ -3402,6 +4779,15 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         fn = table.get(act)
         if fn:
             before_vol = mac.get_volume() if act in ("louder", "quieter") else None
+            # "Keep the volume low": louder stops at her ceiling. Asked again at the
+            # ceiling, her request wins, and she hears that once.
+            cap = prefs.volume_cap() if act == "louder" else 0
+            if cap and before_vol is not None:
+                if before_vol < cap:
+                    level = min(before_vol + 18, cap)
+                    fn = lambda level=level: (mac.set_volume(level), str(level))  # noqa: E731
+                else:
+                    pref_note = prefs.say(lang, "volume_note")
             done, where = fn()
             detail = {"control": act}
             if act in ("louder", "quieter") and str(where).isdigit():
@@ -3442,6 +4828,8 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         if not subject:
             subject = _something_she_likes(
                 "watch" if intent == "watch" else "music", lang)
+        if _named_place(u):
+            subject = tg.without_names(subject) or subject      # not "1969 on Spotify"
         full = u["wants_full_length"] > 0.5
         kind = u["media_kind"]
         # She asked for music and named no kind. Say so to the picker: judged against
@@ -3451,6 +4839,38 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         if intent == "music" and kind == "not_applicable":
             kind = "song_or_music"
         specific = u["names_title"] > 0.4 or len(subject.split()) >= 2
+        # Where it plays. "on Apple Music" wins even when she said it as a video
+        # (the owner's own "put 1969 song on apple music" read as watch).
+        # A follow-up to what is playing, however it was said: a correction naming
+        # the one she meant, a description of it, or a refusal that names someone
+        # new (rejects_last 0.96 in the owner's session).
+        follow_up = (bool(instead) or describing_swap
+                     or (bool(MEM.last_played) and (u["rejects_last"] > REJECTS_GATE
+                                                    or u["refers_back"] > 0.5)))
+        player = _media_player(u, intent, follow_up)
+        if player in IN_APP:
+            did_a, say_a, det_a = _play_in_app(j, player, subject, utterance, lang,
+                                               named=bool(named or want_text))
+            if named:
+                longterm.note("music", subject)
+            return finish(did_a, say_a, detail={**det_a, "subject": subject,
+                                                "subject_conf": round(sconf, 2)})
+        if player in tg.VIDEO:
+            # Netflix, Disney+, Prime Video, Apple TV: no way in from outside to start a
+            # title, so the service is opened on a search for it (or on its front page
+            # when its address cannot carry the words) and she picks it there.
+            # Not a name she said: what the question about the place picked, or "it"
+            # for what was just on ("open it on Netflix"), else its front page.
+            q = (subject if (named or want_text) and not tg.is_pronoun(subject)
+                 else _app_query(u, utterance, player))
+            did_v, say_v, det_v = tg.open_there(player, q, lang)
+            if did_v == "opened_there" and q:
+                # So "no, <another title>" searches there again, and "another one"
+                # puts this search back in front of her.
+                MEM.played(q, kind, full, {"id": f"{player}:{q}", "title": q,
+                                           "player": player, "open_only": True}, lang)
+            return finish(did_v, say_v, detail={**det_v, "subject": subject,
+                                                "subject_conf": round(sconf, 2)})
         # "Play the Titanic trailer" is a feature film by kind, so the search used to
         # read "Titanic full movie": a pirated copy of the film, or a parody, and never
         # the trailer she asked for. The word is in her sentence; search for that.
@@ -3509,7 +4929,7 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         # removed: whole categories of music are owner-restricted, so the embed failed
         # often enough that the retry-and-apologise machinery around it cost more than
         # it ever returned. A tab always plays.
-        MEM.played(subject, kind, full, pick, lang)
+        MEM.played(subject, kind, full, {**pick, "player": "youtube"}, lang)
         # Only what she named is a taste. A fallback pick is our guess, and learning
         # it would feed our own guess back to us as her preference.
         if named:
@@ -3557,7 +4977,24 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         u = {**u, "contact": "nobody"}          # a name not in her book: ask who
 
     if intent == "message":
-        chan = u["channel"] if u["channel"] != "not_applicable" else "imessage"
+        # The app she named in this sentence, else her standing choice for this person,
+        # else for everyone, else a text. "imessage" is also the channel question's
+        # answer when she named no app, so only her words make it a choice of hers.
+        said_app = (u["channel"] if u["channel"] == "whatsapp"
+                    or (u["channel"] == "imessage" and _says_any(utterance, _TEXT_WORDS))
+                    else None)
+        # A messenger she named ("on Telegram", "by iMessage") beats both the channel
+        # question and every stored choice (actions/targets.py).
+        if place in tg.MESSENGERS:
+            said_app = place
+        if said_app in tg.OPEN_ONLY:
+            chan, overrode = said_app, None
+        else:
+            chan, overrode = prefs.channel_for(
+                u["contact"] if u["contact"] != "nobody" else None, said_app)
+        if overrode:
+            by = prefs.BY.get(lang, prefs.BY["english"])
+            pref_note = prefs.say(lang, "app_note", by_now=by[chan], by_pref=by[overrode])
         # A change to the message just prepared keeps whatever she did not change.
         kept_text = None
         replacing = False
@@ -3583,8 +5020,8 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                 kept_text = got or kept_text
             if not said_now:
                 in_lang = draft.get("in_lang")
-            app = u.get("message_app", "unchanged")
-            chan = app if app in ("whatsapp", "imessage") else draft.get("channel", "imessage")
+            app = place if place in tg.MESSENGERS else u.get("message_app", "unchanged")
+            chan = app if app in tg.MESSENGERS else draft.get("channel", "imessage")
             # The message that is still counting down is the one being changed: it is
             # replaced, never sent as well. (_arm_send would send it on the spot as a
             # message "displaced" by a new one.)
@@ -3596,19 +5033,56 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         # "Send this to Matan": the words come from the screen, never from her
         # sentence. What she selected, or else the page she has open. Anything less
         # certain than that is not sent: she is asked to select it.
-        screen_body, screen_kind = None, None
-        if not amending and u.get("refers_to_screen", 0) > SCREEN_SEND_GATE:
+        screen_body, screen_kind, attachment, shot_what = None, None, None, None
+        if not amending and wants_shot:
+            # "send the screenshot to Dana" / "take a screenshot and send it to
+            # Dana": a contact was already named, or this line would not have become
+            # intent "message" above. Capture now, rather than earlier, so a version
+            # that never reaches a real send never takes one needlessly.
+            if mac.screen_locked():
+                return finish("screen_locked", _ss("empty", lang),
+                              detail={"why": "the Mac is locked"})
+            shot = _capture_screenshot(utterance)
+            if not shot["ok"]:
+                if shot["why"] == "screen_recording":
+                    return finish("screenshot_no_permission", _ss("screenshot_perm", lang),
+                                  detail={"why": shot["why"]})
+                return finish("screenshot_failed", _ss("screenshot_failed", lang),
+                              detail={"why": shot["why"], "window": shot["window"]})
+            attachment = shot["path"]
+            screen_kind = "send_screenshot"
+            shot_what = shot["app"] if (shot["window"] and shot["app"]) else _ss("this_screen", lang)
+            _remember_shot(attachment, shot["app"], shot["window"])
+        elif not amending and u.get("refers_to_screen", 0) > SCREEN_SEND_GATE:
             ctx = _screen_context(max_chars=2000)
             why = _screen_readable(ctx)
             if why:
                 return finish("screen_unavailable", _ss(why, lang), detail={"why": why})
+            recent_shot = _recent_screenshot()
             if (ctx.get("selected") or "").strip():
                 screen_body, screen_kind = ctx["selected"].strip(), "send_screen"
             elif (ctx.get("page") or {}).get("url"):
                 screen_body, screen_kind = ctx["page"]["url"], "send_link"
+            elif recent_shot:
+                # "send it to Dana" a few seconds after "take a screenshot", with no
+                # fresh word for screenshot in THIS sentence: the last one still counts.
+                attachment, screen_kind = recent_shot["path"], "send_screenshot"
+                shot_what = (recent_shot["app"] if (recent_shot["window"] and recent_shot["app"])
+                            else _ss("this_screen", lang))
             else:
-                return finish("screen_select", _ss("select", lang),
-                              detail={"why": "nothing selected and no page open"})
+                if mac.screen_locked():
+                    return finish("screen_locked", _ss("empty", lang),
+                                  detail={"why": "the Mac is locked"})
+                if not mac.SEND_FOR_REAL:
+                    return finish("send_disabled", _sp(lang, "send_off"),
+                                  detail={"to": u["contact"],
+                                          "fix": "start the server with MICMIC_ALLOW_SEND=1"})
+                # Nothing selected and no page open: rather than tell her to select
+                # something and drop the request (the old "screen_select" outcome),
+                # open the crosshair herself and send whatever she drags or clicks -
+                # this answers her turn at once and finishes on its own thread, same
+                # shape as a background web task (see _WEB / web_status above).
+                return _start_region_capture(u["contact"], chan, lang)
         # A selection that held a code or a card number is not sent at all, even with
         # the secret hidden: "send this code to ..." is exactly how codes get stolen.
         if screen_body and HIDDEN in screen_body:
@@ -3623,27 +5097,46 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             AWAITING = {"at": time.time(), "need": "who", "question": "who should the message go to",
                         "channel": chan, "lang": lang, "body": screen_body or kept_text,
                         "cut_long": cut_long, "from_screen": screen_kind, "contact": None,
-                        "intent": "message"}
-            if not screen_body:
+                        "intent": "message", "chan_said": bool(said_app) or amending,
+                        "attachment": attachment, "shot_what": shot_what}
+            if not screen_body and not attachment:
                 MEM.remember_draft(None, kept_text, chan, lang)
             return finish("need_who", _sp(lang, "who"), asked_back=True,
                           **({"detail": {"kept": {"text": kept_text, "channel": chan}}}
                              if amending else {}))
-        if screen_body:
+        if screen_body or attachment:
             who = display_name(u["contact"], lang)
+            if chan in tg.OPEN_ONLY:
+                MEM.contact, MEM.channel = u["contact"], chan
+                did_c, say_c, det_c = _open_chat(chan, u["contact"], screen_body or "", lang,
+                                                 picture=bool(attachment))
+                return finish(did_c, say_c, detail={**det_c, "from_screen": screen_kind,
+                                                    "attachment": attachment})
             if not mac.SEND_FOR_REAL:
                 return finish("send_disabled", _sp(lang, "send_off"),
                               detail={"to": u["contact"], "display": who, "from_screen": screen_kind,
+                                      "attachment": attachment,
                                       "fix": "start the server with MICMIC_ALLOW_SEND=1"})
+            if prefs.always_confirm():
+                return finish("confirm_send",
+                              _ask_to_send(u["contact"], screen_body or "", lang, chan,
+                                           "she_asked_to_be_asked", from_screen=screen_kind,
+                                           shot_what=shot_what, attachment=attachment),
+                              asked_back=True,
+                              detail={"to": u["contact"], "display": who, "from_screen": screen_kind,
+                                      "attachment": attachment})
             MEM.contact, MEM.channel = u["contact"], chan
-            _arm_send(u["contact"], screen_body, lang, channel=chan, window=CANCEL_WINDOW)
+            _arm_send(u["contact"], screen_body or "", lang, channel=chan, window=CANCEL_WINDOW,
+                      attachment=attachment)
+            fmt_kw = dict(who=who, at_he=with_prefix("ל", who, "hebrew"),
+                          at_ar=with_prefix("لـ", who, "arabic"))
+            if screen_kind == "send_screenshot":
+                fmt_kw["what"] = shot_what
             return finish("sending", (_ss("send_long", lang) + " " if cut_long else "")
-                          + _ss(screen_kind, lang).format(
-                              who=who, at_he=with_prefix("ל", who, "hebrew"),
-                              at_ar=with_prefix("لـ", who, "arabic")),
+                          + _ss(screen_kind, lang).format(**fmt_kw),
                           detail={"to": u["contact"], "display": who, "channel": chan,
-                                  "from_screen": screen_kind, "chars": len(screen_body),
-                                  "countdown": CANCEL_WINDOW})
+                                  "from_screen": screen_kind, "chars": len(screen_body or ""),
+                                  "attachment": attachment, "countdown": CANCEL_WINDOW})
         if u["has_message_content"] < 0.5:
             if replacing:
                 _cancel_pending()
@@ -3681,6 +5174,17 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         # gave her more time.
         risky = inherited_risk or (u["money_involved"] > 0.5 and u["sounds_coached"] > 0.45)
         who = display_name(u["contact"], lang)
+        if chan in tg.OPEN_ONLY:
+            # Nothing is sent from here, so no countdown and no read-back to stop.
+            if replacing:
+                _cancel_pending()
+            MEM.contact, MEM.channel = u["contact"], chan
+            MEM.remember_draft(u["contact"], body, chan, lang, in_lang)
+            did_c, say_c, det_c = _open_chat(chan, u["contact"], body, lang)
+            if risky:
+                say_c += " " + _MONEY_LINE.get(lang, _MONEY_LINE["english"])
+            return finish(did_c, say_c, detail={**det_c, "amended": amending,
+                                                "write_in": in_lang, "extra_time": bool(risky)})
         # Sending is gated off. Say so NOW, before the countdown, instead of narrating
         # a send, waiting six seconds and quietly doing nothing — which is what it did,
         # and which looks exactly like a message that was sent and never arrived.
@@ -3804,6 +5308,9 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                           asked_back=why == "not_found",
                           detail={"question": utterance, "source": "wttr.in",
                                   "place": city, "tried": tried, "why": why})
+        elif is_live(u):
+            did_l, said_l, det_l = _live_answer(j, u, utterance, lang)
+            return finish(did_l, said_l, detail=det_l, asked_back=did_l == "need_team")
         elif u["needs_knowledge"] > 0.6:
             term, _ = _span(j, u, utterance, "term")
             # "What was his most famous film" over a film she asked for by its actor:
@@ -3888,6 +5395,8 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
 
     # --- do something on a website ----------------------------------------
     if intent == "do_online":
+        if web_start:
+            MEM.app_query = _app_query(u, utterance, place) or MEM.app_query
         task, _ = pick_span(j, utterance,
             "Which words describe the thing she wants done on the internet? Not the "
             "words asking for it, just the task itself.")
@@ -3900,76 +5409,52 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         # Start where a person would start. Opening a search engine for a flight means
         # four wasted steps getting to the flight site, through the most advert-heavy,
         # consent-banner-ridden page on the web.
-        start, kind = web.where_to_start(j, task)
-        say_now = {"hebrew": f"מסתכלת על זה. {task}",
-                   "arabic": f"عم بشوف. {task}",
-                   "russian": f"Смотрю. {task}",
-                   "english": f"Let me look at that. {task}"}.get(lang, f"Working on: {task}")
-        if speak:
-            mac.say(say_now, lang)
-        r = web.run(j, LLM_CLIENT, task, start, headless=False, max_steps=30)
-        r["site_kind"] = kind
-        done_line = {
-            "needs_her": {"hebrew": "הגעתי עד לשלב שצריך אותך. תסתכלי על המסך.",
-                          "arabic": "وصلت للخطوة اللي بدها إياكي. شوفي الشاشة.",
-                          "russian": "Дошла до шага, который решаете вы. Посмотрите на экран.",
-                          "english": "I got it as far as the part only you should decide. "
-                                     "Have a look at the screen."},
-            "human_check": {"hebrew": "האתר מבקש לוודא שאת לא רובוט. תסתכלי על המסך, "
-                                      "זה משהו שרק «את יכולה|אתה יכול» לעשות.",
-                            "arabic": "الموقع بدو يتأكد إنك مش روبوت. شوفي الشاشة.",
-                            "russian": "Сайт просит подтвердить, что вы не робот. "
-                                       "Посмотрите на экран.",
-                            "english": "The site wants to check you are not a robot. "
-                                       "Have a look at the screen, that part is yours."},
-            "done":      {"hebrew": "מצאתי. זה על המסך.",
-                          "arabic": "لقيتها. هي عالشاشة.",
-                          "russian": "Нашла. Это на экране.",
-                          "english": "Found it. It is on the screen."},
-            "no_text_helper": {
-                "hebrew":  "אני לא יכולה למלא טפסים כרגע, כי השירות שכותב בשבילי לא זמין. "
-                           "פתחתי «לך|לך» את האתר על המסך.",
-                "arabic":  "ما بقدر أعبّي نماذج هلّق، لأنه الخدمة اللي بتكتب إلي مش شغّالة. "
-                           "فتحت «لك|لك» الموقع عالشاشة.",
-                "russian": "Сейчас я не могу заполнять формы: сервис, который пишет за "
-                           "меня, недоступен. Я открыла сайт на экране.",
-                "english": "I cannot fill in forms right now, because the service that writes "
-                           "for me is unavailable. I have opened the site on screen."},
-            "stuck":     {"hebrew": "נתקעתי באתר הזה. תגיד«י|» לי את זה אחרת.",
-                          "arabic": "علقت بهالموقع. احكيلي«|» إياها بطريقة تانية.",
-                          "russian": "Я застряла на этом сайте. Скажите это иначе.",
-                          "english": "I got stuck on that site. Tell me it another way."},
-            "needs_payment": {
-                "hebrew":  "הכנתי הכל. נשאר רק התשלום, וזה משהו שרק «את|אתה» «יכולה|יכול» "
-                           "לעשות. זה פתוח על המסך.",
-                "arabic":  "جهّزت كل إشي. بس ضل الدفع، وهاد إشي لازم تعمل«ي|»ه إنت«ي|». "
-                           "الصفحة مفتوحة عالشاشة.",
-                "russian": "Я всё подготовила. Остался только платёж, и это можете "
-                           "сделать только вы. Страница открыта на экране.",
-                "english": "I have set it all up. Only the payment is left, and that "
-                           "part is yours. It is open on the screen."},
-            "partly_done": {"hebrew": "הגעתי רוב הדרך. זה על המסך, ת«ראי|ראה» אם זה מה שרצית.",
-                            "arabic": "وصلت لمعظم الطريق. هي عالشاشة، شوف«ي|» إذا هاد اللي بدك.",
-                            "russian": "Я дошла почти до конца. Это на экране, посмотрите, "
-                                       "то ли это, что вы хотели.",
-                            "english": "I got most of the way. It is on the screen, so "
-                                       "have a look and see if that is what you wanted."},
-            "blocked":   {"hebrew": "לא הצלחתי לעשות את זה באתר.",
-                          "arabic": "ما قدرت أعملها بالموقع.",
-                          "russian": "У меня не получилось сделать это на сайте.",
-                          "english": "I could not get that done on the site."},
-        }.get("no_text_helper" if r.get("why") == "no_text_helper"
-              else "human_check" if r.get("why", "").startswith("the site asked")
-              else r["did"], {"hebrew": "סיימתי.", "arabic": "خلصت.",
-                              "russian": "Готово.", "english": "Done."})
-        said = done_line.get(lang) or done_line.get("english")
-        # The card shows `steps`, so those are hers: plain, short, in her language.
-        # The agent's own log, which is developer English, rides along as `log`.
-        return finish(f"web_{r['did']}", said,
-                      url=r.get("url"),
-                      detail={"task": task, "steps": web.shown_steps(r["steps"], lang),
-                              "log": r["steps"], "page": r.get("title"),
-                              "url": r.get("url"), "why": r.get("why")})
+        start, kind = web_start or web.where_to_start(j, task)
+        # Every browser task answers its turn at once and runs on its own thread. The
+        # listener gives up on an answer after 45 s; a run can take 75 s by itself and
+        # minutes more while she solves a check, and a turn held open that long showed
+        # "unreachable" while the browser was still working. The bar follows the run
+        # on /api/web_status, and how it ended is said out loud when it ends.
+        _web_stop()                     # a new task replaces whatever is still going
+        stop = threading.Event()
+        log: list = []
+        with _WEB_LOCK:
+            _WEB.clear()
+            _WEB.update(id=f"{time.time():.3f}", lang=lang, log=log, stop=stop, say="")
+            run_id = _WEB["id"]
+        gender = prof.load().get("gender", "")
+
+        def on_handoff(what: str) -> None:
+            line = WEB_WAIT_SAY.get(what, WEB_WAIT_SAY["human_check"])
+            said_w = degender(line.get(lang) or line["english"], gender)
+            with _WEB_LOCK:
+                if _WEB.get("id") == run_id:
+                    _WEB["say"] = said_w
+            if speak:
+                mac.say(said_w, lang)
+
+        def on_resume(what: str) -> None:
+            with _WEB_LOCK:
+                if _WEB.get("id") == run_id:
+                    _WEB["say"] = ""
+            if speak:
+                mac.say(degender(WEB_RESUME_SAY.get(lang) or WEB_RESUME_SAY["english"],
+                                 gender), lang)
+
+        def work() -> None:
+            box: dict = {}
+            try:
+                box["r"] = web.run(j, LLM_CLIENT, task, start, headless=False,
+                                   max_steps=30, on_step=log.append, stop=stop,
+                                   on_handoff=on_handoff, on_resume=on_resume)
+                box["r"]["site_kind"] = kind
+            except BaseException as e:  # noqa: BLE001  (reported as a failed task)
+                box["err"] = e
+            _web_finished(box, run_id, lang, speak, utterance, client, activation)
+        threading.Thread(target=work, daemon=True, name="micmic-web").start()
+        return finish("web_working", WEB_WORKING_SAY.get(lang) or WEB_WORKING_SAY["english"],
+                      detail={"task": task, "web_run": run_id, "site_kind": kind,
+                              "steps": []})
 
     # --- live radio and news ----------------------------------------------
     if intent == "radio":
@@ -3985,7 +5470,7 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             return finish("not_found", _sp(lang, "cant_search", q=q), detail={"searched": q})
         pick, pconf, good = pick_result(j, f"{q}, live right now", rows, False, bool(what))
         pick = pick or rows[0]
-        MEM.played(q, "news_or_current", False, pick, lang)
+        MEM.played(q, "news_or_current", False, {**pick, "player": "youtube"}, lang)
         url = yt.watch_url(pick["id"])
         mac.open_url(url)
         return finish("playing", _sp(lang, "playing"), url=url,
@@ -4016,13 +5501,18 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
 
     # --- open an app ------------------------------------------------------
     if intent == "open_app":
-        apps = mac.installed_apps()
-        app, aconf, agood = pick_from(
-            j, [{"name": a} for a in apps], lambda r: r["name"],
-            "Which program on this computer is she asking to open? Match by what the "
-            "program is for, not only by name: she will say 'the calculator' or "
-            "'my calendar', never the exact application name.",
-            {"she_said": utterance})
+        if open_named:
+            # She said its name after "in" or "on" and Jev agreed it is where: no
+            # second call to ask which program she means.
+            app, aconf, agood = {"name": open_named}, u.get("named_app_confidence", 0.0), 1.0
+        else:
+            apps = mac.installed_apps()
+            app, aconf, agood = pick_from(
+                j, [{"name": a} for a in apps], lambda r: r["name"],
+                "Which program on this computer is she asking to open? Match by what the "
+                "program is for, not only by name: she will say 'the calculator' or "
+                "'my calendar', never the exact application name.",
+                {"she_said": utterance})
         if not app:
             return finish("not_found", _sp(lang, "cant"),
                           detail=f"no app matched (any_good={agood:.2f})")
@@ -4212,6 +5702,15 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
     if intent == "again":
         # It used to say "Alright" and do nothing whatsoever, which is the worst of
         # both: no repeat, and a sentence claiming there was one.
+        # A song in Music or Spotify starts over there; a service's search page is put
+        # back in front of her. Neither has a YouTube address to reopen.
+        in_app = _in_app_control("restart", lang)
+        if in_app:
+            return finish(in_app[0], in_app[1], detail={**in_app[2], "repeat": True})
+        if (MEM.last_played or {}).get("player") in tg.VIDEO and MEM.play_query:
+            did_v, say_v, det_v = tg.open_there(MEM.last_played["player"],
+                                                MEM.play_query, lang)
+            return finish(did_v, say_v, detail={**det_v, "repeat": True})
         if MEM.last_played:
             url = yt.watch_url(MEM.last_played["id"])
             mac.open_url(url)

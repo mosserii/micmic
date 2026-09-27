@@ -697,6 +697,116 @@ html.barmode .undo:hover{background:color-mix(in oklab,var(--warm) 16%,var(--gla
 html.barmode .undo:active{transform:scale(.97)}
 html.barmode .undo:focus-visible{outline:2px solid var(--live);outline-offset:2px}
 html.barmode .undo:disabled{opacity:.6;cursor:default;transform:none}
+
+/* ---- guide mode ---------------------------------------------------------
+   MicMic walks her through something on screen one step at a time while she does
+   it (savta/actions/guide.py). Two pieces: the "Guide me" chip under a how-to
+   answer, and the guide card: which step, the one thing to do now, and Done. The
+   ring on the real screen is native's (native/guide_overlay.py); this is the words.
+   Calm on purpose: it sits beside her work for minutes, so nothing here blinks. */
+.gchip{display:none}
+.gchip:not([hidden]){display:inline-flex;align-items:center;gap:7px;cursor:pointer;
+  margin-top:14px;white-space:nowrap;max-width:100%;
+  font:500 15px/1 Rubik,-apple-system,system-ui,sans-serif;color:var(--ink);
+  padding:9px 15px 9px 12px;border-radius:999px;
+  background:color-mix(in oklab,var(--live) 16%,var(--glass));
+  border:1px solid color-mix(in oklab,var(--live) 48%,transparent);
+  box-shadow:0 8px 20px -12px var(--shade),inset 0 1.5px 0 -0.5px var(--glass-edge);
+  transition:background .18s ease,transform .15s ease;animation:barIn .32s cubic-bezier(.22,1,.36,1)}
+.gchip svg{flex:none;width:16px;height:16px;fill:var(--live)}
+.gchip span{overflow:hidden;text-overflow:ellipsis}
+.gchip:hover{background:color-mix(in oklab,var(--live) 26%,var(--glass))}
+.gchip:active{transform:scale(.97)}
+.gchip:focus-visible{outline:2px solid var(--live);outline-offset:2px}
+
+.guide{display:none}
+.guide:not([hidden]){display:flex;flex-direction:column;gap:0;text-align:start;
+  position:relative;margin-top:20px;width:min(430px,84vw);border-radius:22px;padding:15px 18px 16px;
+  background:var(--glass);border:1px solid color-mix(in oklab,var(--live) 34%,var(--glass-line));
+  -webkit-backdrop-filter:blur(30px) saturate(200%);backdrop-filter:blur(30px) saturate(200%);
+  box-shadow:0 26px 60px -24px var(--shade),inset 0 1.5px 0 -0.5px var(--glass-edge);
+  animation:barIn .32s cubic-bezier(.22,1,.36,1)}
+.g-head{display:flex;align-items:center;gap:8px;min-width:0;font-size:12px;line-height:1.3}
+.g-step{flex:none;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--live);
+  display:inline-flex;align-items:center;gap:6px}
+/* A quiet beat while it waits for her: she is the one doing the step. */
+.g-step::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--live);
+  box-shadow:0 0 0 3px color-mix(in oklab,var(--live) 22%,transparent)}
+.guide[data-status="thinking"] .g-step::before{background:var(--warm);
+  box-shadow:0 0 0 3px color-mix(in oklab,var(--warm) 22%,transparent);animation:gbeat 1.4s ease-in-out infinite}
+.guide[data-status="stopped"] .g-step::before,.guide[data-status="failed"] .g-step::before{display:none}
+@keyframes gbeat{0%,100%{opacity:1}50%{opacity:.35}}
+.g-step svg{width:14px;height:14px;fill:currentColor}
+.g-goal{min-width:0;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;unicode-bidi:plaintext}
+.g-goal:not(:empty)::before{content:"\00B7";margin-inline-end:8px;opacity:.7}
+.g-say{margin-top:7px;font-size:19px;font-weight:500;line-height:1.36;color:var(--ink);
+  unicode-bidi:plaintext;text-wrap:pretty;
+  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.guide[data-status="thinking"] .g-say{color:var(--muted);font-weight:400}
+.guide[data-status="thinking"] .g-say::after{content:"";display:inline-block;width:1.2em;text-align:start;
+  animation:workdots 1.2s steps(4,end) infinite}
+.guide[data-status="failed"] .g-say{color:var(--warm)}
+.g-note{margin-top:6px;font-size:14px;line-height:1.4;color:var(--muted);unicode-bidi:plaintext;
+  display:flex;align-items:flex-start;gap:6px}
+.g-note[hidden]{display:none}
+.g-note svg{flex:none;width:14px;height:14px;margin-top:2px;fill:currentColor;opacity:.8}
+.g-acts{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:13px}
+.g-acts[hidden]{display:none}
+.g-btn{display:inline-flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap;
+  font:500 14px/1 Rubik,-apple-system,system-ui,sans-serif;color:var(--ink);
+  padding:9px 14px;border-radius:999px;background:var(--glass);border:1px solid var(--glass-line);
+  box-shadow:0 6px 16px -12px var(--shade),inset 0 1.5px 0 -0.5px var(--glass-edge);
+  transition:background .18s ease,transform .15s ease,opacity .2s ease}
+.g-btn[hidden]{display:none}
+.g-btn svg{flex:none;width:15px;height:15px;fill:currentColor;opacity:.85}
+.g-btn:hover{background:color-mix(in oklab,var(--live) 10%,var(--glass))}
+.g-btn:active{transform:scale(.97)}
+.g-btn:focus-visible{outline:2px solid var(--live);outline-offset:2px}
+.g-btn:disabled{opacity:.5;cursor:default;transform:none}
+.g-primary{background:color-mix(in oklab,var(--live) 22%,var(--glass));
+  border-color:color-mix(in oklab,var(--live) 55%,transparent)}
+.g-primary:hover{background:color-mix(in oklab,var(--live) 32%,var(--glass))}
+.g-quiet{background:transparent;border-color:transparent;box-shadow:none;color:var(--muted);padding-inline:10px}
+.g-quiet:hover{background:color-mix(in oklab,var(--ink) 7%,transparent);color:var(--ink)}
+/* Why and Stop keep together at the far end; on a narrow card they wrap as a pair. */
+.g-side{display:inline-flex;align-items:center;gap:2px;margin-inline-start:auto}
+.g-step:empty + .g-goal::before{display:none}
+.guide[data-status="done"] .g-step::before{display:inline-block;width:14px;height:14px;
+  border-radius:0;box-shadow:none;background:var(--live);
+  -webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M9.5 16.2 5.3 12a1 1 0 1 0-1.4 1.4l4.9 4.9a1 1 0 0 0 1.4 0l10-10a1 1 0 1 0-1.4-1.4z'/%3E%3C/svg%3E") center/contain no-repeat;
+          mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M9.5 16.2 5.3 12a1 1 0 1 0-1.4 1.4l4.9 4.9a1 1 0 0 0 1.4 0l10-10a1 1 0 1 0-1.4-1.4z'/%3E%3C/svg%3E") center/contain no-repeat}
+/* What was answered before the guide began, or a reply that only repeats the step,
+   is already said by the card. */
+body.gdup #reply{display:none}
+/* The panel: the guide takes the card's place, in the panel's smaller type. */
+body.panel .guide:not([hidden]){width:100%;margin-top:10px;padding:12px 14px 13px;border-radius:18px}
+body.panel .g-say{font-size:16px}
+body.panel .g-btn{font-size:13px;padding:8px 12px}
+body.panel .g-quiet{padding-inline:8px}
+body.panel .gchip:not([hidden]){margin-top:10px;font-size:13px;padding:8px 13px 8px 10px}
+body.guiding .card{display:none}
+/* The bar: the guide's parts become the strip's own rows beside the orb, so her words
+   and a reply to "why?" still have their place above the step. */
+html.barmode .gchip:not([hidden]){grid-area:act;align-self:center;margin:0;max-width:220px;
+  font-size:15px}
+html.barmode.b-guide .stage{grid-template-columns:auto minmax(0,1fr);
+  grid-template-rows:auto auto auto auto auto;
+  grid-template-areas:"orb ghead" "orb aux" "orb gsay" "orb gnote" "orb gacts";
+  align-items:start;padding-block:13px 14px}
+html.barmode.b-guide .orb{align-self:start;margin-top:2px}
+html.barmode .guide:not([hidden]){display:contents}
+html.barmode .g-head{grid-area:ghead;padding-top:1px}
+html.barmode .g-say{grid-area:gsay;margin-top:4px;font-size:18px}
+html.barmode .g-note{grid-area:gnote;margin-top:4px;font-size:13px}
+html.barmode .g-acts{grid-area:gacts;margin-top:10px}
+html.barmode.b-guide .state,html.barmode.b-guide .undo{display:none!important}
+html.barmode.b-guide .heard,html.barmode.b-guide .reply,html.barmode.b-guide .work{grid-area:aux;
+  margin:5px 0 0;font-size:13px;line-height:1.35;color:var(--muted);max-height:none;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:none}
+html.barmode.b-guide.b-heard:not(.b-result) .heard{display:block}
+html.barmode.b-guide.b-result:not(.b-dup) .reply{display:block;color:var(--ink)}
+html.barmode.b-guide:not(.b-result) body.thinking .work{display:block}
+@media (prefers-reduced-motion:reduce){.guide[data-status="thinking"] .g-step::before{animation:none}}
 </style>
 </head>
 <body>
@@ -760,6 +870,39 @@ l-753 0 0 1115 c0 1114 0 1115 20 1115 106 0 558 60 793 106 1223 236 2275
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.7 5.3a1 1 0 0 1 0 1.4L7.4 9H14a6 6 0 0 1 0 12h-3a1 1 0 0 1 0-2h3a4 4 0 0 0 0-8H7.4l2.3 2.3a1 1 0 1 1-1.4 1.4l-4-4a1 1 0 0 1 0-1.4l4-4a1 1 0 0 1 1.4 0z"/></svg>
     <span id="undow"></span>
   </button>
+
+  <!-- "Guide me": under an answer to a how-to question about the screen, only. -->
+  <button class="gchip" id="gchip" type="button" hidden>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2a8 8 0 1 1 0 16 8 8 0 0 1 0-16zm3.9 3.6-5.5 2.3a1 1 0 0 0-.5.5l-2.3 5.5a.5.5 0 0 0 .6.6l5.5-2.3a1 1 0 0 0 .5-.5l2.3-5.5a.5.5 0 0 0-.6-.6zM12 10.8a1.2 1.2 0 1 1 0 2.4 1.2 1.2 0 0 1 0-2.4z"/></svg>
+    <span id="gchipw"></span>
+  </button>
+
+  <!-- The guide card: which step, the one thing to do now, and the buttons. -->
+  <section class="guide" id="guide" hidden data-status="">
+    <div class="g-head">
+      <span class="g-step" id="gStep"></span>
+      <span class="g-goal" id="gGoal" dir="auto"></span>
+    </div>
+    <p class="g-say" id="gSay" dir="auto" aria-live="polite"></p>
+    <p class="g-note" id="gNote" hidden>
+      <svg id="gLock" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5zm-3 8V7a3 3 0 1 1 6 0v3H9z"/></svg>
+      <span id="gNotew" dir="auto"></span>
+    </p>
+    <div class="g-acts" id="gActs">
+      <button class="g-btn g-primary" id="gDoneB" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.5 16.2 5.3 12a1 1 0 1 0-1.4 1.4l4.9 4.9a1 1 0 0 0 1.4 0l10-10a1 1 0 1 0-1.4-1.4z"/></svg>
+        <span id="gDoneW"></span>
+      </button>
+      <button class="g-btn" id="gDoB" type="button" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3a1 1 0 0 1 1 1v6.3l1-.2V5a1 1 0 1 1 2 0v5l1 .1V6a1 1 0 1 1 2 0v4.6l1 .3V8.5a1 1 0 1 1 2 0V14c0 4-2.7 7-6.5 7-2.4 0-4.2-1.2-5.6-3.4L5.2 14a1.2 1.2 0 0 1 2-1.3L8 14V4a1 1 0 0 1 1-1z"/></svg>
+        <span id="gDoW"></span>
+      </button>
+      <span class="g-side">
+        <button class="g-btn g-quiet" id="gWhyB" type="button"><span id="gWhyW"></span></button>
+        <button class="g-btn g-quiet" id="gStopB" type="button"><span id="gStopW"></span></button>
+      </span>
+    </div>
+  </section>
 
   <section class="card" id="card" aria-live="polite">
     <img class="thumb" id="thumb" alt="">
@@ -934,7 +1077,7 @@ const COPY = {
       ob3Title:"בואו ננסה.", ob3Sub:"מחזיקים ⌥ ואומרים", ob3Phrase:"מה השעה?", obWaiting:"מחכה לך",
       obNoKey:"⌥ עוד לא עובד? לוחצים על העיגול.", obSetTitle:"הכל מוכן.", obSetSub:"MicMic שמעה אותך.", obListen:"להתחיל להקשיב",
       axNote:"כדי ש-{key} יפעיל את MicMic, צריך להפעיל נגישות.", axOpen:"פתיחת הגדרות נגישות", send:"שליחה", language:"שפה", secShort:"{n} שנ׳",
-      ob1TitleFn:"לוחצים פעמיים על Fn ומדברים.", ob1SubFn:"לחיצה נוספת על Fn שולחת.", ob3SubFn:"לוחצים פעמיים על Fn ואומרים", ob1TitlePress:"לוחצים ⌥ ומדברים.", ob1SubPress:"לחיצה נוספת שולחת.", ob3SubPress:"לוחצים ⌥ ואומרים"},
+      ob1TitleFn:"לוחצים פעמיים על Fn ומדברים.", ob1SubFn:"לחיצה נוספת על Fn שולחת.", ob3SubFn:"לוחצים פעמיים על Fn ואומרים", ob1TitlePress:"לוחצים ⌥ ומדברים.", ob1SubPress:"לחיצה נוספת שולחת.", ob3SubPress:"לוחצים ⌥ ואומרים", guideMe:"תדריכי אותי", gStep:"שלב {n}", gDone:"עשיתי", gDoIt:"תעשי בשבילי", gStop:"הפסקה", gWhy:"למה?", gLooking:"מסתכלת על המסך", gFinished:"סיימנו", gClose:"סגירה", gSecret:"את זה מקלידים לבד. MicMic לא קוראת את זה.", gStopped:"ההדרכה הופסקה"},
   he_m:{off:"גע כדי לדבר", idle:"גע כדי לדבר", wake:"אמור מיקמיק",
       foot:"גע בעיגול או לחץ על מקש הרווח", footWake:"אמור מיקמיק כדי להתחיל",
       footAlways:"פשוט תדבר", mic:"תן הרשאה למיקרופון ואז רענן",
@@ -962,7 +1105,7 @@ const COPY = {
       ob3Title:"Try it.", ob3Sub:"Hold ⌥ and say", ob3Phrase:"What time is it?", obWaiting:"Waiting for you",
       obNoKey:"No ⌥ yet? Click the circle.", obSetTitle:"You're set.", obSetSub:"MicMic heard you.", obListen:"Start listening",
       axNote:"{key} needs Accessibility before it can start MicMic.", axOpen:"Open Accessibility settings", send:"Send", language:"Language", secShort:"{n}s",
-      ob1TitleFn:"Double-tap Fn and talk.", ob1SubFn:"Press Fn once more to send.", ob3SubFn:"Double-tap Fn and say", ob1TitlePress:"Press ⌥ and talk.", ob1SubPress:"Press it again to send.", ob3SubPress:"Press ⌥ and say"},
+      ob1TitleFn:"Double-tap Fn and talk.", ob1SubFn:"Press Fn once more to send.", ob3SubFn:"Double-tap Fn and say", ob1TitlePress:"Press ⌥ and talk.", ob1SubPress:"Press it again to send.", ob3SubPress:"Press ⌥ and say", guideMe:"Guide me", gStep:"Step {n}", gDone:"Done", gDoIt:"Do it for me", gStop:"Stop", gWhy:"Why?", gLooking:"Looking at your screen", gFinished:"All done", gClose:"Close", gSecret:"Only you type this. MicMic does not read it.", gStopped:"Guide stopped"},
   ar:{
       settings:"الإعدادات", sHotkey:"اختصار لوحة المفاتيح", sHotkeyHint:"اضغط مطولاً واحكِ، واترك المفتاح للإرسال. أو نقرة للبدء ونقرة ثانية للإرسال. للتغيير: اضغط الزر ثم تركيبة مفاتيح أو مفتاح يمين واحد. Esc للإلغاء.", sRightCmd:"⌘ اليمين", sRightOpt:"⌥ اليمين", sRightCtrl:"⌃ اليمين", sRightShift:"⇧ اليمين", sNotSaved:"ما قدرت احفظ هاد", sFnTwice:"Fn مرتين", sTap:"نقرة", sFn:"نقرة مزدوجة على Fn", sPressNow:"بانتظار تركيبة مفاتيح…", sStart:"كيف يبدأ", sPush:"ضغطة", sWake:"كلمة تنبيه", sAlways:"يستمع دائماً", sDisplay:"شو بيظهر لما تحكي", sSend:"ابعت رسائل عني", sOn:"نعم", sOff:"لا", hSend:"كل رسالة بتنقرا قبل ما تنبعت، وإذا قلت لأ بتوقف.", sDispPanel:"نافذة كاملة", sDispBar:"شريط صغير", sDispNone:"ولا شي", hDisplay:"بدون شي عالشاشة، MicMic بيعمل الشغلة وبيقول بصوت عالي شو عمل.", sLogin:"الفتح عند تسجيل الدخول", hLogin:"بيفتح تلقائياً لما تسجل دخول عالماك.", sWords:"كلمات التنبيه", sLang:"لغة الكلام", sListen:"مدة الاستماع", sSeconds:"ثانية", sSaved:"تم الحفظ", sDone:"تم", sAccount:"الحساب", aFree:"مجاني", aPro:"Pro", aUsage:"{n} من {m} طلب اليوم", aUsageTotal:"{n} من {m} طلب مجاني للتجربة", aUpgrade:"الترقية إلى Pro", aManage:"إدارة الاشتراك", aOwnKey:"تستخدم مفتاحك الخاص", aOffline:"لا يوجد اتصال الآن، سأحاول مرة أخرى قريباً", aSetup:"جارٍ إعداد الحساب…", aTooMany:"هذا الحساب فيه أجهزة كثيرة أصلاً", aPayOff:"الدفع غير متاح الآن، حاول لاحقاً", aOpenFail:"لم أتمكن من فتح الصفحة، حاول مرة أخرى",
      typehere:"أو اكتب هنا", newchat:"محادثة جديدة", fresh:"منبدأ من جديد", youSaid:"طلبت", ready:"أستمع", think:"لحظة", working:"عم أشتغل عليها", acting:"حالاً", off:"المس للتحدث",
@@ -984,7 +1127,7 @@ const COPY = {
       ob3Title:"جرّبه.", ob3Sub:"اضغط ⌥ مطولاً وقل", ob3Phrase:"كم الساعة؟", obWaiting:"بانتظارك",
       obNoKey:"⌥ لسا ما اشتغل؟ اضغط على الدائرة.", obSetTitle:"كل شي جاهز.", obSetSub:"MicMic سمعك.", obListen:"ابدأ الاستماع",
       axNote:"لازم تفعّل إمكانية الوصول حتى يشغّل {key} MicMic.", axOpen:"فتح إعدادات إمكانية الوصول", send:"إرسال", language:"اللغة", secShort:"{n} ث",
-      ob1TitleFn:"اضغط Fn مرتين واحكِ.", ob1SubFn:"ضغطة كمان على Fn للإرسال.", ob3SubFn:"اضغط Fn مرتين وقل", ob1TitlePress:"اضغط ⌥ واحكِ.", ob1SubPress:"اضغط مرة ثانية للإرسال.", ob3SubPress:"اضغط ⌥ وقل"},
+      ob1TitleFn:"اضغط Fn مرتين واحكِ.", ob1SubFn:"ضغطة كمان على Fn للإرسال.", ob3SubFn:"اضغط Fn مرتين وقل", ob1TitlePress:"اضغط ⌥ واحكِ.", ob1SubPress:"اضغط مرة ثانية للإرسال.", ob3SubPress:"اضغط ⌥ وقل", guideMe:"أرشدني خطوة بخطوة", gStep:"الخطوة {n}", gDone:"تمّ", gDoIt:"نفّذها عني", gStop:"إيقاف", gWhy:"لماذا؟", gLooking:"أنظر إلى الشاشة", gFinished:"انتهينا", gClose:"إغلاق", gSecret:"هذا تكتبه بنفسك. MicMic لا يقرؤه.", gStopped:"توقّف الإرشاد"},
   ru:{
       settings:"Настройки", sHotkey:"Сочетание клавиш", sHotkeyHint:"Удерживайте клавишу и говорите, отпустите, чтобы отправить. Или нажмите один раз, чтобы начать, и ещё раз, чтобы отправить. Чтобы сменить: нажмите кнопку, затем сочетание или правую клавишу. Esc отменяет.", sRightCmd:"Правый ⌘", sRightOpt:"Правый ⌥", sRightCtrl:"Правый ⌃", sRightShift:"Правый ⇧", sNotSaved:"Не удалось сохранить", sFnTwice:"Fn дважды", sTap:"нажатие", sFn:"двойное нажатие Fn / Globe", sPressNow:"ждём сочетание клавиш…", sStart:"Как начинать", sPush:"нажатие", sWake:"слово-активатор", sAlways:"всегда слушает", sDisplay:"Что показывать, когда вы говорите", sSend:"Отправлять сообщения за меня", sOn:"да", sOff:"нет", hSend:"Каждое сообщение зачитывается перед отправкой, и «нет» его останавливает.", sDispPanel:"всё окно", sDispBar:"узкая полоса", sDispNone:"ничего", hDisplay:"Без окна MicMic просто делает и вслух говорит, что сделал.", sLogin:"Запуск при входе в систему", hLogin:"Запускается автоматически при входе в Mac.", sWords:"Слова-активаторы", sLang:"Язык речи", sListen:"Сколько слушать", sSeconds:"секунд", sSaved:"сохранено", sDone:"Готово", sAccount:"Аккаунт", aFree:"Бесплатно", aPro:"Pro", aUsage:"{n} из {m} запросов сегодня", aUsageTotal:"{n} из {m} бесплатных запросов", aUpgrade:"Перейти на Pro", aManage:"Управлять подпиской", aOwnKey:"Используется ваш собственный ключ", aOffline:"Нет связи, попробую ещё раз чуть позже", aSetup:"Настраиваю аккаунт…", aTooMany:"На этом аккаунте уже слишком много устройств", aPayOff:"Оплата сейчас недоступна, попробуйте позже", aOpenFail:"Не удалось открыть страницу, попробуйте ещё раз",
      typehere:"или просто напишите здесь", newchat:"новый разговор", fresh:"начинаем заново", youSaid:"вы просили", ready:"слушаю", think:"секунду", working:"Работаю над этим", acting:"сейчас", off:"нажмите, чтобы говорить",
@@ -1006,7 +1149,7 @@ const COPY = {
       ob3Title:"Попробуйте.", ob3Sub:"Удерживайте ⌥ и скажите", ob3Phrase:"Который час?", obWaiting:"Жду вас",
       obNoKey:"⌥ пока не работает? Нажмите на круг.", obSetTitle:"Всё готово.", obSetSub:"Получилось.", obListen:"Начать слушать",
       axNote:"Чтобы {key} запускал MicMic, включите универсальный доступ.", axOpen:"Открыть универсальный доступ", send:"Отправить", language:"Язык", secShort:"{n} с",
-      ob1TitleFn:"Дважды нажмите Fn и говорите.", ob1SubFn:"Нажмите Fn ещё раз, чтобы отправить.", ob3SubFn:"Дважды нажмите Fn и скажите", ob1TitlePress:"Нажмите ⌥ и говорите.", ob1SubPress:"Нажмите ещё раз, чтобы отправить.", ob3SubPress:"Нажмите ⌥ и скажите"},
+      ob1TitleFn:"Дважды нажмите Fn и говорите.", ob1SubFn:"Нажмите Fn ещё раз, чтобы отправить.", ob3SubFn:"Дважды нажмите Fn и скажите", ob1TitlePress:"Нажмите ⌥ и говорите.", ob1SubPress:"Нажмите ещё раз, чтобы отправить.", ob3SubPress:"Нажмите ⌥ и скажите", guideMe:"Покажи по шагам", gStep:"Шаг {n}", gDone:"Готово", gDoIt:"Сделай за меня", gStop:"Стоп", gWhy:"Зачем?", gLooking:"Смотрю на экран", gFinished:"Всё готово", gClose:"Закрыть", gSecret:"Это вводите только вы. MicMic это не читает.", gStopped:"Подсказки остановлены"},
 };
 // language_hint is one of four codes everywhere else in this system (router.py's own
 // taxonomy); collapsing ar/ru to "en" here was why an Arabic or Russian speaker saw
@@ -1094,7 +1237,7 @@ let STATE_KEY = null;
 // first panelState() the listener sent, it put the typing box, the send button, "+"
 // and the gear back on screen underneath the onboarding's own footer and progress.
 // "noax": Accessibility is off, so the shortcut cannot reach MicMic (the notice shows).
-const STICKY = ["hascard", "hasthread", "panel", "onboarding", "noax"];
+const STICKY = ["hascard", "hasthread", "panel", "onboarding", "noax", "guiding", "gdup"];
 function setState(cls, key){
   const keep = STICKY.filter(c => document.body.classList.contains(c));
   document.body.className = [cls, ...keep].join(" ");
@@ -1140,7 +1283,7 @@ async function send(text, speculative){
   let painted = false;
   const ctrl = speculative ? new AbortController() : null;
   if(speculative) specCtrl = ctrl;
-  if(!speculative){ setState("thinking","think"); $("err").textContent = ""; }
+  if(!speculative){ setState("thinking","think"); $("err").textContent = ""; webUnfollow(); }
   let errored = false, aborted = false;
   try{
     const res = await fetch("/api/utterance",{method:"POST",
@@ -1155,6 +1298,7 @@ async function send(text, speculative){
       // so putting them in the transcript would show the user words nobody said.
       if(!speculative) threadAdd(text, d.say || "");
       render(d); painted = true;
+      if(!speculative) webFollow(d);
     }
   }catch(e){
     if(e && e.name === "AbortError"){ aborted = true; }
@@ -1397,11 +1541,115 @@ function render(d){
      && rep.textContent.trim() === $("cardT").textContent.trim()){
     rep.textContent = "";
   }
+  // A guide step or a "Guide me" offer rides on the reply; the card and the chip are
+  // painted from the guide's own state, which the reply carries or the server has.
+  if(d.guide && typeof d.guide === "object"){ GUIDE_SHOWN = d.guide.id; paintGuide(d.guide); guideLoop(); }
+  else if(d.guide_offer) guideLoop();
+  else if(!$("gchip").hidden) $("gchip").hidden = true;
+  guideDup();
   // The panel's column scrolls once a transcript and a card do not both fit: the newest
   // answer is the one to see, so it comes into view above the typing box.
   if(PANEL) requestAnimationFrame(() => {
     const st = document.querySelector(".stage");
     if(st.scrollHeight > st.clientHeight) st.scrollTo({top: st.scrollHeight});
+  });
+}
+
+
+/* ------------------------------------------------ a browser task, followed */
+// A web task answers its turn at once ("Working on it in the browser.") and runs on
+// the server's own thread, for up to 75 s plus the minutes she may spend on a human
+// check. Until now the page showed that first line and nothing after it: the progress
+// and the ending were only spoken. So a task this page started is followed on
+// /api/web_status: each step goes on the card as it happens, the "waiting for you"
+// line while she solves a check or signs in, and the ending replaces the reply line.
+// It stops when the task ends, when a newer request is sent (send() calls
+// webUnfollow), or after WEB_MAX_MS. Kept in this region: render() is not touched.
+const WEB_POLL_MS = 1000;
+const WEB_MAX_MS = 900000;            // past the longest run the server allows
+let WEB = null;                       // {id, t0, timer, steps: [], working: "..."}
+
+function webUnfollow(){
+  if(WEB){ clearTimeout(WEB.timer); WEB = null; }
+}
+
+function webFollow(d){
+  const det = (d && d.detail && typeof d.detail === "object") ? d.detail : null;
+  if(!det || !det.web_run) return;
+  webUnfollow();
+  WEB = {id: det.web_run, t0: Date.now(), timer: null, steps: (det.steps || []).slice(),
+         working: d.say || ""};
+  webSchedule(WEB);
+}
+
+function webSchedule(w){
+  w.timer = setTimeout(() => webPoll(w), WEB_POLL_MS);
+}
+
+async function webPoll(w){
+  if(WEB !== w) return;                            // replaced or stopped meanwhile
+  if(Date.now() - w.t0 > WEB_MAX_MS){ webUnfollow(); return; }
+  let st = null;
+  try{
+    const res = await fetch("/api/web_status", {cache: "no-store"});
+    st = await res.json();
+  }catch(_){ st = null; }                          // server busy: try the next tick
+  if(WEB !== w) return;
+  if(st && st.id && st.id !== w.id){ webUnfollow(); return; }   // a newer task
+  const fin = st && st.finished;
+  if(fin && fin.id === w.id){
+    webEnd(fin.say || "");
+    webUnfollow();
+    return;
+  }
+  if(st && st.id === w.id) webProgress(st.progress || "", st.waiting ? (st.say || "") : "");
+  webSchedule(w);
+}
+
+function webSteps(lines){
+  $("cardM").innerHTML = lines.slice(-4).map(x => `<div class="step">${esc(x)}</div>`).join("");
+  cardMore();
+}
+
+function webProgress(step, waitLine){
+  if(step && WEB.steps[WEB.steps.length - 1] !== step){
+    WEB.steps.push(step);
+    webSteps(WEB.steps);
+  }
+  // While it waits for her, what she has to do is the headline, whole: the reply line
+  // is clamped to two lines and cut "solve the check" off. Once she is done it goes
+  // back to the task and "working on it".
+  if(waitLine) webHeadline(waitLine, "");
+  else webHeadline(null, WEB.working);
+}
+
+// The card's headline and the reply line under it. `text` null: the task, as render()
+// first painted it. Anything else is a sentence to read, in the pay card's type.
+function webHeadline(text, reply){
+  const T = $("cardT");
+  if(!WEB.task) WEB.task = T.textContent;
+  const want = text === null ? WEB.task : text;
+  if(T.textContent !== want){
+    T.textContent = want;
+    const big = text !== null;
+    T.style.fontSize = big ? cardPx(19) : "";
+    T.style.fontWeight = big ? "500" : "";
+    T.style.lineHeight = big ? "1.4" : "";
+    T.style.webkitLineClamp = big ? "unset" : "";
+    cardMore();
+  }
+  if($("reply").textContent !== reply) $("reply").textContent = reply;
+}
+
+function webEnd(say){
+  if(!say) return;                     // she stopped it and has already been told
+  webHeadline(say, "");
+  // The turn that started it now reads as how it ended.
+  if(THREAD.length) THREAD[THREAD.length - 1].answered = say;
+  paintThread();
+  if(PANEL) requestAnimationFrame(() => {
+    const stg = document.querySelector(".stage");
+    if(stg.scrollHeight > stg.clientHeight) stg.scrollTo({top: stg.scrollHeight});
   });
 }
 
@@ -1814,6 +2062,7 @@ function applyLanguage(code, {remember=true}={}){
   if(STATE_KEY) $("state").textContent = t(STATE_KEY);
   paintThread();
   paintBarCopy();
+  paintGuideCopy();
   if(window.onboardingLanguage) window.onboardingLanguage();
 
   for(const b of $("langmenu").children){
@@ -2242,6 +2491,135 @@ document.addEventListener("keydown", e=>{ if(e.key === "Escape") closeLang(); },
   }
 })();
 
+/* ---------------------------------------------------------------- guide mode
+   The guide runs on the server (savta/actions/guide.py) and this page only shows it:
+   GET /api/guide/state, fast while a guide runs and slowly otherwise, and the card's
+   buttons POST /api/guide/next|do|why|stop. The chip starts one from the offer the
+   server made for the last how-to answer (POST /api/guide/start {offer}). */
+// var, not let: applyLanguage() runs before this block and repaints the guide's copy.
+var GUIDE_ST = null, GUIDE_TIMER = null, GUIDE_SHOWN = null, GUIDE_CLOSED = null,
+    GUIDE_HIDE = null, CHIP_USED = null, GUIDE_WAS_ACTIVE = false, GUIDE_STALE = "";
+var GUIDE_ENDED = ["done", "stopped", "failed"];
+var barPost = m => { try{ window.webkit.messageHandlers.micmicbar.postMessage(m); }catch(_){} };
+
+async function guideFetch(){
+  try{
+    const r = await fetch("/api/guide/state", {cache:"no-store"});
+    if(r.ok) paintGuide(await r.json());
+  }catch(_){}
+}
+function guideLoop(){
+  clearTimeout(GUIDE_TIMER);
+  guideFetch().finally(() => {
+    GUIDE_TIMER = setTimeout(guideLoop, GUIDE_ST && GUIDE_ST.active ? 450 : 2500);
+  });
+}
+async function guidePost(what, body){
+  if(BAR) barPost("touch");
+  try{
+    const r = await fetch("/api/guide/" + what, {method:"POST",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify(body || {})});
+    if(r.ok){ const d = await r.json(); paintGuide(d); return d; }
+  }catch(_){}
+  return null;
+}
+// Something is being answered on screen right now, which is the only time the chip
+// belongs there: it is part of that answer.
+function answerShowing(){
+  if(BAR) return document.documentElement.classList.contains("b-result");
+  return !!$("reply").textContent.trim() || document.body.classList.contains("hascard");
+}
+function hideGuide(){
+  clearTimeout(GUIDE_HIDE); GUIDE_HIDE = null;
+  if(GUIDE_ST && GUIDE_ST.id) GUIDE_CLOSED = GUIDE_ST.id;
+  $("guide").hidden = true;
+  document.body.classList.remove("guiding", "gdup");
+  document.documentElement.classList.remove("b-guide", "b-dup");
+}
+function paintGuide(st){
+  if(!st || typeof st !== "object") return;
+  GUIDE_ST = st;
+  const g = $("guide"), root = document.documentElement;
+  const ended = GUIDE_ENDED.includes(st.status);
+  const show = !!st.active || (ended && !!st.id && st.id === GUIDE_SHOWN && st.id !== GUIDE_CLOSED);
+  if(BAR && !!st.active !== GUIDE_WAS_ACTIVE) barPost(st.active ? "guide:1" : "guide:0");
+  GUIDE_WAS_ACTIVE = !!st.active;
+  if(show){
+    GUIDE_SHOWN = st.id;
+    g.dataset.status = st.status || "";
+    const n = st.n || 0;
+    const step = $("gStep");
+    step.textContent = st.status === "done" ? t("gFinished")
+                     : (st.status === "stopped" || st.status === "failed") ? t("gStopped")
+                     : n ? t("gStep").replace("{n}", n) : "";
+    $("gGoal").textContent = st.goal_label || "";
+    $("gSay").textContent = ended ? (st.line || "")
+                          : st.status === "thinking" ? t("gLooking") : (st.say || "");
+    // Under the step: the lock and a word of reassurance for a secret, or the reason
+    // for the step once she asked "why?".
+    const secret = st.status === "step" && st.kind === "secret";
+    const why = st.status === "step" && st.why_shown && st.why;
+    $("gNote").hidden = !(secret || why);
+    $("gLock").style.display = secret ? "" : "none";
+    $("gNotew").textContent = secret ? t("gSecret") : (why ? st.why : "");
+    $("gActs").hidden = ended;
+    $("gDoneW").textContent = t("gDone");
+    $("gDoneB").disabled = st.status !== "step";
+    $("gDoW").textContent = t("gDoIt");
+    $("gDoB").hidden = !(st.status === "step" && st.can_do);
+    $("gWhyW").textContent = t("gWhy");
+    $("gWhyB").hidden = !(st.status === "step" && st.why && !st.why_shown);
+    $("gStopW").textContent = t("gStop");
+    if(g.hidden) GUIDE_STALE = $("reply").textContent.trim();
+    g.hidden = false;
+    document.body.classList.add("guiding");
+    guideDup();
+    if(ended){
+      if(!GUIDE_HIDE) GUIDE_HIDE = setTimeout(hideGuide, st.status === "done" ? 7000 : 3500);
+    } else { clearTimeout(GUIDE_HIDE); GUIDE_HIDE = null; }
+  } else if(!g.hidden){
+    hideGuide();
+  }
+  // The chip: a live offer, not taken yet, beside the answer it belongs to.
+  const o = st.offer, c = $("gchip");
+  const chip = !st.active && o && o.id && o.id !== CHIP_USED && answerShowing()
+               && (!BAR || $("undo").hidden);
+  c.hidden = !chip;
+  if(chip){ c.dataset.offer = o.id; $("gchipw").textContent = t("guideMe"); }
+}
+// The answer given before the guide began, or a reply that only repeats the step or
+// its reason, is already on the card: it is not shown a second time above it.
+function guideDup(){
+  const st = GUIDE_ST || {}, rep = $("reply").textContent.trim();
+  const dup = !!rep && !$("guide").hidden && (rep === GUIDE_STALE || rep === (st.say || "").trim()
+    || rep === (st.why || "").trim() || rep === (st.line || "").trim());
+  document.body.classList.toggle("gdup", dup);
+  if(BAR){
+    document.documentElement.classList.toggle("b-guide", !$("guide").hidden);
+    document.documentElement.classList.toggle("b-dup", dup);
+  }
+}
+function paintGuideCopy(){
+  $("gchipw").textContent = t("guideMe");
+  if(GUIDE_ST) paintGuide(GUIDE_ST);
+}
+$("gchip").addEventListener("click", e => {
+  e.stopPropagation();
+  const id = $("gchip").dataset.offer;
+  CHIP_USED = id; $("gchip").hidden = true;
+  GUIDE_SHOWN = null;
+  guidePost("start", {offer: id}).then(d => { if(d && d.started) guideLoop(); });
+});
+for(const [id, what] of [["gDoneB", "next"], ["gDoB", "do"], ["gWhyB", "why"], ["gStopB", "stop"]]){
+  $(id).addEventListener("click", e => {
+    e.stopPropagation();
+    if(id === "gDoneB" || id === "gDoB") $(id).disabled = true;   // one press, one step
+    guidePost(what);
+  });
+}
+$("guide").addEventListener("click", e => e.stopPropagation());
+guideLoop();
+
 /* ---------------------------------------------------------------- panel bridge
    MicMic.app drives these from listener.py so the orb in its window shows what the
    native listener is doing. Without them the panel would sit at "touch to speak"
@@ -2257,11 +2635,12 @@ if(PANEL){
     if(text){ STATE_KEY = null; $("state").textContent = text; }
   };
   window.panelHeard = t => {
+    $("gchip").hidden = true;
     $("heard").textContent = t || "";
     $("heard").classList.remove("fade");
     $("reply").textContent = "";
   };
-  window.panelReply = t => { $("reply").textContent = t || ""; };
+  window.panelReply = t => { $("reply").textContent = t || ""; guideDup(); if(t) guideLoop(); };
 
   // Moving the window. The web view takes every mouse event, so AppKit's "movable by
   // background" never sees one; the page says when a press on its background has
@@ -2372,6 +2751,8 @@ if(BAR){
     root.classList.remove("b-err", "b-undofail");
     $("undo").hidden = true; $("undo").disabled = false;
     BAR_UNDO_LABEL = null;
+    $("gchip").hidden = true;
+    root.classList.remove("b-dup");
   };
 
   let WORK_T0 = 0, WORK_TIMER = null;
@@ -2445,6 +2826,8 @@ if(BAR){
     }
     setState("acting");
     flags();
+    guideDup();
+    guideLoop();
   };
 
   // Undo is the page's own job: native only shows the button. The server contract is
@@ -2486,7 +2869,9 @@ if(BAR){
   $("undo").addEventListener("click", e => { e.stopPropagation(); barUndo(); });
 
   addEventListener("keydown", e => {
-    if(e.key === "Escape"){ e.preventDefault(); post("dismiss"); return; }
+    // While a guide runs the strip is its card: Esc does not take it away from under
+    // the ring (Stop does).
+    if(e.key === "Escape"){ e.preventDefault(); if(!(GUIDE_ST && GUIDE_ST.active)) post("dismiss"); return; }
     // The shortcut every Mac user already has in their fingers for "take that back".
     if((e.metaKey || e.ctrlKey) && !e.altKey && e.code === "KeyZ" && !$("undo").hidden){
       e.preventDefault(); barUndo();

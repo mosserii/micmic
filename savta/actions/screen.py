@@ -500,6 +500,88 @@ def screenshot_png(max_px: int = 1600, pid: int | None = None) -> bytes | None:
         return None
 
 
+DESKTOP = os.path.expanduser("~/Desktop")
+
+
+def take_screenshot(pid: int | None = None) -> dict:
+    """Capture the screen (or `pid`'s front window) and save it where she can find
+    it: her own Desktop, under a name that says what it is and when, never a temp
+    file this module then has to remember to clean up - there is no cleanup path
+    anywhere in this project (tests/test_micmic.py, rule 2), so an undo was never on
+    the table and this does not pretend otherwise. Also copies the image onto the
+    clipboard, so a paste into any app drops the picture without a Finder trip.
+
+    {"ok": True, "path": ...} on success. {"ok": False, "why": "screen_recording"}
+    when the permission is not granted, or {"ok": False, "why": "no_window"} /
+    {"ok": False, "why": "capture_failed"} otherwise. Never raises.
+    """
+    if not _screen_recording_granted():
+        return {"ok": False, "why": "screen_recording"}
+    ts = time.strftime("%Y-%m-%d %H.%M.%S")
+    path = os.path.join(DESKTOP, f"MicMic screenshot {ts}.png")
+    if pid:
+        wid = _front_window_id(pid)
+        if wid is None:
+            return {"ok": False, "why": "no_window"}
+        cmd = ["screencapture", "-x", "-o", "-l", str(wid), path]
+    else:
+        cmd = ["screencapture", "-x", "-C", path]
+    try:
+        subprocess.run(cmd, timeout=6, capture_output=True)
+    except Exception:  # noqa: BLE001
+        return {"ok": False, "why": "capture_failed"}
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return {"ok": False, "why": "capture_failed"}
+    mac.copy_file_to_clipboard(path)
+    return {"ok": True, "path": path}
+
+
+# Two minutes is generous for a drag she may need both hands and her glasses for,
+# and short enough that a capture nobody ever finishes does not sit open forever.
+REGION_CAPTURE_TIMEOUT = 120.0
+
+
+def capture_region(on_start=None) -> dict:
+    """Interactive drag-to-select: a crosshair appears, she drags a region or
+    presses Space and clicks a window, Esc cancels. BLOCKS until she finishes or
+    the timeout above passes - call this from a background thread, never the one
+    answering her turn (see router._capture_region_async).
+
+    `on_start`, if given, is called once with the live subprocess.Popen the moment
+    the crosshair is up, so the caller can kill it early (she resolved the send
+    another way - see router.py's "I selected it" path) without waiting it out.
+
+    {"ok": True, "path": ...} / {"ok": False, "why": "screen_recording"|"cancelled"
+    |"capture_failed"}. "cancelled" means Esc: screencapture -i writes no file at
+    all rather than an empty one, which is how this tells the two apart. Never
+    raises."""
+    if not _screen_recording_granted():
+        return {"ok": False, "why": "screen_recording"}
+    ts = time.strftime("%Y-%m-%d %H.%M.%S")
+    path = os.path.join(DESKTOP, f"MicMic selection {ts}.png")
+    try:
+        proc = subprocess.Popen(["screencapture", "-i", "-x", path])
+    except Exception:  # noqa: BLE001
+        return {"ok": False, "why": "capture_failed"}
+    if on_start:
+        try:
+            on_start(proc)
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        proc.wait(timeout=REGION_CAPTURE_TIMEOUT)
+    except Exception:  # noqa: BLE001
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+        return {"ok": False, "why": "capture_failed"}
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return {"ok": False, "why": "cancelled"}
+    mac.copy_file_to_clipboard(path)
+    return {"ok": True, "path": path}
+
+
 # ---------------------------------------------------------------- redaction
 # A secret field is withheld by its role or its label. A secret that is just text on
 # the page is not: "Your code is 482913" in a message, a card number in a receipt, an

@@ -121,7 +121,7 @@ _REAL_RUN = _sp_mod.run
 
 
 def _blocked_run(cmd, *a, **kw):
-    if isinstance(cmd, (list, tuple)) and cmd and cmd[0] in ("open", "osascript"):
+    if isinstance(cmd, (list, tuple)) and cmd and cmd[0] in ("open", "osascript", "pbcopy"):
         LAUNCHED.append(list(cmd))
         class _R:
             returncode, stdout, stderr = 0, "[test] launch blocked", ""
@@ -130,11 +130,20 @@ def _blocked_run(cmd, *a, **kw):
 
 
 _sp_mod.run = _blocked_run
+
+# The interactive crosshair (screencapture -i) and screenshots must never appear on
+# the owner's screen from a test run: both go through Popen/run inside
+# savta.actions.screen, so they are replaced outright here.
+from savta.actions import screen as _screen_mod  # noqa: E402
+_screen_mod.capture_region = lambda on_start=None: {"ok": False, "why": "cancelled"}
+_screen_mod.take_screenshot = lambda pid=None: {"ok": False, "why": "capture_failed"}
 mac.subprocess.run = _blocked_run
 
 OSA: list[str] = []          # any osascript that got through. Must stay empty.
 SENT: list[tuple] = []
+SENT_ATTACH: list[tuple] = []   # (name, attachment path), only when one was sent
 WA: list[tuple] = []
+WA_OPENED: list[str] = []       # chats opened without sending (the WhatsApp screenshot fallback)
 SAID: list[tuple] = []
 OPENED: list[str] = []
 APPS: list[str] = []
@@ -151,8 +160,9 @@ QUIT: list[list] = []
 VOLSET: list[int] = []
 TABS_CLOSED: list[str] = []
 
-RECORDERS = (OSA, SENT, WA, SAID, OPENED, APPS, PATHS, NOTES, REMINDERS,
-             VOLUME, BRIGHT, CLOSED, CALLED, HUNGUP, YT_QUERIES, QUIT, VOLSET, TABS_CLOSED)
+RECORDERS = (OSA, SENT, SENT_ATTACH, WA, WA_OPENED, SAID, OPENED, APPS, PATHS, NOTES,
+             REMINDERS, VOLUME, BRIGHT, CLOSED, CALLED, HUNGUP, YT_QUERIES, QUIT, VOLSET,
+             TABS_CLOSED)
 
 
 OSA_TOTAL: list[str] = []    # never cleared, so the final line is cumulative
@@ -182,8 +192,21 @@ def _blocked_osa(script: str, timeout: float = 15.0):
 
 
 mac._osa = _blocked_osa
-mac.send_message = lambda n, t: (SENT.append((n, t)), (True, "[test stub] imessage"))[1]
+
+
+def _stub_send_message(n, t, attachment=None):
+    # SENT stays a plain (name, text) list - nearly every check in this suite unpacks
+    # it that way - and the attachment, when there is one, goes to its own list.
+    SENT.append((n, t))
+    if attachment:
+        SENT_ATTACH.append((n, attachment))
+    return True, "[test stub] imessage"
+
+
+mac.send_message = _stub_send_message
 mac.whatsapp = lambda n, t: (WA.append((n, t)), (True, "[test stub] whatsapp"))[1]
+mac.whatsapp_open_chat = lambda n: (WA_OPENED.append(n), (True, "[test stub] opened chat"))[1]
+mac.copy_file_to_clipboard = lambda p: True
 mac.say = lambda t, l="english": SAID.append((l, t))
 mac.open_url = lambda u: OPENED.append(u)
 mac.open_app = lambda a: (APPS.append(a), (True, a))[1]
@@ -481,7 +504,7 @@ def t_safety(j: Jev):
         check("no osascript ran on the live arm-and-fire path", not OSA,
               f"{len(OSA)} osascript call(s): {short(OSA[:1])}")
     finally:
-        mac.send_message = lambda n, t: (SENT.append((n, t)), (True, "[test stub] imessage"))[1]
+        mac.send_message = _stub_send_message
         mac.whatsapp = lambda n, t: (WA.append((n, t)), (True, "[test stub] whatsapp"))[1]
         router.CANCEL_WINDOW = 6.0
 
@@ -645,6 +668,8 @@ class _ScriptedJev:
         # pick_result: what she asked for -> a piece of the title Jev chooses. None
         # leaves pick_result refusing everything, as it always did here.
         self.best: dict | None = None
+        # pick_from: what she said -> a piece of the row label Jev points at.
+        self.pick: dict = {}
 
     def ask(self, state, qs):
         self.calls += 1
@@ -660,6 +685,12 @@ class _ScriptedJev:
                              if want and want in t), "0")
                 out[k] = ({"choice": pick, "confidence": 0.9, "probabilities": {pick: 0.9}}
                           if k == "best" else {"noul": 0.9})
+            elif "candidates" in state and k in ("pick", "any_good"):
+                want = self.pick.get(state.get("she_said", ""))
+                sel = next((i for i, t in q.get("criteria", {}).items()
+                            if want and i != "__none__" and want in (t or "")), "__none__")
+                out[k] = ({"choice": sel, "confidence": 0.9, "probabilities": {sel: 0.9}}
+                          if k == "pick" else {"noul": 0.9 if want else 0.05})
             elif k == "same_person":
                 out[k] = {"noul": self.same.get(utt, 0.05)}
             elif k in ("stop_it", "says_what_instead"):
@@ -694,6 +725,7 @@ class _ScriptedLLM:
 
     def __init__(self):
         self.answered: list[dict] = []
+        self.reported: list[dict] = []
 
     def text(self, prompt, system="", **kw):
         self.calls += 1
@@ -708,6 +740,17 @@ class _ScriptedLLM:
     def split_steps(self, *a, **k):
         return None
 
+    def report(self, question, items, language="hebrew", gender=""):
+        self.calls += 1
+        self.reported.append({"question": question, "items": items, "language": language})
+        return self.report_says
+
+    report_says = "[report]"
+
+    def chat(self, utterance, language="hebrew", name="", recent="", gender=""):
+        self.calls += 1
+        return "[chat]"
+
 
 _U_KEYS = ("intent_confidence", "wants_full_length", "names_title", "contact_confidence",
            "contact_named", "has_message_content", "money_involved", "sounds_coached",
@@ -715,7 +758,8 @@ _U_KEYS = ("intent_confidence", "wants_full_length", "names_title", "contact_con
            "noise", "refers_back", "is_compound", "needs_knowledge", "about_weather",
            "about_clock", "setting_emergency_contact", "inside_an_app",
            "speaker_gender_confidence", "rejects_last", "describes_instead",
-           "refers_to_screen", "distress", "emergency", "wants_undo", "amends_message")
+           "refers_to_screen", "distress", "emergency", "wants_undo", "amends_message",
+           "live_kind_confidence")
 
 
 def _u(intent="message", **kw) -> dict:
@@ -727,6 +771,7 @@ def _u(intent="message", **kw) -> dict:
               "language": "english", "speaker_gender": "unrevealed",
               "screen_task": "not_applicable", "weather_day": "today",
               "write_in": "not_applicable", "message_app": "unchanged",
+              "live_kind": "not_live",
               "intent_confidence": 0.95, "is_complete": 0.95, "contact_confidence": 0.9})
     u.update(kw)
     return u
@@ -745,7 +790,7 @@ class scripted_turns:
                      router.due_briefing, router.CANCEL_WINDOW)
 
         def understand(j, utt, contacts, recent="", playing="", likes=None,
-                       spans=None, draft=None):
+                       spans=None, draft=None, **_later):
             self.drafts.append(dict(draft) if draft else None)
             self.spans.append(sorted(spans or {}))
             return _u(**self.understood[utt])
@@ -2484,7 +2529,7 @@ def t_screen(j):
     router._screen_shot = lambda pid=None: None
     router._screen_llm = lambda prompt, system, image=None, max_tokens=300: (
         PROMPTS.append((prompt, system)), state["reply"])[1]
-    mac.add_event = lambda *a: (EVENTS.append(a), (True, "[test stub] added"))[1]
+    mac.add_event = lambda *a, **k: (EVENTS.append(a), (True, "[test stub] added"))[1]
     SCREEN_DIDS = ("described_screen", "summarized_screen", "translated_screen")
     try:
         state["ctx"] = ctx()
@@ -2562,8 +2607,8 @@ def t_screen(j):
             reset_state()
             state["ctx"] = ctx(selected="", page=None)
             r = router.handle(j, "send this to Miriam", speak=False)
-            check("nothing selected and no page asks her to select it",
-                  r["did"] == "screen_select" and router.PENDING is None,
+            check("nothing selected and no page offers drag-to-select, and sends nothing yet",
+                  r["did"] in ("screen_select_wait", "screen_select") and router.PENDING is None,
                   f"did={r['did']} pending={router.PENDING}")
 
             reset_state()
@@ -3596,9 +3641,14 @@ def t_what_she_sees_is_plain(j):
                                   speak=False)
                 if not r["did"].startswith("web_"):
                     continue
+                # Every web turn answers at once and ends on its own thread.
+                t_end = time.time() + 3
+                while not router.web_status().get("finished") and time.time() < t_end:
+                    time.sleep(0.01)
+                fin = router.web_status().get("finished") or {}
                 check(f"web_{did} in {lg} speaks with no em dash",
-                      "—" not in (r.get("say") or "") and "—" not in " ".join(
-                          (r.get("detail") or {}).get("steps") or []), r.get("say") or "")
+                      "—" not in (r.get("say") or "") and "—" not in (fin.get("say") or "")
+                      and fin.get("did") == f"web_{did}", f"{r.get('say')} / {fin}")
     finally:
         web.run, web.where_to_start = real_run, real_where
     check("the Russian read-back has no em dash", "—" not in router._narrate("Мириам", "привет", "russian"))
@@ -3718,6 +3768,8 @@ WEB_LOG_SAMPLES = [
     "thought it was finished, but the goal is not visible yet",
     "nothing usable yet, waiting for the page",
     "waiting for the page to finish loading",
+    "waiting for her: human check", "waiting for her: sign in",
+    "she finished it, carrying on",
     "waited", "scrolled",
     "click: no target", "type: nothing to enter",
     "click Pay now  [refused: this completes a purchase]",
@@ -3813,7 +3865,285 @@ def t_small_things_she_hears(j):
           r.get("say") or "")
 
 
+# ---------------------------------------------------------------- live answers
+def _rss(items: list[tuple[str, str, float]]) -> bytes:
+    """A Google News feed: (title, source, hours ago) per item, as Google writes it."""
+    import email.utils as _eu
+    body = "".join(
+        f"<item><title>{t} - {src}</title><link>https://news.google.com/x</link>"
+        f"<pubDate>{_eu.formatdate(time.time() - h * 3600, usegmt=True)}</pubDate>"
+        f"<source url=\"https://x\">{src}</source></item>"
+        for t, src, h in items)
+    return (f'<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel>'
+            f"<title>t</title>{body}</channel></rss>").encode()
+
+
+_COINS = json.dumps([
+    {"id": "bitcoin", "symbol": "btc", "name": "Bitcoin", "current_price": 84509,
+     "price_change_percentage_24h": 0.72},
+    {"id": "ethereum", "symbol": "eth", "name": "Ethereum", "current_price": 3120.5,
+     "price_change_percentage_24h": -1.1},
+]).encode()
+_RATES = json.dumps({"amount": 1.0, "base": "USD", "date": time.strftime("%Y-%m-%d"),
+                     "rates": {"ILS": 3.0338, "EUR": 0.87696, "GBP": 0.75}}).encode()
+
+
+class _live_sources:
+    """actions.live with its one network function replaced by fixtures keyed on a
+    piece of the URL. Every URL asked for is kept, and nothing leaves the machine."""
+
+    def __init__(self, feeds: dict, fail: bool = False):
+        self.feeds, self.fail, self.urls = feeds, fail, []
+
+    def __enter__(self):
+        from savta.actions import live as _live
+        self.live, self.real = _live, _live._fetch
+        _live._CACHE.clear()
+
+        def fetch(url, timeout=4.0):
+            self.urls.append(url)
+            if self.fail:
+                raise OSError("offline")
+            for part, body in self.feeds.items():
+                if part in url:
+                    return body
+            raise OSError(f"no fixture for {url}")
+        _live._fetch = fetch
+        return self
+
+    def __exit__(self, *exc):
+        self.live._fetch = self.real
+        self.live._CACHE.clear()
+        return False
+
+
+@with_gates_on
+def t_live_answers(j):
+    """The owner: "please tell me what was the score of tel aviv" was grounded in the
+    Wikipedia article about the city and answered "I do not know the score". A question
+    about today reads a live source; Jev picks the headline that answers it; a sentence
+    is written from that headline alone, with its outlet and day; and when nothing
+    answers she is told so. The readings are Jev's for these sentences, measured
+    2026-09-27 (router.LIVE_GATE)."""
+    from savta.actions import live
+    score_en, score_he = "please tell me what was the score of tel aviv", "מה התוצאה של מכבי תל אביב"
+    news, btc, usd_he = "what's in the news today", "how much is bitcoin right now", "כמה שווה הדולר היום"
+    who_won = "who won the game last night"
+    sport = dict(intent="look_up", needs_knowledge=0.9, live_kind="sport_result",
+                 live_kind_confidence=0.9)
+    understood = {
+        score_en: dict(sport, spans={"term": ("tel aviv", 0.9)}),
+        score_he: dict(sport, language="hebrew", spans={"term": ("מכבי תל אביב", 0.9)}),
+        who_won: dict(sport),
+        # Measured: the term span read "news" (0.34); the subject span is the topic.
+        news: dict(intent="look_up", needs_knowledge=0.8, live_kind="news",
+                   live_kind_confidence=1.0, spans={"term": ("news", 0.34)}),
+        "latest news about the hostages": dict(
+            intent="look_up", needs_knowledge=0.8, live_kind="news", live_kind_confidence=0.9,
+            spans={"term": ("hostages", 0.8), "subject": ("the hostages", 0.8)}),
+        btc: dict(intent="look_up", needs_knowledge=0.9, live_kind="price",
+                  live_kind_confidence=0.95, spans={"term": ("bitcoin", 0.9)}),
+        usd_he: dict(intent="look_up", needs_knowledge=0.9, live_kind="price",
+                     live_kind_confidence=0.9, language="hebrew",
+                     spans={"term": ("הדולר", 0.9)}),
+        "what's the score of maccabi": dict(sport, intent="chitchat", intent_confidence=0.6,
+                                            spans={"term": ("maccabi", 0.9)}),
+        "who was the first prime minister of israel": dict(
+            intent="look_up", needs_knowledge=0.95,
+            spans={"term": ("first prime minister of israel", 0.9)}),
+    }
+    en_feed = _rss([("Bayern München beat Hapoel Tel-Aviv 86-84 after Voigtmann's late three",
+                     "Sofascore", 26),
+                    ("ASVEL sink Maccabi Tel Aviv with 16 threes in Euroleague opener",
+                     "Sofascore", 27),
+                    ("Average possession - Maccabi Tel Aviv stats", "FotMob", 5),
+                    ("A story from last week", "Old News", 24 * 5)])
+    he_feed = _rss([('ראשון לעונה: הפועל ת"א הביסה 67:85 את באר שבע', "ynet.co.il", 14),
+                    ("אחרי ההפסד ביורוליג: השינויים במכבי תל אביב", "ספורט 1", 20)])
+    top = _rss([("Nor'easter batters the East Coast", "The Washington Post", 1),
+                ("Trump rejects Iran's roadmap", "Al Jazeera", 2),
+                ("Third story", "Reuters", 3)])
+
+    rows = live.parse_rss(en_feed)
+    check("a feed is read newest first, without the outlet glued to the title, and "
+          "nothing older than three days",
+          [r["source"] for r in rows] == ["FotMob", "Sofascore", "Sofascore"]
+          and rows[0]["title"] == "Average possession - Maccabi Tel Aviv stats"
+          and not any("last week" in r["title"] for r in rows), str(rows))
+
+    feeds = {"q=tel+aviv": en_feed, "%D7%9E%D7%9B%D7%91%D7%99": he_feed,
+             "news.google.com/rss?": top, "coingecko": _COINS, "frankfurter": _RATES}
+    with scripted_turns(understood) as s:
+        # ---- the owner's question ------------------------------------------------
+        reset_state()
+        s.j.pick[score_en] = "Bayern München beat Hapoel"
+        s.llm.report_says = "Bayern München beat Hapoel Tel Aviv 86-84, according to Sofascore, yesterday."
+        with _live_sources(feeds) as src:
+            r = router.handle(s.j, score_en, speak=False)
+        d = _d(r)
+        check("the score of Tel Aviv is answered from a live headline, not Wikipedia",
+              r["did"] == "answered" and r.get("say") == s.llm.report_says
+              and d.get("source") == "Google News",
+              f"did={r['did']} say={r.get('say')!r} detail={short(d)}")
+        check("one search, for her words plus result words, in the last three days",
+              len(src.urls) == 1 and "q=tel+aviv+%28beat" in src.urls[0]
+              and "when%3A3d" in src.urls[0] and "ceid=US%3Aen" in src.urls[0],
+              str(src.urls))
+        check("Jev chose among the real headlines: one call beyond understanding",
+              s.j.calls == 1 and d.get("candidates") == 3, f"calls={s.j.calls} detail={short(d)}")
+        check("the sentence is written from the chosen headline only, with its outlet and day",
+              len(s.llm.reported) == 1 and len(s.llm.reported[0]["items"]) == 1
+              and s.llm.reported[0]["items"][0]["source"] == "Sofascore"
+              and s.llm.reported[0]["items"][0]["when"] in ("yesterday", "today")
+              and "86-84" in s.llm.reported[0]["items"][0]["title"],
+              short(s.llm.reported))
+
+        # ---- a number the headline never gave ------------------------------------
+        reset_state()
+        s.llm.report_says = "Hapoel Tel Aviv won 2-1 yesterday, according to Sofascore."
+        with _live_sources(feeds):
+            r = router.handle(s.j, score_en, speak=False)
+        check("a score the model added is never spoken: the headline itself is",
+              r["did"] == "answered" and "2-1" not in (r.get("say") or "")
+              and (r.get("say") or "").startswith("According to Sofascore, ")
+              and "86-84" in r.get("say", "") and _d(r).get("written") == "from the headline",
+              f"say={r.get('say')!r}")
+
+        # ---- cached a few minutes ------------------------------------------------
+        reset_state()
+        s.llm.report_says = "[report]"
+        with _live_sources(feeds) as src:
+            router.handle(s.j, score_en, speak=False)
+            router.handle(s.j, score_en, speak=False)
+        check("the same question twice in a few minutes is fetched once",
+              len(src.urls) == 1, str(src.urls))
+
+        # ---- nothing answers it --------------------------------------------------
+        reset_state()
+        s.j.pick.pop(score_en, None)
+        n = len(s.llm.reported)
+        with _live_sources(feeds):
+            r = router.handle(s.j, score_en, speak=False)
+        check("no headline reports a result: she is told so, and nothing is written",
+              r["did"] == "live_not_found" and "tel aviv" in (r.get("say") or "")
+              and len(s.llm.reported) == n, f"did={r['did']} say={r.get('say')!r}")
+
+        # ---- the source is down --------------------------------------------------
+        reset_state()
+        calls = s.j.calls
+        with _live_sources(feeds, fail=True):
+            r = router.handle(s.j, score_en, speak=False)
+        check("Google News unreachable: said plainly, with no pick and no model",
+              r["did"] == "live_unreachable" and s.j.calls == calls
+              and len(s.llm.reported) == n and "could not reach" in (r.get("say") or ""),
+              f"did={r['did']} say={r.get('say')!r}")
+
+        # ---- in Hebrew -----------------------------------------------------------
+        reset_state()
+        s.j.pick[score_he] = "הפועל ת\"א הביסה"
+        s.llm.report_says = "הפועל תל אביב ניצחה את באר שבע 85:67, לפי ynet, אתמול."
+        with _live_sources(feeds) as src:
+            r = router.handle(s.j, score_he, speak=False)
+        check("he: searched in the Hebrew edition, for her own words",
+              src.urls and "ceid=IL%3Ahe" in src.urls[0]
+              and "%D7%9E%D7%9B%D7%91%D7%99" in src.urls[0], str(src.urls))
+        check("he: answered in Hebrew from the Hebrew headline",
+              r["did"] == "answered" and r.get("lang") == "hebrew"
+              and r.get("say") == s.llm.report_says
+              and s.llm.reported[-1]["language"] == "hebrew"
+              and "67:85" in s.llm.reported[-1]["items"][0]["title"],
+              f"did={r['did']} say={r.get('say')!r}")
+        s.llm.report_says = None
+        with _live_sources(feeds):
+            r = router.handle(s.j, score_he, speak=False)
+        check("he: with no model, the headline is read with its outlet, in Hebrew",
+              r["did"] == "answered" and (r.get("say") or "").startswith("לפי ynet.co.il, ")
+              and "67:85" in r.get("say", ""), f"say={r.get('say')!r}")
+
+        # ---- a game with no team named ------------------------------------------
+        reset_state()
+        with _live_sources(feeds) as src:
+            r = router.handle(s.j, who_won, speak=False)
+        check("'who won the game' with no team: she is asked which, nothing is guessed",
+              r["did"] == "need_team" and r.get("asked_back") and not src.urls,
+              f"did={r['did']} urls={src.urls}")
+
+        # ---- the news in general ------------------------------------------------
+        reset_state()
+        s.llm.report_says = "[report]"
+        calls = s.j.calls
+        with _live_sources(feeds) as src:
+            r = router.handle(s.j, news, speak=False)
+        check("the news in general: the top stories, no pick, one sentence each for two",
+              r["did"] == "answered" and s.j.calls == calls and src.urls
+              and "/rss?" in src.urls[0] and len(s.llm.reported[-1]["items"]) == 2
+              and s.llm.reported[-1]["items"][0]["source"] == "The Washington Post",
+              f"did={r['did']} urls={src.urls} items={short(s.llm.reported[-1])}")
+
+        reset_state()
+        s.j.pick["latest news about the hostages"] = "Hostage families"
+        with _live_sources({**feeds, "q=the+hostages": _rss([
+                ("Hostage families rally in Tel Aviv", "Reuters", 3),
+                ("Opinion: what the hostage deal means", "Blog", 2)])}) as src:
+            r = router.handle(s.j, "latest news about the hostages", speak=False)
+        check("news about a subject searches for it, and Jev picks the report",
+              r["did"] == "answered" and src.urls and "q=the+hostages+when" in src.urls[0]
+              and s.llm.reported[-1]["items"][0]["title"].startswith("Hostage families"),
+              f"did={r['did']} urls={src.urls}")
+
+        # ---- prices --------------------------------------------------------------
+        reset_state()
+        s.j.pick[btc] = "Bitcoin (BTC)"
+        n, llm_calls = len(s.llm.reported), s.llm.calls
+        with _live_sources(feeds) as src:
+            r = router.handle(s.j, btc, speak=False)
+        check("bitcoin: the live price, said by code with its source, no model",
+              r["did"] == "answered"
+              and r.get("say") == "Bitcoin is at 84,509 US dollars right now, according to CoinGecko."
+              and len(s.llm.reported) == n and s.llm.calls == llm_calls,
+              f"did={r['did']} say={r.get('say')!r}")
+        check("coins and rates are fetched together, once each",
+              sorted("coingecko" in u_ for u_ in src.urls) == [False, True], str(src.urls))
+        reset_state()
+        s.j.pick[usd_he] = "one US dollar (USD) in shekels"
+        with _live_sources(feeds):
+            r = router.handle(s.j, usd_he, speak=False)
+        check("he: the dollar in shekels, in Hebrew, with the bank and the day",
+              r["did"] == "answered"
+              and r.get("say") == "שער הדולר: 3.03 שקלים, לפי הבנק המרכזי האירופי, היום.",
+              f"say={r.get('say')!r}")
+        reset_state()
+        s.j.pick.pop(btc, None)
+        with _live_sources(feeds):
+            r = router.handle(s.j, btc, speak=False)
+        check("a price nobody lists: she is told so", r["did"] == "live_not_found"
+              and r.get("say") == "I could not find a current price for that.", r.get("say"))
+
+        # ---- read as small talk --------------------------------------------------
+        reset_state()
+        s.j.pick["what's the score of maccabi"] = "ASVEL sink Maccabi"
+        with _live_sources({**feeds, "q=maccabi": en_feed}):
+            r = router.handle(s.j, "what's the score of maccabi", speak=False)
+        check("a score question that intent calls small talk is still answered live",
+              r["did"] == "answered" and _d(r).get("source") == "Google News",
+              f"did={r['did']} detail={short(_d(r))}")
+
+        # ---- a lasting fact is untouched -----------------------------------------
+        reset_state()
+        real_wiki = facts.wiki
+        facts.wiki = lambda term, lang="en": ""
+        try:
+            with _live_sources(feeds) as src:
+                r = router.handle(s.j, "who was the first prime minister of israel", speak=False)
+        finally:
+            facts.wiki = real_wiki
+        check("a question about a lasting fact still goes to the knowledge answer",
+              r["did"] == "answered" and r.get("say") == "[answer]" and not src.urls,
+              f"did={r['did']} urls={src.urls}")
+
+
 TESTS = [
+    ("0zi. live answers: news, results, prices", t_live_answers),
     ("0zg. the small things she hears", t_small_things_she_hears),
     ("0zf. the day and the place she asked about", t_the_day_and_the_place_she_asked_about),
     ("0ze. one briefing, even when turns fail", t_one_briefing_even_when_turns_fail),

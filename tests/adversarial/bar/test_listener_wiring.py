@@ -1188,18 +1188,18 @@ def test_key_during_a_followup_is_the_same_turn():
     TURN_OPENS.clear()
     lst, bar, sent = turn_listener()
     lst.start_turn("followup")
-    partial(lst, "talia")
+    partial(lst, "dana")
     lst.press()
     check("the key takes over the open followup instead of opening a new turn",
-          lst.turn["kind"] == "ptt" and lst.transcript == "talia" and len(TURN_OPENS) == 1,
+          lst.turn["kind"] == "ptt" and lst.transcript == "dana" and len(TURN_OPENS) == 1,
           (lst.turn, lst.transcript, TURN_OPENS))
     lst.release()                            # a quick tap: listen until she stops
     check("its release decides tap or hold like any press", lst.turn["mode"] == "toggle",
           lst.turn)
     lst.push_to_talk()
-    final(lst, "talia", conf=0.9)
+    final(lst, "dana", conf=0.9)
     settle_turn(lst, sent)
-    check("and what she said in it is sent", sent == [("talia", "push")], (sent, LOGS[-4:]))
+    check("and what she said in it is sent", sent == [("dana", "push")], (sent, LOGS[-4:]))
 
 
 def test_press_during_a_send_countdown_is_a_normal_turn():
@@ -1350,7 +1350,7 @@ def test_held_message_question_opens_the_followup():
     lst, bar, sent = closing_listener()
     CLOSE_REPLY.clear()
     CLOSE_REPLY.update({"did": "confirm_send", "lang": "english", "asked_back": True,
-                        "say": "I held the message to Talia. Should I still send it? "
+                        "say": "I held the message to Dana. Should I still send it? "
                                "Say yes and I will."})
     followups = []
     lst._open_followup = lambda spoken: followups.append(spoken)
@@ -1397,8 +1397,116 @@ def test_asr_confidence_with_every_utterance():
           all(c is not None and 0.0 <= c <= 1.0 for _, c in posted), posted)
 
 
+# ---------------------------------------------------------------- browser tasks
+# Every web turn answers at once ("Working on it in the browser.") and the listener
+# follows the run on /api/web_status. These feed follow_web() a scripted status
+# sequence (no server) and read what reached the bar.
+R = "1790000000.123"
+FOUND = "Found it. It is on the screen."
+WAIT = ("The site wants to check you are not a robot. Waiting for you: solve the check "
+        "in the browser, and I will carry on by myself.")
+
+
+def _follow(seq, before=None):
+    """Run a web reply through handle_reply with /api/web_status answering `seq`, one
+    answer per poll, then "another task" forever. Returns the bar's calls after the
+    reply itself, and the listener."""
+    bar = FakeBar()
+    bar._visible = True
+    lst = fresh_listener(bar=bar)
+    it = iter(seq)
+    real = (listenermod.web_status, listenermod.WEB_FOLLOW_EVERY)
+    polls = []
+
+    def status():
+        polls.append(1)
+        if before is not None and len(polls) == before[0]:
+            before[1](lst)
+        return next(it, {"id": "a newer task"})
+    listenermod.web_status = status
+    listenermod.WEB_FOLLOW_EVERY = 0.001
+    try:
+        lst.handle_reply({"did": "web_working", "say": "Working on it in the browser.",
+                          "detail": {"task": "find a domain", "web_run": R, "steps": []}})
+        t0 = time.time()
+        while lst.web_follow is not None and time.time() - t0 < 5:
+            time.sleep(0.005)
+    finally:
+        listenermod.web_status, listenermod.WEB_FOLLOW_EVERY = real
+    shown = [c[1] for c in bar.calls if c[0] == "set_result"]
+    return shown, bar, lst
+
+
+def test_follow_web_shows_progress_the_wait_and_the_end():
+    shown, bar, lst = _follow([
+        {},                                                        # server busy: skip
+        {"id": R, "running": True, "progress": "Pressed Search"},
+        {"id": R, "running": True, "progress": "Pressed Search"},  # same line: once
+        {"id": R, "running": True, "waiting": "human_check", "say": WAIT,
+         "progress": "Waiting for you: solve the check in the browser"},
+        {"id": R, "running": True, "progress": "Thanks, carrying on"},
+        {"id": R, "running": False, "finished": {"id": R, "did": "web_done", "say": FOUND}},
+    ])
+    check("a web turn's reply is shown, then its progress, the wait, and the end",
+          shown == ["Working on it in the browser.", "Pressed Search", WAIT,
+                    "Thanks, carrying on", FOUND], shown)
+    check("the ending shows the bar even if it had faded",
+          ("show",) in bar.calls[bar.calls.index(("set_result", "Thanks, carrying on", None)):],
+          bar.calls)
+    check("and following stops once it has ended", lst.web_follow is None)
+
+
+def test_follow_web_never_paints_over_a_newer_answer():
+    def newer_turn(lst):
+        lst.handle_reply({"did": "time", "say": "It is ten o'clock.", "detail": {}})
+    shown, _bar, _lst = _follow([
+        {"id": R, "running": True, "progress": "Pressed Search"},
+        {"id": R, "running": True, "progress": "Typed micmic"},
+        {"id": R, "running": True, "progress": "Pressed Buy"},
+        {"id": R, "running": False, "finished": {"id": R, "did": "web_done", "say": FOUND}},
+    ], before=(2, newer_turn))
+    check("progress stops once she has asked something else; the ending still shows",
+          shown == ["Working on it in the browser.", "Pressed Search", "It is ten o'clock.",
+                    FOUND], shown)
+
+
+def test_follow_web_stops_for_a_newer_task_and_a_silent_stop():
+    shown, _b, lst = _follow([
+        {"id": R, "running": True, "progress": "Pressed Search"},
+        {"id": "a newer task", "running": True, "progress": "Pressed Other"},
+        {"id": R, "finished": {"id": R, "did": "web_done", "say": FOUND}},
+    ])
+    check("a newer task ends the following, nothing of it is shown",
+          shown == ["Working on it in the browser.", "Pressed Search"] and lst.web_follow is None,
+          shown)
+    shown, _b, _l = _follow([
+        {"id": R, "running": True, "progress": "Pressed Search"},
+        {"id": R, "finished": {"id": R, "did": "web_stopped", "say": ""}},
+    ])
+    check("a task she stopped ends with nothing more on the bar",
+          shown == ["Working on it in the browser.", "Pressed Search"], shown)
+
+
+def test_a_turn_without_a_web_run_is_not_followed():
+    bar = FakeBar()
+    lst = fresh_listener(bar=bar)
+    called = []
+    real = listenermod.web_status
+    listenermod.web_status = lambda: called.append(1) or {}
+    try:
+        lst.handle_reply({"did": "time", "say": "It is ten o'clock.", "detail": {}})
+        time.sleep(0.05)
+    finally:
+        listenermod.web_status = real
+    check("no web_run, no polling", lst.web_follow is None and not called, called)
+
+
 def main():
-    for t in (test_full_turn_result_never_clobbered,
+    for t in (test_follow_web_shows_progress_the_wait_and_the_end,
+              test_follow_web_never_paints_over_a_newer_answer,
+              test_follow_web_stops_for_a_newer_task_and_a_silent_stop,
+              test_a_turn_without_a_web_run_is_not_followed,
+              test_full_turn_result_never_clobbered,
               test_thinking_before_shown_does_not_reach_a_hidden_bar,
               test_empty_answer_goes_idle,
               test_stop_word_hides,

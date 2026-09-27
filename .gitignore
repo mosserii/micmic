@@ -54,3 +54,6 @@ tests/recordings/
 # Renders of Apple SF Symbols (used only to compare weights locally); not ours to publish.
 brand/menubar/sf-mic-ref*.png
 brand/menubar/preview-compare-*.png
+
+# The private repo's working notes for Claude (never published)
+CLAUDE.md

@@ -35,7 +35,8 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[2]
-PORT = 8883
+# LAYOUT_PORT: a second checkout can run this beside another one already on 8883.
+PORT = int(os.environ.get("LAYOUT_PORT", "8883"))
 BASE = f"http://127.0.0.1:{PORT}"
 assert PORT != 8799, "never the live server"
 W, H = 380, 560                       # native/panel.py
@@ -224,7 +225,7 @@ WHOLE_JS = r"""
   const st = document.querySelector('.stage').getBoundingClientRect();
   const bar = document.getElementById('typerow').getBoundingClientRect();
   const out = [];
-  for(const id of ['orb', 'state', 'heard', 'reply', 'card']){
+  for(const id of ['orb', 'state', 'heard', 'reply', 'card', 'guide']){
     const e = document.getElementById(id);
     if(!e || !e.getClientRects().length || getComputedStyle(e).display === 'none') continue;
     if(id !== 'orb' && id !== 'card' && !e.textContent.trim()) continue;
@@ -269,7 +270,10 @@ class Api:
         self.heard = None
         self.config = None              # fields laid over the real /api/config
         self.replies = {}               # POST path suffix -> JSON body, or "abort"
+        self.gets = {}                  # GET path suffix -> JSON body (the guide's state)
         self.posts = []
+        self.web = None                 # /api/web_status answers, the last one repeated
+        self.web_polls = 0
 
     def route(self, route):
         req = route.request
@@ -287,6 +291,15 @@ class Api:
                     return route.fulfill(status=200, content_type="application/json",
                                          body=json.dumps(reply, ensure_ascii=False))
             return route.fulfill(status=200, content_type="application/json", body="{}")
+        for suffix, reply in self.gets.items():
+            if path.endswith(suffix):
+                return route.fulfill(status=200, content_type="application/json",
+                                     body=json.dumps(reply, ensure_ascii=False))
+        if path.endswith("/api/web_status") and self.web is not None:
+            self.web_polls += 1
+            st = self.web[0] if len(self.web) == 1 else self.web.pop(0)
+            return route.fulfill(status=200, content_type="application/json",
+                                 body=json.dumps(st, ensure_ascii=False))
         if path.endswith("/api/permissions") and self.perms is not None:
             return route.fulfill(status=200, content_type="application/json",
                                  body=json.dumps(self.perms))
@@ -662,6 +675,118 @@ def test_results(browser):
             ctx.close()
 
 
+# A browser task answers at once and the page follows it on /api/web_status: the
+# progress lines on the card, the waiting line while she solves a check, then the end.
+WEB_RUN = "1790000000.123"
+WEB_COPY = {
+    "en": {"ask": "find me a nice domain for my app called mic mic",
+           "working": "Working on it in the browser.",
+           "steps": ["Answered the cookie question", "Typed mic mic", "Pressed Search"],
+           "wait": "The site wants to check you are not a robot. Waiting for you: solve the "
+                   "check in the browser, and I will carry on by myself.",
+           "found": "Found it. It is on the screen."},
+    "he": {"ask": "תמצאי לי דומיין יפה לאפליקציה שלי שנקראת מיק מיק",
+           "working": "עובדת על זה בדפדפן.",
+           "steps": ["עניתי על שאלת העוגיות", "כתבתי מיק מיק", "לחצתי על חיפוש"],
+           "wait": "האתר רוצה לוודא שאת לא רובוט. מחכה לך: תפתרי את הבדיקה בדפדפן, "
+                   "ואני אמשיך לבד.",
+           "found": "מצאתי. זה על המסך."},
+}
+
+
+def _web_running(c, n, waiting=False):
+    return {"id": WEB_RUN, "running": True, "waiting": "human_check" if waiting else None,
+            "say": c["wait"] if waiting else "", "progress": c["steps"][n], "finished": None}
+
+
+def test_web_task(browser):
+    for lang in ("en", "he"):
+        c = WEB_COPY[lang]
+        for scheme in ("dark", "light"):
+            tag = f"{lang}-{scheme}"
+            api = Api()
+            api.replies["/api/utterance"] = {
+                "did": "web_working", "say": c["working"],
+                "detail": {"task": c["ask"], "web_run": WEB_RUN, "steps": []}}
+            api.web = [_web_running(c, 0), _web_running(c, 1), _web_running(c, 2)]
+            ctx, page, errors, _ = bare_panel(browser, lang, scheme, api)
+            typed(page, c["ask"])
+            page.wait_for_timeout(3600)
+            steps = page.evaluate("[...document.querySelectorAll('#cardM .step')].map(e => e.textContent)")
+            check(f"the card shows each step as it happens ({tag})", steps == c["steps"], steps)
+            check(f"the reply line still says it is working ({tag})",
+                  page.text_content("#reply") == c["working"], page.text_content("#reply"))
+            layout(page, f"web-progress-{tag}")
+
+            api.web = [_web_running(c, 2, waiting=True)]
+            page.wait_for_timeout(1400)
+            check(f"while it waits for her, the waiting line is the headline ({tag})",
+                  page.text_content("#cardT") == c["wait"] and page.text_content("#reply") == "",
+                  [page.text_content("#cardT"), page.text_content("#reply")])
+            check(f"and it is not cut off ({tag})", page.evaluate(
+                "(() => { const t = document.getElementById('cardT');"
+                " return t.scrollHeight <= t.clientHeight + 1; })()"))
+            layout(page, f"web-waiting-{tag}")
+
+            api.web = [_web_running(c, 2)]
+            page.wait_for_timeout(1400)
+            check(f"once she is done, back to the task and 'working on it' ({tag})",
+                  page.text_content("#cardT") == c["ask"]
+                  and page.text_content("#reply") == c["working"],
+                  [page.text_content("#cardT"), page.text_content("#reply")])
+
+            api.web = [{"id": WEB_RUN, "running": False, "waiting": None, "say": "",
+                        "progress": c["steps"][2],
+                        "finished": {"id": WEB_RUN, "did": "web_done", "say": c["found"]}}]
+            page.wait_for_timeout(1400)
+            check(f"the ending is the card's headline, said once ({tag})",
+                  page.text_content("#cardT") == c["found"] and page.text_content("#reply") == "",
+                  [page.text_content("#cardT"), page.text_content("#reply")])
+            check(f"the card stays with its steps under the ending ({tag})", page.evaluate(
+                "document.getElementById('card').classList.contains('show') && "
+                "document.querySelectorAll('#cardM .step').length === 3"))
+            layout(page, f"web-final-{tag}")
+            cut = page.evaluate(WHOLE_JS)
+            check(f"nothing in the column is cut by its edges (web final, {tag})", not cut, cut)
+            polls = api.web_polls
+            page.wait_for_timeout(2300)
+            check(f"polling stops once the task has ended ({tag})", api.web_polls == polls,
+                  f"{polls} -> {api.web_polls}")
+            check(f"no page errors, web task ({tag})", not errors, errors[:2])
+            ctx.close()
+
+    # A newer request replaces the task on this page: polling stops, and the newer answer
+    # is not painted over by the old task's progress.
+    api = Api()
+    c = WEB_COPY["en"]
+    api.replies["/api/utterance"] = {"did": "web_working", "say": c["working"],
+                                     "detail": {"task": c["ask"], "web_run": WEB_RUN, "steps": []}}
+    api.web = [_web_running(c, 0)]
+    ctx, page, errors, _ = bare_panel(browser, "en", "dark", api)
+    typed(page, c["ask"])
+    page.wait_for_timeout(1500)
+    api.replies["/api/utterance"] = utter("timer_set", "en")
+    typed(page, "set a timer for ten minutes")
+    polls = api.web_polls
+    page.wait_for_timeout(2300)
+    check("a newer request stops the following", api.web_polls == polls,
+          f"{polls} -> {api.web_polls}")
+    check("and the newer answer stays on screen", page.text_content("#reply") == SAY["timer_set"]["en"]
+          and not page.evaluate("[...document.querySelectorAll('#cardM .step')].length"),
+          page.text_content("#reply"))
+    ctx.close()
+
+    # A reply with no web_run is never followed.
+    api = Api()
+    api.web = [_web_running(c, 0)]
+    api.replies["/api/utterance"] = utter("answered", "en")
+    ctx, page, errors, _ = bare_panel(browser, "en", "light", api)
+    typed(page, "what is the weather in Lisbon")
+    page.wait_for_timeout(1500)
+    check("an ordinary answer does not poll /api/web_status", api.web_polls == 0, api.web_polls)
+    ctx.close()
+
+
 def test_panel_details(browser):
     for lang in ("en", "he"):
         tag = f"{lang}-dark"
@@ -870,13 +995,144 @@ def test_qa_v2(browser):
         ctx.close()
 
 
+# ---------------------------------------------------------------- guide mode
+# The guide's states as GET /api/guide/state gives them (savta/actions/guide.py), in
+# the two languages, and the "Guide me" chip beside a how-to answer.
+GUIDE_WORDS = {
+    "en": {"goal": "Enable the Maps API", "ask": "How do I add an API key here?",
+           "answer": "Open APIs and Services, then Credentials, and choose Create credentials.",
+           "say": "Click APIs & Services in the menu on the left.",
+           "why": "That is where every API for this project is switched on.",
+           "secret": "Type your password in the Password box, then press Next.",
+           "line": "That's done: the Maps API is enabled."},
+    "he": {"goal": "הפעלת Maps API", "ask": "איך מוסיפים פה מפתח API?",
+           "answer": "פותחים את APIs and Services, אחר כך Credentials, ובוחרים Create credentials.",
+           "say": "לחצי על APIs & Services בתפריט משמאל.",
+           "why": "שם מדליקים כל API של הפרויקט הזה.",
+           "secret": "הקלידי את הסיסמה בתיבה Password ולחצי Next.",
+           "line": "זהו, ה-Maps API מופעל."},
+}
+
+
+def guide_states(lang):
+    w = GUIDE_WORDS[lang]
+    base = {"active": True, "offer": None, "id": "g1", "goal": w["ask"], "goal_label": w["goal"],
+            "lang": "english" if lang == "en" else "hebrew", "rev": 1, "line": "",
+            "ring": {"x": 110, "y": 200, "w": 160, "h": 28}, "target_label": "APIs & Services"}
+    return {
+        "thinking": {**base, "status": "thinking", "n": 0, "say": "", "why": "", "kind": "",
+                     "can_do": False, "why_shown": False, "ring": None},
+        "step": {**base, "status": "step", "n": 2, "say": w["say"], "why": w["why"],
+                 "kind": "click", "can_do": True, "why_shown": False},
+        "why": {**base, "status": "step", "n": 2, "say": w["say"], "why": w["why"],
+                "kind": "click", "can_do": True, "why_shown": True},
+        "secret": {**base, "status": "step", "n": 4, "say": w["secret"], "why": w["why"],
+                   "kind": "secret", "can_do": False, "why_shown": False},
+        "done": {**base, "active": False, "status": "done", "n": 5, "say": w["say"], "why": "",
+                 "kind": "click", "can_do": False, "why_shown": False, "ring": None, "line": w["line"]},
+    }
+
+
+def test_guide(browser):
+    for lang in ("en", "he"):
+        w = GUIDE_WORDS[lang]
+        offer = {"active": False, "status": "idle",
+                 "offer": {"id": "o1", "at": time.time(), "goal": w["ask"]}}
+        for scheme in ("dark", "light"):
+            tag = f"{lang}-{scheme}"
+            # ---- the bar
+            ctx = browser.new_context(viewport={"width": 640, "height": 64}, color_scheme=scheme,
+                                      device_scale_factor=2, reduced_motion="reduce")
+            api = Api(); api.config = {"language_hint": SPEECH[lang]}
+            api.gets["/api/guide/state"] = {"active": False, "status": "idle", "offer": None}
+            api.replies["/api/guide/start"] = {**guide_states(lang)["thinking"], "started": True}
+            ctx.route("**/api/**", api.route)
+            ctx.add_init_script(INIT + f"try{{localStorage.setItem('micmic.lang',{json.dumps(lang)})}}catch(_){{}}")
+            page = ctx.new_page()
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.goto(BASE + "/?bar=1")
+            page.wait_for_function("document.documentElement.lang === %s" % json.dumps(lang))
+
+            def fit():
+                h = page.evaluate("Math.ceil(document.querySelector('.stage').getBoundingClientRect().height)")
+                page.set_viewport_size({"width": 640, "height": h})
+                page.wait_for_timeout(60)
+                return h
+            page.evaluate("barState('listening',''); barHeard(%s); barState('thinking','')" % json.dumps(w["ask"]))
+            api.gets["/api/guide/state"] = offer
+            page.evaluate("barResult(%s, null)" % json.dumps(w["answer"]))
+            page.wait_for_selector("#gchip:not([hidden])", timeout=3000)
+            fit()
+            layout(page, f"bar-guide-chip-{tag}")
+            check(f"the chip is labelled in {lang} ({tag})",
+                  page.text_content("#gchipw") == page.evaluate("t('guideMe')"), page.text_content("#gchipw"))
+            api.gets["/api/guide/state"] = guide_states(lang)["thinking"]
+            page.click("#gchip")
+            page.wait_for_timeout(150)
+            check(f"the chip starts the guide from its offer, never from page text ({tag})",
+                  ("guide/start", {"offer": "o1"}) in api.posts, api.posts[-2:])
+            check(f"the chip goes once it is used ({tag})", page.is_hidden("#gchip"))
+            check(f"the strip is told to stay up while guiding ({tag})",
+                  "bar:guide:1" in page.evaluate("window.__msgs"), page.evaluate("window.__msgs"))
+            for name, st in guide_states(lang).items():
+                api.gets["/api/guide/state"] = st
+                page.evaluate("guideLoop()")
+                page.wait_for_timeout(120)
+                h = fit()
+                layout(page, f"bar-guide-{name}-{tag}")
+                check(f"the guide card fits the strip's tallest size ({name}, {tag})", h <= 300, h)
+                if name == "step":
+                    check(f"Done and Do it for me are there for a click step ({tag})",
+                          page.is_visible("#gDoneB") and page.is_visible("#gDoB") and page.is_enabled("#gDoneB"))
+                    check(f"the step reads Step 2 in {lang} ({tag})",
+                          page.text_content("#gStep") == page.evaluate("t('gStep')").replace("{n}", "2"))
+                if name == "secret":
+                    check(f"a secret step has no Do it for me, and says only she types it ({tag})",
+                          page.is_hidden("#gDoB") and page.text_content("#gNotew") == page.evaluate("t('gSecret')"))
+                if name == "thinking":
+                    check(f"Done waits while the next step is worked out ({tag})", page.is_disabled("#gDoneB"))
+            # a button press posts, and a result line that repeats the step is not shown twice
+            api.gets["/api/guide/state"] = guide_states(lang)["step"]
+            page.evaluate("guideLoop()")
+            page.wait_for_timeout(100)
+            page.click("#gDoneB")
+            page.wait_for_timeout(100)
+            check(f"Done posts /api/guide/next ({tag})", any(p_[0] == "guide/next" for p_ in api.posts), api.posts[-2:])
+            page.evaluate("barResult(%s, null)" % json.dumps(w["say"]))
+            page.wait_for_timeout(120)
+            check(f"a reply that repeats the step is not shown twice ({tag})", page.is_hidden("#reply"))
+            check(f"no page errors, bar guide ({tag})", not errors, errors[:2])
+            ctx.close()
+
+            # ---- the panel
+            api = Api()
+            api.gets["/api/guide/state"] = {"active": False, "status": "idle", "offer": None}
+            ctx, page, errors, _ = bare_panel(browser, lang, scheme, api)
+            api.gets["/api/guide/state"] = offer
+            page.evaluate("([h, r]) => { panelHeard(h); panelReply(r); panelState('acting',''); }",
+                          [w["ask"], w["answer"]])
+            page.wait_for_selector("#gchip:not([hidden])", timeout=3000)
+            layout(page, f"panel-guide-chip-{tag}")
+            for name, st in guide_states(lang).items():
+                api.gets["/api/guide/state"] = st
+                page.evaluate("guideLoop()")
+                page.wait_for_timeout(150)
+                layout(page, f"panel-guide-{name}-{tag}")
+                problems = page.evaluate(WHOLE_JS)
+                check(f"the guide card is whole in the panel ({name}, {tag})", not problems, problems)
+            check(f"no page errors, panel guide ({tag})", not errors, errors[:2])
+            ctx.close()
+
+
 def main():
     proc = start_server()
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)    # bundled Chromium, never channel="chrome"
             try:
-                for t in (test_onboarding, test_panel_states, test_results, test_panel_details, test_lead_items, test_qa_v2, test_bar,
+                for t in (test_onboarding, test_panel_states, test_results, test_web_task,
+                          test_panel_details, test_lead_items, test_qa_v2, test_bar, test_guide,
                           test_selection_and_drag):
                     print(f"\n-- {t.__name__}")
                     try:

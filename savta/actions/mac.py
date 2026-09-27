@@ -39,18 +39,40 @@ def contacts(limit: int = 60) -> list[str]:
     return uniq[:limit]
 
 
-def send_message(name: str, text: str) -> tuple[bool, str]:
+def send_message(name: str, text: str, attachment: str | None = None) -> tuple[bool, str]:
+    """A text, a file, or both, to `name` over iMessage. `attachment` is a local path
+    (a screenshot, so far); Messages accepts it directly as `POSIX file`, no separate
+    upload step. When both are given the file goes first, exactly as it would if she
+    had dragged it into the conversation and then typed a line under it."""
     if not SEND_FOR_REAL:
-        return True, f"[dry run] would send to {name}: {text}"
-    esc_t = text.replace("\\", "\\\\").replace('"', '\\"')
+        what = f"{text!r}" if text else "a file"
+        if attachment and text:
+            what = f"{attachment} and {text!r}"
+        elif attachment:
+            what = attachment
+        return True, f"[dry run] would send {what} to {name}"
     esc_n = name.replace("\\", "\\\\").replace('"', '\\"')
-    script = f'''
-    tell application "Messages"
-      set svc to 1st service whose service type = iMessage
-      set bud to buddy "{esc_n}" of svc
-      send "{esc_t}" to bud
-    end tell'''
-    return _osa(script)
+    lines = ['tell application "Messages"',
+             '  set svc to 1st service whose service type = iMessage',
+             f'  set bud to buddy "{esc_n}" of svc']
+    if attachment:
+        esc_p = attachment.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'  send (POSIX file "{esc_p}") to bud')
+    if text:
+        esc_t = text.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'  send "{esc_t}" to bud')
+    lines.append('end tell')
+    return _osa("\n".join(lines))
+
+
+def copy_file_to_clipboard(path: str) -> bool:
+    """Put a file's own bytes on the clipboard - not its path as text - so a paste
+    into Messages, WhatsApp or Mail drops the picture itself. Never gated behind
+    SEND_FOR_REAL: nothing leaves the machine, the clipboard is local."""
+    esc = path.replace("\\", "\\\\").replace('"', '\\"')
+    ok, _ = _osa(f'set the clipboard to (read (POSIX file "{esc}") as «class PNGf»)',
+                 timeout=6.0)
+    return ok
 
 
 def facetime(name: str, number: str = "", video: bool = True) -> tuple[bool, str]:
@@ -378,6 +400,25 @@ def whatsapp(name_or_number: str, text: str) -> tuple[bool, str]:
     return _osa('tell application "System Events" to tell process "WhatsApp" to keystroke return')
 
 
+def whatsapp_open_chat(name_or_number: str) -> tuple[bool, str]:
+    """Open a chat and leave it there, with nothing typed and nothing sent.
+
+    WhatsApp desktop has no attach-a-file hook this project can drive the way Messages'
+    `send (POSIX file ...)` does, so a screenshot cannot actually go out on this channel
+    from here. What can honestly be done is put the picture on the clipboard (already
+    done by the caller before this runs) and get her to the right conversation, so a
+    single paste and Enter is all that is left for her - never claimed as sent, because
+    it was not."""
+    if not SEND_FOR_REAL:
+        return True, f"[dry run] would open WhatsApp chat with {name_or_number}"
+    import urllib.parse
+    digits = "".join(c for c in name_or_number if c.isdigit() or c == "+")
+    url = (f"whatsapp://send?phone={urllib.parse.quote(digits)}" if digits.lstrip("+")
+           else "whatsapp://send")
+    subprocess.run(["open", url], check=False)
+    return True, "opened chat"
+
+
 # ---------------------------------------------------------------- notes etc
 NOTES_FALLBACK = os.path.join(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))), "notes.txt")
@@ -605,8 +646,11 @@ def pending_timers() -> list[dict]:
 
 
 def add_event(title: str, date: str, start: str, end: str = "",
-              location: str = "") -> tuple[bool, str]:
+              location: str = "", all_day: bool = False) -> tuple[bool, str]:
     """Add one event to her calendar. date is YYYY-MM-DD, start/end are HH:MM (24h).
+    `all_day` ignores start/end and adds it as an all-day event instead - for a
+    date on the screen with no time anywhere near it ("Pyramids of Giza (November
+    28, 2026)"), rather than refusing the whole thing for want of a clock reading.
 
     The date is built field by field, never from a string: AppleScript parses date
     strings in the Mac's own locale, so "2026-10-01 10:00" means something different,
@@ -616,13 +660,9 @@ def add_event(title: str, date: str, start: str, end: str = "",
     often a read-only subscription such as holidays, which silently refuses."""
     import re as _re
     m = _re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", date or "")
-    t = _re.fullmatch(r"(\d{1,2}):(\d{2})", start or "")
-    if not m or not t:
-        return False, "bad date or time"
+    if not m:
+        return False, "bad date"
     y, mo, d = (int(x) for x in m.groups())
-    sh, sm = (int(x) for x in t.groups())
-    e = _re.fullmatch(r"(\d{1,2}):(\d{2})", end or "")
-    eh, em = (int(x) for x in e.groups()) if e else (sh + 1, sm)
     esc = lambda v: (v or "").replace("\\", "\\\\").replace('"', '\\"')[:200]
 
     def when(var, h, mi):
@@ -634,6 +674,22 @@ def add_event(title: str, date: str, start: str, end: str = "",
                 f"set hours of {var} to {min(h, 23)}\n"
                 f"set minutes of {var} to {mi}\n"
                 f"set seconds of {var} to 0\n")
+    if all_day:
+        script = (when("s", 0, 0) +
+                  'tell application "Calendar"\n'
+                  '  set cal to first calendar whose writable is true\n'
+                  f'  make new event at end of events of cal with properties '
+                  f'{{summary:"{esc(title)}", start date:s, allday event:true, '
+                  f'location:"{esc(location)}"}}\n'
+                  '  return name of cal\n'
+                  'end tell')
+        return _osa(script, timeout=10.0)
+    t = _re.fullmatch(r"(\d{1,2}):(\d{2})", start or "")
+    if not t:
+        return False, "bad time"
+    sh, sm = (int(x) for x in t.groups())
+    e = _re.fullmatch(r"(\d{1,2}):(\d{2})", end or "")
+    eh, em = (int(x) for x in e.groups()) if e else (sh + 1, sm)
     script = (when("s", sh, sm) + when("e", eh, em) +
               'tell application "Calendar"\n'
               '  set cal to first calendar whose writable is true\n'

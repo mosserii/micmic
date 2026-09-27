@@ -261,7 +261,8 @@ class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *a):  # quieter console
-        if "/api/" in (self.path or ""):
+        # The guide's state is polled several times a second by the card and the ring.
+        if "/api/" in (self.path or "") and not (self.path or "").startswith("/api/guide/state"):
             sys.stderr.write("  %s\n" % (fmt % a))
 
     def _send(self, code, body: bytes, ctype="application/json"):
@@ -273,6 +274,12 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.path.startswith("/api/guide/state"):
+            # Polled by the page's guide card and by native/guide_overlay.py, which
+            # draws the ring from "ring". Only what is already known: never a screen
+            # read and never a model call.
+            from .actions.guide import GUIDE
+            return self._send(200, json.dumps(GUIDE.state(), ensure_ascii=False).encode())
         if self.path.startswith(("/api/onboarding", "/api/permissions")):
             return onboarding_api.get(self)
         if self.path.startswith("/api/config"):
@@ -318,8 +325,12 @@ class H(BaseHTTPRequestHandler):
             }, ensure_ascii=False).encode())
         if self.path.startswith("/api/memory"):
             from . import memory as _mem
+            from . import prefs as _prefs
+            # "prefs": what she has told MicMic to do from now on, one row each, read
+            # only (she changes them by saying so). Added field; the rest is as before.
             return self._send(200, json.dumps(
-                {"likes": _mem.summary(), "raw": _mem.load()},
+                {"likes": _mem.summary(), "raw": _mem.load(),
+                 "prefs": [{**it, "text": _prefs.describe(it)} for it in _prefs.items()]},
                 ensure_ascii=False, default=str).encode())
         if self.path.startswith("/api/trace"):
             # What she said, what it understood, why it chose what it chose. The only
@@ -335,6 +346,12 @@ class H(BaseHTTPRequestHandler):
         if self.path.startswith("/api/update"):
             from . import update as _upd
             return self._send(200, json.dumps(_upd.check()).encode())
+        if self.path.startswith("/api/web_status"):
+            # A browser task that handed the screen to her (a human check, a sign-in)
+            # answers its turn at once and waits on its own. The bar polls this to keep
+            # "waiting for you" up meanwhile, and to show how the task ended.
+            from .router import web_status
+            return self._send(200, json.dumps(web_status(), ensure_ascii=False).encode())
         if self.path.startswith("/api/speaking"):
             # So a client can tell whether MicMic is still talking, rather than
             # guessing from the length of the sentence it sent.
@@ -451,7 +468,45 @@ class H(BaseHTTPRequestHandler):
                 {"ok": False, "error": "could_not_open", "detail": type(e).__name__}).encode())
         return self._send(200, json.dumps({"ok": True}).encode())
 
+    def _guide(self):
+        """The guide card's buttons. Contract, all POST, each answering GUIDE.state()
+        plus "said" where there is a line to show:
+          /api/guide/start {"offer": id}   start from the "Guide me" chip's offer; the
+                                           goal is the question she asked, never text
+                                           the page sends
+          /api/guide/next                  Done: she did this step
+          /api/guide/stop | back | why | do (press the ringed control for her)"""
+        from .actions.guide import GUIDE
+        body = self._drain()
+        try:
+            payload = json.loads(body or b"{}")
+        except Exception:  # noqa: BLE001
+            payload = {}
+        what = self.path.split("?", 1)[0].rsplit("/", 1)[-1]
+        if what == "start":
+            o = GUIDE.take_offer(str(payload.get("offer") or "") or None)
+            if o is None:
+                res = {**GUIDE.state(), "started": False}
+            else:
+                res = {**GUIDE.start(o["goal"], o["lang"], speak=o["speak"],
+                                     gender=o["gender"]), "started": True}
+        elif what == "next":
+            res = GUIDE.next_step()
+        elif what == "stop":
+            res = GUIDE.stop()
+        elif what == "back":
+            res = GUIDE.back()
+        elif what == "why":
+            res = GUIDE.explain()
+        elif what == "do":
+            res = GUIDE.do_it()
+        else:
+            return self._send(404, b"{}")
+        return self._send(200, json.dumps(res, ensure_ascii=False, default=str).encode())
+
     def _post(self):
+        if self.path.startswith("/api/guide/"):
+            return self._guide()
         if self.path.startswith(("/api/onboarding", "/api/permissions")):
             return onboarding_api.post(self, self._drain())
         if self.path.startswith("/api/upgrade"):
@@ -463,7 +518,9 @@ class H(BaseHTTPRequestHandler):
             # A record of her habits is hers to erase. This is the one delete path in
             # the project, and it deletes only what MicMic itself wrote about her.
             from . import memory as _mem
+            from . import prefs as _prefs
             _mem.forget_all()
+            _prefs.forget_all()
             return self._send(200, json.dumps({"forgotten": True}).encode())
         if self.path.startswith(("/api/turn_open", "/api/turn_closed")):
             # The listener's turn, opened and closed (native/listener.py). Opening one

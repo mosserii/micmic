@@ -37,6 +37,21 @@ DRAFT_QUESTIONS = {
                      "unchanged": "She did not name an app."}},
 }
 
+# Asked only while MicMic is guiding her through something on screen, one step at a
+# time (savta/actions/guide.py). "next" or "why" on its own means nothing without it.
+# "none" first: a replay that never saw this question defaults to the first option.
+GUIDE_QUESTIONS = {
+    "guide_command": {"type": "choice",
+        "instructions": "MicMic is walking her through a task on her screen one step at a time (guide_in_progress). Is what she says now about that guidance?",
+        "criteria": {
+            "none": "No: a new, separate request or question, or anything that is not about the steps.",
+            "next": "She did the step or wants the next one: done, next, I did it, okay what now, got it. עשיתי, הבא, מה עכשיו. تمّ، التالي. готово, дальше.",
+            "why": "She asks what this step is or why she should do it: what's this, why, what does that do. למה, מה זה. ليش، شو هاد. зачем, что это.",
+            "back": "She wants the step before this one again: go back, the previous step. חזרה, תחזרי אחורה. ارجع. назад.",
+            "repeat": "She wants this step said again: say that again, repeat, what did you say. תחזרי על זה. عيدي. повтори.",
+            "stop": "She wants the guiding to end: stop, enough, stop guiding, I will do it myself. די, עצרי, תפסיקי. وقّفي، خلص. хватит, стоп."}},
+}
+
 INTENTS = {
     "watch":    "Watch something on screen: a film, a show, a video, a clip, a match, the television news.",
     "music":    "Listen to music or a song or a singer.",
@@ -65,8 +80,20 @@ INTENTS = {
 def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
                playing: str = "", likes: dict | None = None,
                spans: dict[str, str | tuple[str, str | None]] | None = None,
-               draft: dict | None = None) -> dict:
+               draft: dict | None = None, standing: dict | None = None,
+               guide: dict | None = None, named: dict | None = None) -> dict:
     """One request. Everything the decision tree could need.
+
+    `standing` is savta.prefs.questions(): the preference questions when her words
+    can state, recall or forget a preference, and her saved rules that this sentence
+    plausibly touches. None on an ordinary request, which is then sent exactly as it
+    would be without preferences at all.
+
+    `named` is savta.actions.targets.question(): asked only when her words name an app,
+    a website or a service ("on Netflix", "search it on Amazon", "in Spotify"), which
+    of those, if any, is where she wants it done. The owner said "please put 1969 song
+    on apple music" and got YouTube: nothing asked where. Without it nothing is asked
+    and the answer is "none".
 
     `draft` is the message this conversation has just prepared, sent or stopped
     ({"to", "text", "channel"}). While there is one, two more questions ride along:
@@ -78,7 +105,10 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
     in this request instead of costing a round trip of their own once the intent is
     known. `exists`, when given, replaces the wording of the "is there such a part"
     check. Each comes back in result["spans"][name] as (span or None, confidence),
-    exactly as pick_span returns."""
+    exactly as pick_span returns.
+
+    `guide` is the step-by-step guide running right now ({"goal", "current_step"}),
+    or None. While there is one, guide_command rides along, like the draft questions."""
     contact_opts = {c: None for c in contacts[:MAX_OPTIONS - 1]}
     contact_opts["nobody"] = "She did not name a person."
 
@@ -220,6 +250,26 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
                                       "two days from today.",
                          "later": "A day further away than the day after tomorrow: the "
                                   "weekend when that is further, next week, a date."}},
+        # "What was the score of Maccabi Tel Aviv" was answered from the Wikipedia
+        # article on Tel Aviv: "I do not know the score". A fresh report comes from a
+        # live source (router._live_answer); this says which kind. The escape is first,
+        # so a question nobody has recorded an answer for reads as not live.
+        "live_kind": {"type": "choice",
+            "instructions": "Is she asking for a fresh report of something that changes "
+                            "from day to day, which only today's news or a live price can "
+                            "answer, rather than a lasting fact? If so, which kind?",
+            "criteria": {
+                "not_live": "No. A lasting fact (who someone is, history, geography, how "
+                            "something works, what a word means), the weather, the time, "
+                            "something to watch or listen to, a message, small talk, or "
+                            "anything else.",
+                "sport_result": "How a team or a player did in a recent or current game: "
+                                "who won, the score, the result.",
+                "news": "The latest news, what is happening now, in general or about a "
+                        "person, a place, a company or a subject.",
+                "price": "What something is worth right now in the markets: bitcoin or "
+                         "another cryptocurrency, or the exchange rate of a currency such "
+                         "as the dollar or the euro."}},
         # Hebrew, Arabic and Russian conjugate for the gender of the person being
         # spoken TO. This was built for a grandmother, so every line addressed a woman;
         # a man is then misgendered by almost every sentence MicMic says. Her own verb
@@ -302,6 +352,16 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
                 "add_to_calendar": "Put what is on the screen into her calendar.",
                 "not_applicable": "She is not asking for anything to do with the screen.",
             }},
+        # Being shown HOW to do something on the screen, which is not the same as
+        # asking MicMic to do it or asking what the screen says. walk_me_through starts
+        # guide mode; how_to_here only puts a "Guide me" chip on the answer.
+        # "none" first: a replay that never saw this question defaults to the first.
+        "guidance": {"type": "choice",
+            "instructions": "Is she asking to be shown HOW to do something in a program or on a website she has open on this computer, rather than asking the computer to do it, or asking about something else?",
+            "criteria": {
+                "none": "No. A request for the computer to do something itself (play, send, call, open, close, find, remind, book), a general question, a how-to about life away from the computer (how do I bake bread, how do I get to the station), small talk, or what the screen says (what is on my screen, summarize this, translate this, read this).",
+                "walk_me_through": "She asks to be walked or guided through it step by step while she does it herself: guide me through adding the Maps API, walk me through this, guide me, show me step by step how to set this up, help me set up billing on this site step by step. תדריכי אותי, תעשי איתי את זה שלב אחרי שלב. دلّيني خطوة خطوة. проведи меня по шагам.",
+                "how_to_here": "She asks how to do something in the program or on the website in front of her, without asking to be guided: how do I add an API key here, where do I turn on two factor on this page, how do I change my password in this app. איך מוסיפים פה משתמש. كيف بضيف مستخدم هون. как тут добавить пользователя."}},
         "needs_nothing": {"type": "noul",
             "instructions": "This is background noise, a stray word, or her talking to somebody else in the room rather than to the computer"},
         # Asked on every single utterance. It costs nothing to ride along in a request
@@ -320,6 +380,12 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
     }
     if draft:
         qs.update(DRAFT_QUESTIONS)
+    if standing:
+        qs.update(standing.get("questions") or {})
+    if guide:
+        qs.update(GUIDE_QUESTIONS)
+    if named:
+        qs.update(named)
     cands = span_candidates(utterance) if spans else []
     for name, spec in (spans or {}).items():
         if not cands:
@@ -352,7 +418,13 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
         state["message_being_prepared"] = {
             "to": draft.get("to") or "not said yet",
             "says": draft.get("text") or "not said yet",
-            "app": "WhatsApp" if draft.get("channel") == "whatsapp" else "text message"}
+            "app": {"whatsapp": "WhatsApp", "telegram": "Telegram",
+                    "signal": "Signal"}.get(draft.get("channel"), "text message")}
+    if standing and standing.get("rules"):
+        state["her_standing_rules"] = list(standing["rules"])
+    if guide:
+        state["guide_in_progress"] = {"goal": guide.get("goal") or "",
+                                      "current_step": guide.get("current_step") or ""}
     state["utterance"] = utterance
     a = j.ask(state, qs)
 
@@ -388,6 +460,8 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
         "about_weather": noul(a, "about_weather"),
         "about_clock": noul(a, "about_clock"),
         "weather_day": choice(a, "weather_day")[0],
+        "live_kind": choice(a, "live_kind")[0],
+        "live_kind_confidence": choice(a, "live_kind")[1],
         "setting_emergency_contact": noul(a, "setting_emergency_contact"),
         "inside_an_app": noul(a, "inside_an_app"),
         "speaker_gender": choice(a, "speaker_gender")[0],
@@ -397,11 +471,22 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
         "describes_instead": noul(a, "describes_instead"),
         "refers_to_screen": noul(a, "refers_to_screen"),
         "screen_task": choice(a, "screen_task")[0],
+        "guidance": choice(a, "guidance")[0] if "guidance" in a else "none",
+        "guidance_confidence": choice(a, "guidance")[1] if "guidance" in a else 0.0,
         "distress": score(a, "distress"),
         "emergency": noul(a, "emergency"),
         "write_in": choice(a, "write_in")[0],
         "amends_message": noul(a, "amends_message") if draft else 0.0,
         "message_app": choice(a, "message_app")[0] if draft else "unchanged",
+        "named_app": choice(a, "named_app")[0] if named and "named_app" in a else "none",
+        "named_app_confidence": (choice(a, "named_app")[1]
+                                 if named and "named_app" in a else 0.0),
+        "named_app_only_look": (noul(a, "named_app_only_look")
+                                if named and "named_app_only_look" in a else 0.0),
+        "standing": {k: v for k, v in a.items() if k.startswith("pref_")},
+        "guide_command": choice(a, "guide_command")[0] if guide and "guide_command" in a else "none",
+        "guide_command_confidence": (choice(a, "guide_command")[1]
+                                     if guide and "guide_command" in a else 0.0),
     }
 
 

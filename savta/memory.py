@@ -96,3 +96,11 @@ def forget_all() -> None:
     hers to clear — it is a record of her habits, and she must be able to erase it."""
     with _LOCK:
         _save(_blank())
+
+
+def restore(d: dict) -> None:
+    """Put back a copy taken with load() before forget_all(): the spoken "forget
+    everything" can be undone for a short while, like everything else MicMic does."""
+    if isinstance(d, dict):
+        with _LOCK:
+            _save(d)

@@ -68,7 +68,21 @@ def _scrub_clock(text: str) -> str:
 # non-digit "part_of_day" word the regex above would miss) is blanked structurally,
 # and every other string gets the same clock scrub Gemini's system prompt gets. This
 # runs only for the cache key; the real request sent live is untouched.
+def _has_key(obj, name: str) -> bool:
+    if isinstance(obj, dict):
+        return name in obj or any(_has_key(v, name) for v in obj.values())
+    if isinstance(obj, list):
+        return any(_has_key(v, name) for v in obj)
+    return False
+
+
 def _normalize(obj):
+    # A question about dates ("which date is next Friday?", web.field_value's
+    # today_is) is answered differently on a different day: scrubbing its dates made
+    # a Saturday answer replay on a Sunday (2026-09-27, "next Friday" -> Oct 4).
+    # Such a request keeps its dates in the key, so a new day is a miss, not a lie.
+    if _has_key(obj, "today_is"):
+        return obj
     if isinstance(obj, dict):
         return {k: ("<CLOCK>" if k == "right_now" else _normalize(v))
                 for k, v in obj.items()}

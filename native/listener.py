@@ -65,6 +65,15 @@ else:
     _BAR_IMPORT_ERROR = ""
 
 try:
+    # native/guide_overlay.py: the ring on the real screen while MicMic guides her
+    from guide_overlay import GuideOverlay, GuideFollower
+except Exception as _guide_err:  # noqa: BLE001
+    GuideOverlay = GuideFollower = None   # guiding still works, in words only
+    _GUIDE_IMPORT_ERROR = repr(_guide_err)
+else:
+    _GUIDE_IMPORT_ERROR = ""
+
+try:
     from panel import MicMicPanel
 except Exception as _panel_err:  # noqa: BLE001
     MicMicPanel = None          # the app still listens; it just has no window
@@ -100,6 +109,15 @@ STALE_AFTER = 1.9       # measured: Apple hands back ONE utterance per recogniti
 TASK_MAX = 45.0         # and recycle an idle session before Apple's ~1 min cap
 MUTE_MAX = 20.0         # never deafen ourselves for longer than this
 POST_TIMEOUT = 45.0     # the router can take a few seconds (LLM step)
+# Every browser task answers at once ("Working on it in the browser.") and runs on its
+# own for up to 75 s, plus up to three minutes each time it waits for her to solve a
+# check or sign in (savta/actions/web.py). So a web turn never holds the POST open
+# long enough to time out. The bar follows the run on /api/web_status: its latest
+# step, the waiting line while it waits, and the line it ends with.
+WEB_STATUS_URL = SERVER.rstrip("/") + "/api/web_status"
+WEB_FOLLOW_EVERY = 1.0
+WEB_FOLLOW_MAX = 900.0  # past the longest run the server allows (75 s + 3 x 3 min)
+WEB_REFRESH = 10.0      # re-shown before the bar's longest result hold (14 s) runs out
 TICK = 0.2              # watchdog cadence
 SETTINGS_POLL = 3.0     # how soon a language or hotkey chosen in the page takes effect
 # A turn: she pressed the key (or MicMic asked her something) and the microphone is
@@ -840,6 +858,14 @@ def _final_conf(result) -> float:
         return 0.0
 
 
+def web_status() -> dict:
+    try:
+        with urllib.request.urlopen(WEB_STATUS_URL, timeout=2) as r:
+            return json.loads(r.read().decode() or "{}")
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def get_config() -> dict:
     try:
         with urllib.request.urlopen(CONFIG_URL, timeout=4) as r:
@@ -982,6 +1008,9 @@ class Listener:
         self.hotkey_active = ""        # what is currently registered
         self.panel = None
         self.bar = None
+        self.web_follow = None         # the browser task the bar is following, if any
+        self.last_reply = ""           # the last line a reply put on the bar
+        self.guide = None       # GuideFollower: the guide's ring, and its words in view
         self.hotkey_line = None
         self._hotkey_trusted_last = None
         self.last_hotkey_check = 0.0
@@ -1097,11 +1126,28 @@ class Listener:
             except Exception as e:  # noqa: BLE001
                 log(f"could not build the bar: {e!r} — the panel will be used instead")
                 self.bar = None
+        self.start_guide_follower()
         self.status_item = item
         self.status_line = line
         self.hotkey_line = hotkey_line
         self.pause_item = pause
         self.paint_menu()
+
+    def start_guide_follower(self) -> None:
+        """Step-by-step guiding (savta/actions/guide.py): polls the server's guide and
+        draws its ring on screen. Without it a guide still speaks and shows its card."""
+        if GuideFollower is None:
+            log(f"guide ring unavailable: {_GUIDE_IMPORT_ERROR}")
+            return
+        if self.guide is not None:
+            return
+        try:
+            self.guide = GuideFollower(SERVER, GuideOverlay(), bar=self.bar, panel=self.panel,
+                                       display=self.display_mode, log=log)
+            self.guide.start()
+        except Exception as e:  # noqa: BLE001
+            log(f"could not start the guide ring: {e!r}")
+            self.guide = None
 
     def paint_menu(self) -> None:
         """Every menu title in the speech language. They were English whatever she
@@ -1155,6 +1201,54 @@ class Listener:
             on_main(lambda: self.bar.set_result(say, undo_label))
         else:
             on_main(lambda: self.bar.set_state("idle"))   # ignored or not for us: go away
+
+    def view_later(self, say: str) -> None:
+        """A line that arrives after its turn ended: how a waiting browser task went."""
+        self.last_reply = say
+        if self.panel is not None:
+            on_main(lambda: self.panel.set_reply(say))
+        if self.bar is not None and self.display_mode() == "bar":
+            def show():
+                self.bar.show()
+                self.bar.set_result(say, None)
+            on_main(show)
+
+    def follow_web(self, run_id, text: str) -> None:
+        """Follow a browser task that answered its turn at once: keep its latest step,
+        or "waiting for you" while it waits for her, on the bar, then show how it
+        ended. Only while its own line is still the last thing the bar showed: a newer
+        answer is hers to read and is not painted over. The ending is always shown."""
+        if not run_id or self.web_follow == run_id:
+            return
+        self.web_follow = run_id
+
+        def go():
+            t0 = shown_at = time.time()
+            mine = text
+            while time.time() - t0 < WEB_FOLLOW_MAX and self.web_follow == run_id:
+                time.sleep(WEB_FOLLOW_EVERY)
+                st = web_status()
+                if not st:
+                    continue                       # server busy or restarting: next tick
+                if st.get("id") != run_id:
+                    break                          # a newer task replaced this one
+                fin = st.get("finished") or {}
+                if fin.get("id") == run_id:
+                    if fin.get("say"):
+                        self.view_later(str(fin["say"]))
+                    break
+                if self.last_reply != mine:
+                    continue
+                line = str(st.get("say") or st.get("progress") or "")
+                # A new line at once; the same line again before the bar's longest
+                # result hold (14 s) lets it fade.
+                if line and (line != mine or time.time() - shown_at > WEB_REFRESH):
+                    mine = self.last_reply = line
+                    shown_at = time.time()
+                    self.view_result(line, None)
+            if self.web_follow == run_id:
+                self.web_follow = None
+        threading.Thread(target=go, daemon=True, name="micmic-web-follow").start()
 
     def view_wait(self, text: str) -> None:
         """"One moment": the microphone is being brought back before she can talk."""
@@ -2450,7 +2544,10 @@ class Listener:
         if self.panel is not None and said:
             on_main(lambda: self.panel.set_reply(said))
         undo = res.get("undo") if isinstance(res.get("undo"), dict) else None
+        self.last_reply = said
         self.view_result(said, (undo or {}).get("label"))
+        if det0.get("web_run"):
+            self.follow_web(det0.get("web_run"), said)
         spoken = speech_seconds(said)
         detail = res.get("detail") if isinstance(res.get("detail"), dict) else {}
         countdown = float(detail.get("countdown") or 0.0)

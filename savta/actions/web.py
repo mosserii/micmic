@@ -14,7 +14,7 @@ Two rules are absolute and enforced in code, never by asking a model nicely:
 MicMic does her legwork. It does not hold her wallet.
 """
 from __future__ import annotations
-import hashlib, os, platform, re, shutil, tarfile, tempfile, time, urllib.request
+import hashlib, os, platform, re, shutil, tarfile, tempfile, threading, time, urllib.request
 from pathlib import Path
 
 from .. import paths
@@ -123,6 +123,37 @@ FINAL_BUTTON = re.compile(
     r"לשלם|בצע הזמנה|השלם רכישה|אישור תשלום|לרכישה|אשר הזמנה|הזמן עכשיו",
     re.I)
 
+# A human check. Not something to get around: the moment to hand her the screen, wait
+# while she does it, and carry on. Read from the title and the top of the page, and
+# from the challenge frames the big providers draw.
+HUMAN_CHECK = re.compile(
+    r"captcha|are you a robot|not a robot|unusual traffic|"
+    r"verify (that )?you are (a )?human|prove you are (a )?human|"
+    r"confirm you are (a )?human|"
+    r"אני לא רובוט|אינך רובוט|я не робот|لست روبوت", re.I)
+CHALLENGE_FRAME = re.compile(
+    r"recaptcha|hcaptcha|challenges\.cloudflare\.com|turnstile|arkoselabs|funcaptcha|"
+    r"captcha-delivery|perimeterx|px-captcha", re.I)
+
+# A sign-in password or a one-time code. Never typed by the agent (FORBIDDEN_FIELD
+# covers these too), but unlike a card number it is a door she can open herself, after
+# which the task can go on. Payment fields are deliberately not here: once the money
+# step is reached the task is finished, and it never resumes past it.
+SECRET_FIELD = re.compile(
+    r"passw|passcode|current-password|one-time-code|\botp\b|one.?time.?(code|password)|"
+    r"verification.?code|auth.?code|\b2fa\b|\bmfa\b|"
+    r"סיסמ|קוד.?אימות|קוד.?חד.?פעמי|пароль|код.?подтвержд|одноразов|"
+    r"كلمة.?(المرور|السر)|رمز.?التحقق", re.I)
+
+# Waiting for her. She is looking at a puzzle or typing a password, so the agent only
+# reads the page (no model calls) once a second, and carries on the moment the thing
+# is gone. Three minutes is long enough for a stubborn image grid and short enough
+# that a forgotten window does not hold a browser open all afternoon.
+HANDOFF_WAIT = 180.0
+HANDOFF_POLL_MS = 1000
+HANDOFF_CLEAR_POLLS = 2    # clear this many reads in a row: a page mid-navigation is not
+MAX_HANDOFFS = 3           # a check that keeps coming back is not worth a fourth wait
+
 SNAPSHOT_JS = r"""
 () => {
   const out = [];
@@ -204,6 +235,18 @@ SNAPSHOT_JS = r"""
     modal: !!trapEl,
     text: (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, %TEXT%),
     elements: out,
+    // What a human check leaves on screen, so the agent can tell she has finished one
+    // without asking a model: the frames big enough to be a challenge, and whether
+    // every captcha answer field on the page has been filled in.
+    frames: [...document.querySelectorAll('iframe')].filter(f => {
+      const r = f.getBoundingClientRect();
+      return r.width >= 60 && r.height >= 40 && getComputedStyle(f).visibility !== 'hidden';
+    }).map(f => (f.getAttribute('src') || '').slice(0, 200)),
+    solved: (() => {
+      const a = [...document.querySelectorAll('[name="g-recaptcha-response"],' +
+                 '[name="h-captcha-response"],[name="cf-turnstile-response"]')];
+      return a.length > 0 && a.every(x => (x.value || '').length > 0);
+    })(),
   };
 }
 """
@@ -226,6 +269,83 @@ def is_forbidden(el: dict) -> bool:
 
 def is_final(el: dict) -> bool:
     return bool(FINAL_BUTTON.search(f"{el.get('label','')} {el.get('name','')}"))
+
+
+def is_secret(el: dict) -> bool:
+    """A sign-in password or a one-time code: hers to type, after which the task goes on."""
+    if (el.get("type") or "").lower() == "password":
+        return True
+    return bool(SECRET_FIELD.search(f"{el.get('name','')} {el.get('label','')}"))
+
+
+def human_check(snap: dict) -> bool:
+    """Is a human check on screen and still unanswered?"""
+    if snap.get("solved"):
+        return False       # she has done it; what is left is an ordinary Continue
+    top = f"{snap.get('title', '')} {(snap.get('text') or '')[:400]}"
+    if HUMAN_CHECK.search(top):
+        return True
+    return any(CHALLENGE_FRAME.search(src) and "size=invisible" not in src
+               for src in snap.get("frames") or [])
+
+
+def sign_in_wall(snap: dict) -> bool:
+    return any(is_secret(e) for e in snap.get("elements") or [])
+
+
+def handed_back(kind: str, snap: dict) -> bool:
+    """Has she finished the part that was handed to her? Pure page reading."""
+    if kind == "human_check":
+        return not human_check(snap)
+    return not sign_in_wall(snap)
+
+
+# The one run that is waiting for her right now, so "stop" can reach it.
+_WAITING: dict = {}
+_WAIT_LOCK = threading.Lock()
+
+
+def waiting() -> str | None:
+    """What the browser is waiting for her to do ("human_check", "sign_in"), or None."""
+    with _WAIT_LOCK:
+        return _WAITING.get("kind")
+
+
+def stop_waiting() -> bool:
+    """She said stop while the browser was waiting for her. True if one was."""
+    with _WAIT_LOCK:
+        ev = _WAITING.get("stop")
+    if ev is None:
+        return False
+    ev.set()
+    return True
+
+
+def wait_for_her(page, kind: str, stop: threading.Event,
+                 limit: float = HANDOFF_WAIT) -> str:
+    """Poll the page until she has finished: "cleared", "stopped" or "timeout".
+
+    Nothing here asks Jev or Gemini anything. She may take two minutes over an image
+    grid, and a model call a second for that long would cost more than the task.
+    """
+    t0 = time.monotonic()
+    clear_run = 0
+    while True:
+        if stop.is_set():
+            return "stopped"
+        if time.monotonic() - t0 > limit:
+            return "timeout"
+        page.wait_for_timeout(HANDOFF_POLL_MS)
+        if stop.is_set():
+            return "stopped"
+        try:
+            snap = snapshot(page)
+        except Exception:  # noqa: BLE001
+            clear_run = 0              # navigating right now: the next read will tell
+            continue
+        clear_run = clear_run + 1 if handed_back(kind, snap) else 0
+        if clear_run >= HANDOFF_CLEAR_POLLS:
+            return "cleared"
 
 
 def blob_of(el: dict) -> str:
@@ -932,8 +1052,14 @@ def ensure_playwright_driver() -> None:
 
 
 def run(j, llm, goal: str, start_url: str, on_step=None, headless: bool = False,
-        max_steps: int = MAX_STEPS, time_budget: float = TIME_BUDGET) -> dict:
-    """Drive the browser toward the goal. Stops at anything only she should decide."""
+        max_steps: int = MAX_STEPS, time_budget: float = TIME_BUDGET,
+        on_handoff=None, on_resume=None, stop: threading.Event | None = None,
+        handoff_wait: float = HANDOFF_WAIT) -> dict:
+    """Drive the browser toward the goal. Stops at anything only she should decide.
+
+    With `on_handoff`, a human check or a sign-in is handed to her and waited for
+    (see drive()); without it, as in a headless run nobody is watching, those end the
+    run as they always did."""
     try:
         ensure_playwright_driver()
     except Exception as e:  # noqa: BLE001
@@ -941,10 +1067,6 @@ def run(j, llm, goal: str, start_url: str, on_step=None, headless: bool = False,
                 "ended": "could not set up the browser",
                 "detail": str(e)[:200]}
     from playwright.sync_api import sync_playwright
-    steps: list[str] = []
-    seen: list[str] = []
-    result = {"goal": goal, "steps": steps, "did": "blocked", "url": start_url,
-              "ended": "ran out of steps"}
     with sync_playwright() as pw:
         try:
             browser = pw.chromium.launch(channel="chrome", headless=headless)
@@ -955,420 +1077,13 @@ def run(j, llm, goal: str, start_url: str, on_step=None, headless: bool = False,
             page.goto(start_url, timeout=30000, wait_until="domcontentloaded")
         except Exception as e:  # noqa: BLE001
             browser.close()
-            result["detail"] = f"could not open {start_url}: {e!r}"[:160]
-            return result
-
-        def settle(first: bool = False):
-            # Only the very first snapshot waits for the network. Booking and flight
-            # sites hold connections open and never reach networkidle at all, so paying
-            # that timeout on every step bought nothing but seconds. After the first
-            # load, the DOM settling is what matters, and `wait` covers the rest.
-            try:
-                page.wait_for_load_state("networkidle" if first else "domcontentloaded",
-                                         timeout=4000 if first else 1200)
-            except Exception:  # noqa: BLE001
-                pass
-            page.wait_for_timeout(300 if first else SETTLE_MS)
-
-        text_cache: dict = {}
-        dead: list[str] = []          # actions that ran and changed nothing
-        no_effect: dict = {}          # (op, element id) -> how many times
-        useless: set = set()          # ...and the ones that have earned removal
-        chosen: list = []             # every (op, id) acted on, in order
-        last_url: str = ""            # only a real navigation resets what we learned
-        blocked_once = 0
-        stall_recoveries = 0
-        loading_waits = 0
-        arrived_run = 0
-        thin_waits = 0
-        # Where this particular task is supposed to end. A results list finishes a
-        # "find me" task and is only half of a "get it ready to pay" one.
-        ends_on = goal_ends_on(j, goal)
-        wanted = {ends_on} | ({"results", "one_thing"} if ends_on in
-                              ("results", "one_thing") else set())
-        # The best place it ever reached. Two runs of the same hotel search both
-        # landed on the Rome hotel list; one recognised it and stopped, the other
-        # carried on fiddling and was reported as a failure from wherever it happened
-        # to give up. What she wanted was on screen in both cases.
-        best: dict = {}
-        started = time.time()
-        for n in range(max_steps):
-            if time.time() - started > time_budget:
-                result["ended"] = f"out of time after {time.time() - started:.0f}s"
-                steps.append(result["ended"])
-                if on_step:
-                    on_step(steps[-1])
-                break
-            settle(first=(n == 0))
-            # Reading the page can fail simply because it is navigating at that exact
-            # moment — the JS context is torn down mid-evaluate. That is the normal
-            # consequence of a click that worked, not a broken page, and abandoning the
-            # whole task for it was the single biggest cause of "blocked" on a shop
-            # search that had in fact just succeeded.
-            snap = None
-            for attempt in range(3):
-                try:
-                    snap = snapshot(page)
-                    break
-                except Exception as e:  # noqa: BLE001
-                    last_err = e
-                    try:
-                        page.wait_for_load_state("domcontentloaded", timeout=3000)
-                    except Exception:  # noqa: BLE001
-                        pass
-                    page.wait_for_timeout(400)
-            if snap is None:
-                steps.append(f"could not read the page: {last_err!r}"[:90])
-                result["ended"] = "could not read the page"; break
-            # A page with almost nothing on it has not finished rendering. Acting on
-            # it means picking from a carousel arrow and a logo, which is exactly what
-            # one booking run did for its whole budget while the search form it needed
-            # was still on its way.
-            if len(snap["elements"]) < 8 and thin_waits < 3:
-                thin_waits += 1
-                try:
-                    page.wait_for_load_state("networkidle", timeout=3000)
-                except Exception:  # noqa: BLE001
-                    pass
-                page.wait_for_timeout(700)
-                steps.append(f"only {len(snap['elements'])} things on the page, "
-                             f"waiting for it to finish")
-                if on_step:
-                    on_step(steps[-1])
-                continue
-
-            if snap["url"] != last_url:
-                # Genuinely a different page. Everything that was hopeless here may
-                # work there, so start the useless list again. A fingerprint change is
-                # not enough: a calendar that re-renders its prices on every click
-                # changes the fingerprint constantly while going nowhere.
-                last_url, useless, no_effect, chosen = snap["url"], set(), {}, []
-                dead = []        # advice about the last page is noise on this one
-            # Deliberately NOT appended on every pass. Dismissing a popup, waiting for
-            # a page to render and asking to wait are all iterations that legitimately
-            # change nothing, and counting them made four harmless passes look like a
-            # dead page — the stall recovery then scrolled away from the search form
-            # the run was about to use.
-            pass
-            # Nothing has changed for three steps. Before giving up, try the two
-            # things a person does when a page stops responding: shut whatever is
-            # covering it, and look further down. Declaring failure without either was
-            # abandoning runs that were one keystroke from working.
-            if len(seen) >= 4 and len(set(seen[-4:])) == 1:
-                if stall_recoveries == 0:
-                    stall_recoveries += 1
-                    page.keyboard.press("Escape")
-                    page.wait_for_timeout(SETTLE_MS)
-                    seen.clear()
-                    steps.append("nothing moving, closed whatever was on top")
-                    if on_step:
-                        on_step(steps[-1])
-                    continue
-                if stall_recoveries == 1:
-                    stall_recoveries += 1
-                    # Back to the top, not further down: the control it needs is
-                    # almost always the search form, and that is where forms are.
-                    page.keyboard.press("Home")
-                    page.mouse.wheel(0, -2000)
-                    page.wait_for_timeout(SETTLE_MS)
-                    seen.clear()
-                    steps.append("nothing moving, went back to the top of the page")
-                    if on_step:
-                        on_step(steps[-1])
-                    continue
-                if best:
-                    result.update(did="done", url=best["url"], title=best["title"],
-                                  page_is=best["page_is"],
-                                  goal_met=round(best["goal_met"], 2),
-                                  note=f"stopped moving later; reporting what it found "
-                                       f"at step {best['step']}")
-                    break
-                result["ended"] = "the page stopped changing"
-                result["did"] = "stuck"; break
-
-            # Deal with a consent banner in code, choosing the least-sharing option,
-            # rather than letting the model pick whichever button is biggest and greenest.
-            # Get out from under a modal before anything else: while it is up, every
-            # click is intercepted and even focus() lands on its own close button.
-            popup = dismiss_choice(snap)
-            if popup and not any(st.startswith("dismissed") for st in steps[-2:]):
-                ok, _ = act(page, popup, "click")
-                steps.append(f"dismissed: {(popup.get('label') or '')[:34]}")
-                if on_step:
-                    on_step(steps[-1])
-                if ok:
-                    continue
-
-            banner = consent_choice(snap["elements"])
-            if banner and not any(st.startswith("consent") for st in steps[-3:]):
-                ok, msg = act(page, banner, "click")
-                steps.append(f"consent: {banner['label'][:40]}")
-                if on_step:
-                    on_step(steps[-1])
-                if ok:
-                    continue
-
-            d = decide(j, goal, snap, steps, dead, useless)
-            result["url"] = snap["url"]
-            # A CAPTCHA or a login wall is not something to get around. It is the
-            # moment to hand her the screen, which is exactly what needs_her does.
-            low = (snap["title"] + " " + snap["text"][:400]).lower()
-            if any(w in low for w in ("captcha", "are you a robot", "unusual traffic",
-                                      "verify you are human", "i'm not a robot",
-                                      "prove you are human")):
-                result["did"] = "needs_her"
-                result["why"] = "the site asked for a human check"
-                result["ended"] = "human check"
-                result["title"] = snap["title"]
-                break
-
-            # Three independent heads, so they can and do disagree. An OR over them
-            # let a lone weak signal end the run: on a flight search it picked `done`
-            # while goal_met was 0.30, stopping on the date picker with the results
-            # one click away. Ending the task needs the operation AND the outcome to
-            # agree, or an outcome confident enough to stand on its own.
-            if d["needs_her"] > 0.6:
-                result["did"] = "needs_her"
-                result["title"] = snap["title"]
-                result["why"] = result.get("why") or "the page needs a person"
-                result["ended"] = "needs a person"
-                break
-            # Arriving at the results IS the goal for nearly everything she asks for,
-            # and the page classification says that far more reliably than asking
-            # whether "the goal" is met.
-            arrived = (d.get("page_is") in wanted
-                       and d.get("page_is_conf", 0) > 0.55)
-            # Two steps in a row standing confidently on what she asked for. The
-            # model will happily keep refining a results page for another twenty
-            # steps; she asked to be shown the hotels, and they are on the screen.
-            # `arrived` already means results-or-item above 0.55; seeing it twice in
-            # a row is the page staying what it says it is, rather than a single
-            # confident-sounding reading of a page that is still settling.
-            arrived_run = arrived_run + 1 if arrived else 0
-            # ...but only when the goal itself looks finished. A product page is a
-            # perfectly good "one_thing" while the goal was to get that thing into a
-            # basket and as far as the order form.
-            if arrived_run >= 2 and d["goal_met"] > 0.5:
-                result["did"] = "done"
-                result["title"] = snap["title"]
-                result["page_is"] = d.get("page_is")
-                result["goal_met"] = round(d["goal_met"], 2)
-                result["ended"] = "settled on the right page"
-                break
-            # `arrived` only says the page LOOKS like the right kind. On its own that
-            # is not success: an empty results page and a similar-but-wrong item page
-            # both classify confidently. Without the outcome agreeing, a run whose one
-            # good moment was a confident misread was announced as "Found it."
-            if (arrived and d["goal_met"] > 0.35
-                    and d.get("page_is_conf", 0) > best.get("conf", 0)):
-                best = {"conf": d["page_is_conf"], "url": snap["url"],
-                        "title": snap["title"], "page_is": d["page_is"],
-                        "goal_met": d["goal_met"], "step": n + 1}
-            if (d["op"] == "done" and (arrived or d["goal_met"] > 0.45)) \
-                    or d["goal_met"] > 0.8 \
-                    or (arrived and d["op"] == "blocked" and d["goal_met"] > 0.35):
-                result["did"] = "done"
-                result["title"] = snap["title"]
-                result["goal_met"] = round(d["goal_met"], 2)
-                result["page_is"] = d.get("page_is")
-                result["ended"] = "arrived"
-                break
-            if d["op"] == "done":
-                # It wants to stop but cannot see the goal met. Tell it so, and let it
-                # look again rather than accepting a premature finish.
-                dead.append("claimed the goal was done while it visibly was not")
-                steps.append("thought it was finished, but the goal is not visible yet")
-                if on_step:
-                    on_step(steps[-1])
-                page.wait_for_timeout(WAIT_MS)
-                continue
-            if d["op"] == "blocked":
-                # Usually this means the page has not finished rendering, not that the
-                # task is impossible — a shop search that had just been submitted said
-                # "blocked" on one run and "results" on the next, from the same three
-                # steps. The limit used to be the first three steps, which is exactly
-                # when a search lands. Two waits, wherever in the run they happen.
-                if blocked_once < 2:
-                    blocked_once += 1
-                    page.wait_for_timeout(WAIT_MS)
-                    try:
-                        page.wait_for_load_state("networkidle", timeout=3000)
-                    except Exception:  # noqa: BLE001
-                        pass
-                    steps.append("nothing usable yet, waiting for the page")
-                    if on_step:
-                        on_step(steps[-1])
-                    continue
-                # It may have got most of the way there — a product page reached but
-                # the size not yet chosen, a results list shown but not filtered.
-                # Reporting that as a flat failure throws away real work and tells her
-                # nothing about the page now on her screen.
-                if best:
-                    result.update(did="done", url=best["url"], title=best["title"],
-                                  page_is=best["page_is"],
-                                  goal_met=round(best["goal_met"], 2),
-                                  note=f"ran out of ideas later; reporting what it "
-                                       f"found at step {best['step']}")
-                    break
-                if d["goal_met"] > 0.4:
-                    result["did"] = "partly_done"
-                    result["title"] = snap["title"]
-                    result["goal_met"] = round(d["goal_met"], 2)
-                    break
-                result["ended"] = "it said nothing here can make progress"
-                result["did"] = "blocked"; break
-            # It said the page is still fetching. Believe it: classifying a results
-            # page a moment too early is what made the same search succeed one run and
-            # report failure the next.
-            if d.get("page_is") == "loading" and loading_waits < 3:
-                loading_waits += 1
-                page.wait_for_timeout(WAIT_MS)
-                try:
-                    page.wait_for_load_state("networkidle", timeout=2500)
-                except Exception:  # noqa: BLE001
-                    pass
-                steps.append("waiting for the page to finish loading")
-                if on_step:
-                    on_step(steps[-1])
-                continue
-
-            if d["op"] == "wait":
-                page.wait_for_timeout(WAIT_MS); steps.append("waited"); continue
-            if d["op"] == "scroll":
-                page.mouse.wheel(0, 700); steps.append("scrolled"); continue
-            el = d["target"]
-            if not el:
-                steps.append(f"{d['op']}: no target"); continue
-
-            text = ""
-            if d["op"] in ("type", "select"):
-                # A stale-page retry lands here again with the same field and the same
-                # page. The answer cannot have changed, so do not pay for it twice.
-                ck = (el["id"], snap["fingerprint"], d["op"])
-                if ck in text_cache:
-                    text = text_cache[ck]
-                else:
-                    text = field_value(j, llm, goal, el, snap["title"])
-                    text_cache[ck] = text
-                if not text:
-                    # Jev could not find the value in her own words, and the writing
-                    # model is the only other source. Give up once rather than
-                    # repeating a silent no-op for the rest of the budget — but only
-                    # AFTER Jev has actually had its turn.
-                    if llm is not None and getattr(llm, "out_of_credit", False):
-                        result["did"] = "needs_her"
-                        result["why"] = "no_text_helper"
-                        result["ended"] = "the writing model is unavailable"
-                        result["title"] = snap["title"]
-                        break
-                    steps.append(f"{d['op']}: nothing to enter"); continue
-            before = snap["fingerprint"]
-            label = (el.get("label") or el.get("name") or "")[:46]
-            seen.append(snap["fingerprint"])
-            ok, msg = act(page, el, d["op"], text)
-            # Everything up to the money is done. This is not a failure — it is the
-            # hand-over, and she needs to be told precisely what is left for her.
-            if not ok and ("completes a purchase" in msg or "password or payment" in msg):
-                result["did"] = "needs_payment"
-                result["ended"] = "reached the payment step and stopped"
-                result["title"] = snap["title"]
-                result["url"] = snap["url"]
-                result["waiting_on"] = (el.get("label") or el.get("name") or "")[:60]
-                result["why"] = msg
-                steps.append(f"{d['op']} {label}  [{msg[:60]}]")
-                if on_step:
-                    on_step(steps[-1])
-                break
-            note = ""
-            if not ok:
-                # A control that refuses the action is just as dead as one that does
-                # nothing, and only the second case was being retired — so a broken
-                # button could be chosen again and again inside one budget.
-                key = (d["op"], el["id"])
-                chosen.append(key)
-                no_effect[key] = no_effect.get(key, 0) + 1
-                if no_effect[key] >= 2:
-                    useless.add(key)
-                dead.append(f"{d['op']} on \"{label}\" did not work: {msg[:50]}")
-            if ok:
-                moved = None
-                try:
-                    if d["op"] == "type":
-                        # Typing into a field changes no text and no labels, so the
-                        # page fingerprint is identical afterwards — and every
-                        # successful type was being recorded as "changed nothing" and
-                        # the field retired as useless. What "it worked" means here is
-                        # that the field now holds what was typed.
-                        node = page.query_selector(f'[data-mm="{el["id"]}"]')
-                        got = (node.input_value() or "") if node else ""
-                        moved = bool(got) and got.strip()[:12].lower() in text.lower()
-                    else:
-                        moved = snapshot(page)["fingerprint"] != before
-                except Exception:  # noqa: BLE001
-                    moved = None          # could not tell; assume nothing either way
-                key = (d["op"], el["id"])
-                # Choosing the same control over and over is a stall even when the
-                # page keeps twitching. A flight site's calendar re-renders its prices
-                # on every click, so the fingerprint changed each time and the
-                # no-effect counter kept resetting while Search was pressed sixteen
-                # times. Repetition is the signal the page cannot fake.
-                chosen.append(key)
-                if chosen[-3:].count(key) >= 3:
-                    useless.add(key)
-                    note = "  [tried three times, moving on]"
-                # Two controls that undo each other. On a flight site "Done" closed the
-                # calendar and "Search" reopened it, for ever: the page genuinely
-                # changed every time, so no stall check saw it, and the real fix was
-                # elsewhere on the page entirely. Retiring both forces it to look.
-                elif len(chosen) >= 4 and len(set(chosen[-4:])) == 2 \
-                        and chosen[-1] != chosen[-2] and chosen[-3] == chosen[-1]:
-                    # Two controls undoing each other means the form is not finished:
-                    # on a flight site, submitting reopened the calendar because the
-                    # trip was still set to "round trip" and wanted a return date.
-                    # Retiring both buttons only left it flailing in the calendar; what
-                    # it needs is to be told what the loop MEANS and go look for the
-                    # field that is actually missing.
-                    if not any("round in circles" in x for x in dead[-3:]):
-                        dead.append(
-                            f'pressing "{label}" and then the other control keeps '
-                            f"undoing itself. That means the form is not complete: "
-                            f"something it needs has not been chosen yet. Look for the "
-                            f"setting or field that is still wrong or empty — the trip "
-                            f"type, the number of people, a missing second date — and "
-                            f"fix that instead of pressing these two again.")
-                    note = "  [going round in circles]"
-                if moved is False:
-                    note = "  [changed nothing]"
-                    dead.append(f"{d['op']} on \"{label}\"" +
-                                (f" with \"{text[:24]}\"" if text else ""))
-                    no_effect[key] = no_effect.get(key, 0) + 1
-                    if no_effect[key] >= 2:
-                        # Twice with no effect: stop offering it at all. Asking the
-                        # model not to repeat something is advice; taking it off the
-                        # menu is a fact.
-                        useless.add(key)
-                elif moved is True:
-                    no_effect.pop(key, None)
-            steps.append(f"{d['op']} {label}" + (f" = {text[:30]}" if text else "") +
-                         ("" if ok else f"  [{msg[:50]}]") + note)
-            if on_step:
-                on_step(steps[-1])
-            if not ok and msg.startswith(("refused", "stopped")):
-                result["did"] = "needs_her"; result["why"] = msg
-                result["ended"] = "refused to cross a line"; break
-
-        # If it ever stood on what she asked for, that is the answer — not whatever
-        # page it happened to be looking at when it ran out of steps or ideas.
-        if result["did"] in ("blocked", "stuck", "partly_done") and best:
-            result.update(did="done", url=best["url"], title=best["title"],
-                          page_is=best["page_is"], goal_met=round(best["goal_met"], 2),
-                          note=f"found it at step {best['step']}, then kept going")
-        else:
-            try:
-                result["title"] = result.get("title") or page.title()
-                result["url"] = page.url
-            except Exception:  # noqa: BLE001
-                pass
+            return {"goal": goal, "steps": [], "did": "blocked", "url": start_url,
+                    "ended": "ran out of steps",
+                    "detail": f"could not open {start_url}: {e!r}"[:160]}
+        result = drive(j, llm, goal, page, start_url, on_step=on_step,
+                       max_steps=max_steps, time_budget=time_budget,
+                       on_handoff=None if headless else on_handoff,
+                       on_resume=on_resume, stop=stop, handoff_wait=handoff_wait)
         if not headless and result["did"] in ("needs_her", "done"):
             # This used to call bring_to_front() and stop there, which did nothing:
             # leaving the `with sync_playwright()` block kills every browser the
@@ -1397,6 +1112,520 @@ def run(j, llm, goal: str, start_url: str, on_step=None, headless: bool = False,
     return result
 
 
+def drive(j, llm, goal: str, page, start_url: str, on_step=None,
+          max_steps: int = MAX_STEPS, time_budget: float = TIME_BUDGET,
+          on_handoff=None, on_resume=None, stop: threading.Event | None = None,
+          handoff_wait: float = HANDOFF_WAIT) -> dict:
+    """The step loop, on a page that is already open. Separate from run() so it can be
+    driven with a scripted page and no browser at all.
+
+    A human check or a sign-in used to end the run on the spot: she solved the CAPTCHA
+    and nothing happened, because the task was already over. Now, when someone is
+    watching (`on_handoff` is set), the run keeps the page and everything it has
+    learned, calls on_handoff(kind), and waits for her with plain page reads. When the
+    thing is gone it calls on_resume(kind) and carries on from the same step. `stop`
+    set while waiting (she said stop) ends it; so does HANDOFF_WAIT with nothing done.
+    The last press before money moves is never one of these: that still ends the run.
+    """
+    stop = stop or threading.Event()
+    steps: list[str] = []
+    seen: list[str] = []
+    result = {"goal": goal, "steps": steps, "did": "blocked", "url": start_url,
+              "ended": "ran out of steps"}
+    def settle(first: bool = False):
+        # Only the very first snapshot waits for the network. Booking and flight
+        # sites hold connections open and never reach networkidle at all, so paying
+        # that timeout on every step bought nothing but seconds. After the first
+        # load, the DOM settling is what matters, and `wait` covers the rest.
+        try:
+            page.wait_for_load_state("networkidle" if first else "domcontentloaded",
+                                     timeout=4000 if first else 1200)
+        except Exception:  # noqa: BLE001
+            pass
+        page.wait_for_timeout(300 if first else SETTLE_MS)
+
+    text_cache: dict = {}
+    dead: list[str] = []          # actions that ran and changed nothing
+    no_effect: dict = {}          # (op, element id) -> how many times
+    useless: set = set()          # ...and the ones that have earned removal
+    chosen: list = []             # every (op, id) acted on, in order
+    last_url: str = ""            # only a real navigation resets what we learned
+    blocked_once = 0
+    stall_recoveries = 0
+    loading_waits = 0
+    arrived_run = 0
+    thin_waits = 0
+    # Where this particular task is supposed to end. A results list finishes a
+    # "find me" task and is only half of a "get it ready to pay" one.
+    ends_on = goal_ends_on(j, goal)
+    wanted = {ends_on} | ({"results", "one_thing"} if ends_on in
+                          ("results", "one_thing") else set())
+    # The best place it ever reached. Two runs of the same hotel search both
+    # landed on the Rome hotel list; one recognised it and stopped, the other
+    # carried on fiddling and was reported as a failure from wherever it happened
+    # to give up. What she wanted was on screen in both cases.
+    best: dict = {}
+    started = time.time()
+    handoffs = 0
+
+    def hand_over(kind: str) -> str:
+        """Give her the screen and wait: "cleared", "stopped", "timeout", or "no" when
+        nobody is watching or the checks keep coming back."""
+        nonlocal handoffs, started
+        if on_handoff is None or handoffs >= MAX_HANDOFFS:
+            return "no"
+        handoffs += 1
+        steps.append(f"waiting for her: {kind.replace('_', ' ')}")
+        if on_step:
+            on_step(steps[-1])
+        t0 = time.time()
+        with _WAIT_LOCK:
+            _WAITING.update(kind=kind, stop=stop, since=t0)
+        try:
+            try:
+                on_handoff(kind)
+            except Exception:  # noqa: BLE001
+                pass           # telling her failed; the page is still hers to finish
+            got = wait_for_her(page, kind, stop, handoff_wait)
+        finally:
+            with _WAIT_LOCK:
+                _WAITING.clear()
+        # Her minutes on the puzzle are not the agent's budget.
+        started += time.time() - t0
+        if got == "cleared":
+            steps.append("she finished it, carrying on")
+            if on_step:
+                on_step(steps[-1])
+            if on_resume:
+                try:
+                    on_resume(kind)
+                except Exception:  # noqa: BLE001
+                    pass
+        return got
+
+    def not_finished(got: str, snap: dict, why: str) -> None:
+        """The hand-off ended without her finishing it, or never started."""
+        result["did"] = "stopped" if got == "stopped" else "needs_her"
+        result["why"] = why
+        result["title"] = snap["title"]
+        result["url"] = snap["url"]
+        result["ended"] = {"stopped": "she said stop while it waited",
+                           "timeout": "waited for her, then stopped"}.get(got, why)
+        if got == "timeout":
+            result["waited_out"] = True
+
+    for n in range(max_steps):
+        if stop.is_set():
+            result["did"] = "stopped"
+            result["ended"] = "she said stop"
+            break
+        if time.time() - started > time_budget:
+            result["ended"] = f"out of time after {time.time() - started:.0f}s"
+            steps.append(result["ended"])
+            if on_step:
+                on_step(steps[-1])
+            break
+        settle(first=(n == 0))
+        # Reading the page can fail simply because it is navigating at that exact
+        # moment — the JS context is torn down mid-evaluate. That is the normal
+        # consequence of a click that worked, not a broken page, and abandoning the
+        # whole task for it was the single biggest cause of "blocked" on a shop
+        # search that had in fact just succeeded.
+        snap = None
+        for attempt in range(3):
+            try:
+                snap = snapshot(page)
+                break
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=3000)
+                except Exception:  # noqa: BLE001
+                    pass
+                page.wait_for_timeout(400)
+        if snap is None:
+            steps.append(f"could not read the page: {last_err!r}"[:90])
+            result["ended"] = "could not read the page"; break
+        # A page with almost nothing on it has not finished rendering. Acting on
+        # it means picking from a carousel arrow and a logo, which is exactly what
+        # one booking run did for its whole budget while the search form it needed
+        # was still on its way.
+        if len(snap["elements"]) < 8 and thin_waits < 3:
+            thin_waits += 1
+            try:
+                page.wait_for_load_state("networkidle", timeout=3000)
+            except Exception:  # noqa: BLE001
+                pass
+            page.wait_for_timeout(700)
+            steps.append(f"only {len(snap['elements'])} things on the page, "
+                         f"waiting for it to finish")
+            if on_step:
+                on_step(steps[-1])
+            continue
+
+        if snap["url"] != last_url:
+            # Genuinely a different page. Everything that was hopeless here may
+            # work there, so start the useless list again. A fingerprint change is
+            # not enough: a calendar that re-renders its prices on every click
+            # changes the fingerprint constantly while going nowhere.
+            last_url, useless, no_effect, chosen = snap["url"], set(), {}, []
+            dead = []        # advice about the last page is noise on this one
+        # Deliberately NOT appended on every pass. Dismissing a popup, waiting for
+        # a page to render and asking to wait are all iterations that legitimately
+        # change nothing, and counting them made four harmless passes look like a
+        # dead page — the stall recovery then scrolled away from the search form
+        # the run was about to use.
+        pass
+        # Nothing has changed for three steps. Before giving up, try the two
+        # things a person does when a page stops responding: shut whatever is
+        # covering it, and look further down. Declaring failure without either was
+        # abandoning runs that were one keystroke from working.
+        if len(seen) >= 4 and len(set(seen[-4:])) == 1:
+            if stall_recoveries == 0:
+                stall_recoveries += 1
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(SETTLE_MS)
+                seen.clear()
+                steps.append("nothing moving, closed whatever was on top")
+                if on_step:
+                    on_step(steps[-1])
+                continue
+            if stall_recoveries == 1:
+                stall_recoveries += 1
+                # Back to the top, not further down: the control it needs is
+                # almost always the search form, and that is where forms are.
+                page.keyboard.press("Home")
+                page.mouse.wheel(0, -2000)
+                page.wait_for_timeout(SETTLE_MS)
+                seen.clear()
+                steps.append("nothing moving, went back to the top of the page")
+                if on_step:
+                    on_step(steps[-1])
+                continue
+            if best:
+                result.update(did="done", url=best["url"], title=best["title"],
+                              page_is=best["page_is"],
+                              goal_met=round(best["goal_met"], 2),
+                              note=f"stopped moving later; reporting what it found "
+                                   f"at step {best['step']}")
+                break
+            result["ended"] = "the page stopped changing"
+            result["did"] = "stuck"; break
+
+        # Deal with a consent banner in code, choosing the least-sharing option,
+        # rather than letting the model pick whichever button is biggest and greenest.
+        # Get out from under a modal before anything else: while it is up, every
+        # click is intercepted and even focus() lands on its own close button.
+        popup = dismiss_choice(snap)
+        if popup and not any(st.startswith("dismissed") for st in steps[-2:]):
+            ok, _ = act(page, popup, "click")
+            steps.append(f"dismissed: {(popup.get('label') or '')[:34]}")
+            if on_step:
+                on_step(steps[-1])
+            if ok:
+                continue
+
+        banner = consent_choice(snap["elements"])
+        if banner and not any(st.startswith("consent") for st in steps[-3:]):
+            ok, msg = act(page, banner, "click")
+            steps.append(f"consent: {banner['label'][:40]}")
+            if on_step:
+                on_step(steps[-1])
+            if ok:
+                continue
+
+        result["url"] = snap["url"]
+        # A CAPTCHA is not something to get around. It is the moment to hand her the
+        # screen, and wait. Checked before asking Jev anything: there is nothing on a
+        # challenge page for the model to decide.
+        if human_check(snap):
+            got = hand_over("human_check")
+            if got == "cleared":
+                seen.clear()
+                continue
+            not_finished(got, snap, "the site asked for a human check")
+            break
+
+        d = decide(j, goal, snap, steps, dead, useless)
+
+        # Three independent heads, so they can and do disagree. An OR over them
+        # let a lone weak signal end the run: on a flight search it picked `done`
+        # while goal_met was 0.30, stopping on the date picker with the results
+        # one click away. Ending the task needs the operation AND the outcome to
+        # agree, or an outcome confident enough to stand on its own.
+        if d["needs_her"] > 0.6:
+            # A sign-in or a one-time code is hers to type, and then the task is
+            # not over: wait for the field to go and carry on.
+            if sign_in_wall(snap):
+                got = hand_over("sign_in")
+                if got == "cleared":
+                    seen.clear()
+                    continue
+                if got != "no":
+                    not_finished(got, snap, "the site asked her to sign in")
+                    break
+            result["did"] = "needs_her"
+            result["title"] = snap["title"]
+            result["why"] = result.get("why") or "the page needs a person"
+            result["ended"] = "needs a person"
+            break
+        # Arriving at the results IS the goal for nearly everything she asks for,
+        # and the page classification says that far more reliably than asking
+        # whether "the goal" is met.
+        arrived = (d.get("page_is") in wanted
+                   and d.get("page_is_conf", 0) > 0.55)
+        # Two steps in a row standing confidently on what she asked for. The
+        # model will happily keep refining a results page for another twenty
+        # steps; she asked to be shown the hotels, and they are on the screen.
+        # `arrived` already means results-or-item above 0.55; seeing it twice in
+        # a row is the page staying what it says it is, rather than a single
+        # confident-sounding reading of a page that is still settling.
+        arrived_run = arrived_run + 1 if arrived else 0
+        # ...but only when the goal itself looks finished. A product page is a
+        # perfectly good "one_thing" while the goal was to get that thing into a
+        # basket and as far as the order form.
+        if arrived_run >= 2 and d["goal_met"] > 0.5:
+            result["did"] = "done"
+            result["title"] = snap["title"]
+            result["page_is"] = d.get("page_is")
+            result["goal_met"] = round(d["goal_met"], 2)
+            result["ended"] = "settled on the right page"
+            break
+        # `arrived` only says the page LOOKS like the right kind. On its own that
+        # is not success: an empty results page and a similar-but-wrong item page
+        # both classify confidently. Without the outcome agreeing, a run whose one
+        # good moment was a confident misread was announced as "Found it."
+        if (arrived and d["goal_met"] > 0.35
+                and d.get("page_is_conf", 0) > best.get("conf", 0)):
+            best = {"conf": d["page_is_conf"], "url": snap["url"],
+                    "title": snap["title"], "page_is": d["page_is"],
+                    "goal_met": d["goal_met"], "step": n + 1}
+        if (d["op"] == "done" and (arrived or d["goal_met"] > 0.45)) \
+                or d["goal_met"] > 0.8 \
+                or (arrived and d["op"] == "blocked" and d["goal_met"] > 0.35):
+            result["did"] = "done"
+            result["title"] = snap["title"]
+            result["goal_met"] = round(d["goal_met"], 2)
+            result["page_is"] = d.get("page_is")
+            result["ended"] = "arrived"
+            break
+        if d["op"] == "done":
+            # It wants to stop but cannot see the goal met. Tell it so, and let it
+            # look again rather than accepting a premature finish.
+            dead.append("claimed the goal was done while it visibly was not")
+            steps.append("thought it was finished, but the goal is not visible yet")
+            if on_step:
+                on_step(steps[-1])
+            page.wait_for_timeout(WAIT_MS)
+            continue
+        if d["op"] == "blocked":
+            # Usually this means the page has not finished rendering, not that the
+            # task is impossible — a shop search that had just been submitted said
+            # "blocked" on one run and "results" on the next, from the same three
+            # steps. The limit used to be the first three steps, which is exactly
+            # when a search lands. Two waits, wherever in the run they happen.
+            if blocked_once < 2:
+                blocked_once += 1
+                page.wait_for_timeout(WAIT_MS)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=3000)
+                except Exception:  # noqa: BLE001
+                    pass
+                steps.append("nothing usable yet, waiting for the page")
+                if on_step:
+                    on_step(steps[-1])
+                continue
+            # It may have got most of the way there — a product page reached but
+            # the size not yet chosen, a results list shown but not filtered.
+            # Reporting that as a flat failure throws away real work and tells her
+            # nothing about the page now on her screen.
+            if best:
+                result.update(did="done", url=best["url"], title=best["title"],
+                              page_is=best["page_is"],
+                              goal_met=round(best["goal_met"], 2),
+                              note=f"ran out of ideas later; reporting what it "
+                                   f"found at step {best['step']}")
+                break
+            if d["goal_met"] > 0.4:
+                result["did"] = "partly_done"
+                result["title"] = snap["title"]
+                result["goal_met"] = round(d["goal_met"], 2)
+                break
+            if sign_in_wall(snap):
+                got = hand_over("sign_in")
+                if got == "cleared":
+                    seen.clear()
+                    blocked_once = 0
+                    continue
+                if got != "no":
+                    not_finished(got, snap, "the site asked her to sign in")
+                    break
+            result["ended"] = "it said nothing here can make progress"
+            result["did"] = "blocked"; break
+        # It said the page is still fetching. Believe it: classifying a results
+        # page a moment too early is what made the same search succeed one run and
+        # report failure the next.
+        if d.get("page_is") == "loading" and loading_waits < 3:
+            loading_waits += 1
+            page.wait_for_timeout(WAIT_MS)
+            try:
+                page.wait_for_load_state("networkidle", timeout=2500)
+            except Exception:  # noqa: BLE001
+                pass
+            steps.append("waiting for the page to finish loading")
+            if on_step:
+                on_step(steps[-1])
+            continue
+
+        if d["op"] == "wait":
+            page.wait_for_timeout(WAIT_MS); steps.append("waited"); continue
+        if d["op"] == "scroll":
+            page.mouse.wheel(0, 700); steps.append("scrolled"); continue
+        el = d["target"]
+        if not el:
+            steps.append(f"{d['op']}: no target"); continue
+
+        text = ""
+        if d["op"] in ("type", "select"):
+            # A stale-page retry lands here again with the same field and the same
+            # page. The answer cannot have changed, so do not pay for it twice.
+            ck = (el["id"], snap["fingerprint"], d["op"])
+            if ck in text_cache:
+                text = text_cache[ck]
+            else:
+                text = field_value(j, llm, goal, el, snap["title"])
+                text_cache[ck] = text
+            if not text:
+                # Jev could not find the value in her own words, and the writing
+                # model is the only other source. Give up once rather than
+                # repeating a silent no-op for the rest of the budget — but only
+                # AFTER Jev has actually had its turn.
+                if llm is not None and getattr(llm, "out_of_credit", False):
+                    result["did"] = "needs_her"
+                    result["why"] = "no_text_helper"
+                    result["ended"] = "the writing model is unavailable"
+                    result["title"] = snap["title"]
+                    break
+                steps.append(f"{d['op']}: nothing to enter"); continue
+        before = snap["fingerprint"]
+        label = (el.get("label") or el.get("name") or "")[:46]
+        seen.append(snap["fingerprint"])
+        ok, msg = act(page, el, d["op"], text)
+        # A password or a one-time code: hers to type, then the task goes on.
+        if not ok and "password or payment" in msg and is_secret(el):
+            got = hand_over("sign_in")
+            if got == "cleared":
+                seen.clear()
+                continue
+            if got != "no":
+                not_finished(got, snap, "the site asked her to sign in")
+                break
+        # Everything up to the money is done. This is not a failure — it is the
+        # hand-over, and she needs to be told precisely what is left for her.
+        if not ok and ("completes a purchase" in msg or "password or payment" in msg):
+            result["did"] = "needs_payment"
+            result["ended"] = "reached the payment step and stopped"
+            result["title"] = snap["title"]
+            result["url"] = snap["url"]
+            result["waiting_on"] = (el.get("label") or el.get("name") or "")[:60]
+            result["why"] = msg
+            steps.append(f"{d['op']} {label}  [{msg[:60]}]")
+            if on_step:
+                on_step(steps[-1])
+            break
+        note = ""
+        if not ok:
+            # A control that refuses the action is just as dead as one that does
+            # nothing, and only the second case was being retired — so a broken
+            # button could be chosen again and again inside one budget.
+            key = (d["op"], el["id"])
+            chosen.append(key)
+            no_effect[key] = no_effect.get(key, 0) + 1
+            if no_effect[key] >= 2:
+                useless.add(key)
+            dead.append(f"{d['op']} on \"{label}\" did not work: {msg[:50]}")
+        if ok:
+            moved = None
+            try:
+                if d["op"] == "type":
+                    # Typing into a field changes no text and no labels, so the
+                    # page fingerprint is identical afterwards — and every
+                    # successful type was being recorded as "changed nothing" and
+                    # the field retired as useless. What "it worked" means here is
+                    # that the field now holds what was typed.
+                    node = page.query_selector(f'[data-mm="{el["id"]}"]')
+                    got = (node.input_value() or "") if node else ""
+                    moved = bool(got) and got.strip()[:12].lower() in text.lower()
+                else:
+                    moved = snapshot(page)["fingerprint"] != before
+            except Exception:  # noqa: BLE001
+                moved = None          # could not tell; assume nothing either way
+            key = (d["op"], el["id"])
+            # Choosing the same control over and over is a stall even when the
+            # page keeps twitching. A flight site's calendar re-renders its prices
+            # on every click, so the fingerprint changed each time and the
+            # no-effect counter kept resetting while Search was pressed sixteen
+            # times. Repetition is the signal the page cannot fake.
+            chosen.append(key)
+            if chosen[-3:].count(key) >= 3:
+                useless.add(key)
+                note = "  [tried three times, moving on]"
+            # Two controls that undo each other. On a flight site "Done" closed the
+            # calendar and "Search" reopened it, for ever: the page genuinely
+            # changed every time, so no stall check saw it, and the real fix was
+            # elsewhere on the page entirely. Retiring both forces it to look.
+            elif len(chosen) >= 4 and len(set(chosen[-4:])) == 2 \
+                    and chosen[-1] != chosen[-2] and chosen[-3] == chosen[-1]:
+                # Two controls undoing each other means the form is not finished:
+                # on a flight site, submitting reopened the calendar because the
+                # trip was still set to "round trip" and wanted a return date.
+                # Retiring both buttons only left it flailing in the calendar; what
+                # it needs is to be told what the loop MEANS and go look for the
+                # field that is actually missing.
+                if not any("round in circles" in x for x in dead[-3:]):
+                    dead.append(
+                        f'pressing "{label}" and then the other control keeps '
+                        f"undoing itself. That means the form is not complete: "
+                        f"something it needs has not been chosen yet. Look for the "
+                        f"setting or field that is still wrong or empty — the trip "
+                        f"type, the number of people, a missing second date — and "
+                        f"fix that instead of pressing these two again.")
+                note = "  [going round in circles]"
+            if moved is False:
+                note = "  [changed nothing]"
+                dead.append(f"{d['op']} on \"{label}\"" +
+                            (f" with \"{text[:24]}\"" if text else ""))
+                no_effect[key] = no_effect.get(key, 0) + 1
+                if no_effect[key] >= 2:
+                    # Twice with no effect: stop offering it at all. Asking the
+                    # model not to repeat something is advice; taking it off the
+                    # menu is a fact.
+                    useless.add(key)
+            elif moved is True:
+                no_effect.pop(key, None)
+        steps.append(f"{d['op']} {label}" + (f" = {text[:30]}" if text else "") +
+                     ("" if ok else f"  [{msg[:50]}]") + note)
+        if on_step:
+            on_step(steps[-1])
+        if not ok and msg.startswith(("refused", "stopped")):
+            result["did"] = "needs_her"; result["why"] = msg
+            result["ended"] = "refused to cross a line"; break
+
+    # If it ever stood on what she asked for, that is the answer — not whatever
+    # page it happened to be looking at when it ran out of steps or ideas.
+    if result["did"] in ("blocked", "stuck", "partly_done") and best:
+        result.update(did="done", url=best["url"], title=best["title"],
+                      page_is=best["page_is"], goal_met=round(best["goal_met"], 2),
+                      note=f"found it at step {best['step']}, then kept going")
+    else:
+        try:
+            result["title"] = result.get("title") or page.title()
+            result["url"] = page.url
+        except Exception:  # noqa: BLE001
+            pass
+    return result
+
+
 # ---------------------------------------------------------------- what she sees
 # The card under the bar used to show the log above as it was: "nothing moving —
 # closed whatever was on top", "click Search flights  [changed nothing]", in English
@@ -1420,6 +1649,14 @@ _SHOWN = {
     "timeout": {"hebrew": "לקח יותר מדי זמן, עצרתי", "arabic": "طوّلت كتير، فوقّفت",
                 "russian": "Заняло слишком много времени, остановилась",
                 "english": "Took too long, so I stopped"},
+    "check":   {"hebrew": "מחכה לך: הבדיקה בדפדפן", "arabic": "بستناكي: التحقق بالمتصفح",
+                "russian": "Жду вас: проверка в браузере",
+                "english": "Waiting for you: solve the check in the browser"},
+    "sign_in": {"hebrew": "מחכה לך: התחברות בדפדפן", "arabic": "بستناكي: تسجيل الدخول بالمتصفح",
+                "russian": "Жду вас: вход в браузере",
+                "english": "Waiting for you: sign in in the browser"},
+    "resumed": {"hebrew": "תודה, ממשיכה", "arabic": "شكرا، مكمّلة",
+                "russian": "Спасибо, продолжаю", "english": "Thanks, carrying on"},
     "pay":     {"hebrew": "עצרתי לפני התשלום", "arabic": "وقفت قبل الدفع",
                 "russian": "Остановилась перед оплатой", "english": "Stopped before paying"},
     "click":   {"hebrew": "לחצתי על {x}", "arabic": "كبست على {x}",
@@ -1438,6 +1675,9 @@ _STEP_KIND = (
     (re.compile(r"^nothing moving, went back"), "top"),
     (re.compile(r"^scrolled$"), "scroll"),
     (re.compile(r"^thought it was finished"), "looking"),
+    (re.compile(r"^waiting for her: human check"), "check"),
+    (re.compile(r"^waiting for her: sign in"), "sign_in"),
+    (re.compile(r"^she finished it"), "resumed"),
 )
 _ACT = re.compile(r"^(click|type|select) (.*?)(?: = (.*?))?(?:  \[.*)?$")
 

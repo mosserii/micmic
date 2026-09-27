@@ -35,7 +35,8 @@ from PyObjCTools import AppHelper
 
 W = 640                 # Spotlight's width, near enough; narrower screens get less
 MIN_H = 64              # one line: orb and words
-MAX_H = 240             # the page clamps long answers well before this
+MAX_H = 300             # the page clamps long answers well before this; a guide card
+                        # (step, three lines, a note and its buttons) is about 200
 RADIUS = 20             # must match html.barmode body's border-radius in index.html
 TOP_FRACTION = 0.12     # how far below the menu bar, as a share of the visible height
 TOP_MIN = 40
@@ -145,13 +146,17 @@ def _screen_for_point(point, screens):
     return None
 
 
-def _bar_frame(visible, height: float):
+def _bar_frame(visible, height: float, edge: str = "top"):
     """Centred horizontally on the given visible frame, its top a fixed share of the
-    way down from the menu bar, like Spotlight. Pure, so placement is testable
-    without a second monitor."""
+    way down from the menu bar, like Spotlight; or the same distance up from the
+    bottom, for a guide pointing at something up there. Pure, so placement is
+    testable without a second monitor."""
     width = min(W, visible.size.width - 2 * SIDE_MARGIN)
     x = visible.origin.x + (visible.size.width - width) / 2.0
-    top = visible.origin.y + visible.size.height - max(TOP_MIN, round(visible.size.height * TOP_FRACTION))
+    gap = max(TOP_MIN, round(visible.size.height * TOP_FRACTION))
+    if edge == "bottom":
+        return Foundation.NSMakeRect(round(x), round(visible.origin.y + gap), width, height)
+    top = visible.origin.y + visible.size.height - gap
     return Foundation.NSMakeRect(round(x), round(top - height), width, height)
 
 
@@ -184,6 +189,11 @@ class MicMicBar:
         self._m_state = ("idle", "")
         self._m_heard = ""
         self._m_result = None            # (say, undo_label) or None
+        # A step-by-step guide is running (the page says "guide:1"): the strip is its
+        # card, so it stays up, and a global Esc meant for her app does not take it.
+        self._guide = False
+        # "bottom" while the ring on screen would sit under the strip at the top.
+        self._edge = "top"
         # Overridable in tests: where the pointer is, in screen coordinates.
         self._pointer = AppKit.NSEvent.mouseLocation
 
@@ -288,6 +298,25 @@ class MicMicBar:
         say = say or ""
         label = None if undo_label is None else str(undo_label)
         self._main(lambda: self._apply_result(say, label))
+
+    def set_edge(self, edge: str) -> None:
+        """"top" (Spotlight's place) or "bottom": the guide moves the strip out of the
+        way of the control it is pointing at."""
+        edge = "bottom" if edge == "bottom" else "top"
+
+        def go():
+            if edge != self._edge:
+                self._edge = edge
+                if self._visible:
+                    self._place()
+        self._main(go)
+
+    def frame(self):
+        """The strip's frame in screen coordinates, or None while it is hidden."""
+        return self.panel.frame() if self._visible else None
+
+    def guiding(self) -> bool:
+        return self._guide
 
     # ------------------------------------------------ not part of the contract
     def load(self) -> None:
@@ -447,7 +476,8 @@ class MicMicBar:
         screen = _screen_for_point(self._pointer(), screens) or AppKit.NSScreen.mainScreen()
         if screen is None:
             return
-        self.panel.setFrame_display_(_bar_frame(screen.visibleFrame(), self._h), False)
+        self.panel.setFrame_display_(_bar_frame(screen.visibleFrame(), self._h, self._edge),
+                                     False)
 
     def _set_height(self, h: float) -> None:
         h = int(max(MIN_H, min(MAX_H, round(h))))
@@ -455,9 +485,12 @@ class MicMicBar:
             return
         self._h = h
         f = self.panel.frame()
-        top = f.origin.y + f.size.height          # grow downwards, top edge fixed
-        self.panel.setFrame_display_(
-            Foundation.NSMakeRect(f.origin.x, top - h, f.size.width, h), self._visible)
+        if self._edge == "bottom":                # grow upwards, bottom edge fixed
+            rect = Foundation.NSMakeRect(f.origin.x, f.origin.y, f.size.width, h)
+        else:
+            top = f.origin.y + f.size.height      # grow downwards, top edge fixed
+            rect = Foundation.NSMakeRect(f.origin.x, top - h, f.size.width, h)
+        self.panel.setFrame_display_(rect, self._visible)
         self.panel.invalidateShadow()
 
     def _fade_out(self, duration: float = FADE_OUT) -> None:
@@ -487,6 +520,9 @@ class MicMicBar:
         """Decide when the bar goes away, from what it is showing."""
         now = time.monotonic()
         state = self._m_state[0]
+        if self._guide:
+            self._fade_at = None             # the guide's card: up until the guide ends
+            return
         if self._m_result is not None:
             say, label = self._m_result
             self._fade_at = now + _result_hold(say, label is not None)
@@ -553,6 +589,18 @@ class MicMicBar:
         elif body == "touch":
             if self._fade_at is not None:
                 self._fade_at = max(self._fade_at, time.monotonic() + TOUCH_HOLD)
+        elif body in ("guide:1", "guide:0"):
+            # Held, never shown from here: whether the strip appears at all is the
+            # listener's call (Settings may say panel, or nothing).
+            self._guide = body == "guide:1"
+            if not self._guide and self._edge != "top":
+                self._edge = "top"
+                if self._visible:
+                    self._place()
+            if self._visible:
+                self._arm()
+                if not self._guide and self._fade_at is not None:
+                    self._fade_at = max(self._fade_at, time.monotonic() + TOUCH_HOLD)
 
     # ---------------------------------------------------------------- Esc
     def _install_esc(self) -> None:
@@ -571,7 +619,8 @@ class MicMicBar:
             self._esc_monitor = None
 
     def _on_global_key(self, event) -> None:
-        if event.keyCode() == ESC_KEY_CODE and self._visible:
+        # While guiding, Esc belongs to her app (closing its own dialog, say).
+        if event.keyCode() == ESC_KEY_CODE and self._visible and not self._guide:
             self._fade_out(HIDE_FADE)
 
 

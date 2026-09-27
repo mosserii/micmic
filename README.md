@@ -56,6 +56,12 @@ Replies in quotes are MicMic's own words.
 | **What's the weather in Lisbon?** | That town, spoken back in your language. The time and the weather never touch a language model. |
 | **Find me a flight from Tel Aviv to Lisbon next Friday** | Drives a real browser to Google Flights, fills in the trip and the date, and leaves the results on your screen. It never pays for anything. |
 | **Send Dana a WhatsApp that I'm running late, then play some jazz** | Both, in order. |
+| **Guide me through adding an API key in Google Cloud** | Walks you through it one step at a time, with a soft green ring around what to click next. It waits for you, then moves on by itself. |
+| **Search noise-cancelling headphones on Amazon** | Name an app or a site and it happens there: Amazon, Spotify, Apple Music, Netflix, Booking, Maps. |
+| **Play Shakira in Apple Music**, then **change to Bad Bunny** | Stays in the player you are using. |
+| **Send this to Dana**, with nothing selected | A crosshair appears: drag over what you want to send. |
+| **What's the bitcoin price?** | From a live source, and it says which one. Scores and headlines too. |
+| **From now on, use WhatsApp for Dana** | Remembered on your Mac. "What do you know about me?" reads it back, "forget that" removes it. |
 
 <details>
 <summary><b>What it will not do</b></summary>
