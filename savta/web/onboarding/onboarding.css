@@ -67,6 +67,11 @@ body.onboarding.panel .field{opacity:calc(var(--blob-alpha) * .8)}
   transition:opacity .5s ease .08s,transform .7s var(--ob-ease) .04s,visibility 0s}
 /* a floor, not a ceiling: a long language wraps the permission rows taller */
 .ob-hero{position:relative;flex:none;width:100%;min-height:240px;padding:8px 0;display:grid;place-items:center}
+/* step 1 now carries the language choice above this picture too, so its own floor
+   gives back the room the demo never needed: without it, a taller language (Hebrew,
+   Arabic, wrapped Russian pills) pushed the centred column up into the progress dots
+   and down into the footer. */
+.ob-step[data-n="1"] .ob-hero{min-height:160px}
 /* a pool of the brand's green under whatever the picture is */
 .ob-hero::before{content:"";position:absolute;left:50%;top:50%;width:300px;height:220px;
   transform:translate(-50%,-50%);border-radius:50%;pointer-events:none;
@@ -78,6 +83,24 @@ body.onboarding.panel .field{opacity:calc(var(--blob-alpha) * .8)}
   text-wrap:balance}
 .ob-hint{margin-top:5px;max-width:32ch;font-size:13px;line-height:1.4;color:var(--muted);
   opacity:.78;text-wrap:balance}
+
+/* ---- 0. the language choice: sits above the demo, so the rest of step 1 (and
+   everything after it) already paints in the language she just picked -------- */
+.ob-lang{flex:none;width:100%;max-width:320px;margin-bottom:6px}
+.ob-lang-t{font-size:12.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;
+  color:var(--muted);margin-bottom:8px;text-wrap:balance}
+.ob-lopts{display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+.ob-lopt{cursor:pointer;font-size:14.5px;font-weight:500;line-height:1;color:var(--ink);
+  padding:9px 15px;border-radius:999px;white-space:nowrap;
+  background:var(--glass);border:1px solid var(--glass-line);
+  transition:background .18s ease,border-color .18s ease,transform .15s ease}
+.ob-lopt:hover{background:color-mix(in oklab,var(--live) 12%,var(--glass))}
+.ob-lopt:active{transform:scale(.96)}
+.ob-lopt[aria-checked="true"]{background:color-mix(in oklab,var(--live) 22%,transparent);
+  border-color:color-mix(in oklab,var(--live) 55%,transparent)}
+/* the status line of the local model download: shown here under the language choice,
+   and again on step 3 (below) while it is still running */
+.ob-asr{margin-top:9px;font-size:12.5px;line-height:1.4;color:var(--muted);text-wrap:balance}
 
 /* ---- footer: skip on the reading side, the one action on the other ---------- */
 .ob-foot{flex:none;height:52px;display:flex;align-items:center;justify-content:space-between;gap:12px}

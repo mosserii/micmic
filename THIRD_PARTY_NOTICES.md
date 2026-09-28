@@ -36,6 +36,8 @@ The Python interpreter statically includes these libraries:
 | Component | License | When |
 |---|---|---|
 | [Node.js](https://nodejs.org/) | MIT | Fetched (sha256-pinned) the first time a task needs the browser agent. |
+| [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) 0.2.4 (Python binding and native library, includes [ggml](https://github.com/ggml-org/ggml), MIT) | MIT | Fetched from PyPI (sha256-pinned) with Better recognition. |
+| [Parakeet unified-en 0.6B](https://huggingface.co/nvidia/parakeet-unified-en-0.6b), Q8_0 GGUF by [Handy](https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf) | [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/) | Fetched (revision- and sha256-pinned) when English Better recognition is turned on. Licensed by NVIDIA Corporation under the NVIDIA Open Model License. |
 
 ## Services the app talks to
 

@@ -74,6 +74,21 @@ import tempfile as _tempfile                  # noqa: E402
 _STATE = _tempfile.mkdtemp(prefix="micmic-test-state-")
 os.environ["MICMIC_STATE_DIR"] = _STATE
 atexit.register(lambda: _shutil.rmtree(_STATE, ignore_errors=True))
+# Better recognition's model (675 MB): the downloader's seam holds any job at 0 bytes,
+# in a scratch dir, and savta/asr_models.py's tripwire is checked when the suite ends.
+_ASR = _tempfile.mkdtemp(prefix="micmic-test-asr-")
+os.environ["MICMIC_ASR_DIR"] = _ASR
+os.environ["MICMIC_ASR_NO_DOWNLOAD"] = "1"
+
+
+def _no_model_download():
+    trip = os.path.join(_ASR, "REAL_DOWNLOAD_IN_TEST")
+    if os.path.exists(trip):
+        print(f"FAIL a real model download was started: {open(trip).read()}")
+        os._exit(1)
+
+
+atexit.register(_no_model_download)
 
 from savta import router                      # noqa: E402
 from savta import brain                       # noqa: E402
@@ -264,6 +279,11 @@ mac.get_volume = lambda: 50
 mac.set_volume = lambda level: (VOLSET.append(int(level)), True)[1]
 mac.close_tab_with = lambda frag: (TABS_CLOSED.append(frag), True)[1]
 mac.music = lambda a, q="": (True, "[test stub] music")
+# Music's window through Accessibility (a dialog check, the song's own play button):
+# pyobjc, not osascript, so wall two would not see it. No test reads or presses the
+# owner's real Music.
+from savta.actions import music as _music_mod   # noqa: E402
+_music_mod._ax = lambda: None
 mac.contacts = lambda limit=60: []
 mac.installed_apps = lambda limit=200: ["Calculator", "Calendar", "Photos",
                                         "Mail", "Music", "Notes", "Chess"]
@@ -419,6 +439,9 @@ def reset_state():
     router._cancel_pending()
     router.AWAITING = None
     router.MEM = router.Memory()
+    # What went out in an earlier section is not this section's: the same-thing-twice
+    # net (router._twice) would otherwise hold a send for a send another test made.
+    router._HISTORY.clear()
     for r in RECORDERS:
         r.clear()
     _ensure_setup_complete()

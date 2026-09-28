@@ -62,6 +62,10 @@ Replies in quotes are MicMic's own words.
 | **Send this to Dana**, with nothing selected | A crosshair appears: drag over what you want to send. |
 | **What's the bitcoin price?** | From a live source, and it says which one. Scores and headlines too. |
 | **From now on, use WhatsApp for Dana** | Remembered on your Mac. "What do you know about me?" reads it back, "forget that" removes it. |
+| **Play Shakira's latest World Cup song** | Searches real sources for the song you described, says which one it found, then plays it. |
+| **Play the song on my screen** | Reads the title from the window in front of you. A misheard title is matched by sound within the artist. |
+| **Remind me in five minutes**, then **make it ten** | A follow-up changes what MicMic just did, in the same place: the reminder, your event, whatever is playing. |
+| **Oh, I meant on WhatsApp** | Sends the same thing there. "To Dana, not Dina" during the countdown replaces the message, it never goes to both. |
 
 <details>
 <summary><b>What it will not do</b></summary>
@@ -77,8 +81,8 @@ Replies in quotes are MicMic's own words.
 
 ### Not only English
 
-MicMic also understands Hebrew, Arabic and Russian, and answers in the language you
-spoke. It tells them apart by the alphabet you spoke in, not by a guessing model.
+MicMic also understands Hebrew, Arabic and Russian. You pick your language once, and
+MicMic listens and answers in it.
 
 ## How it works
 
@@ -137,7 +141,7 @@ screen, the text on it, and sometimes a picture of the window in front.
 **Kept:** a count of how many requests each device made. No recordings, no
 transcripts, no screenshots. No ads, no selling of data.
 
-**On your Mac:** your voice is turned into text by macOS. What MicMic learns about
+**On your Mac:** your voice is turned into text on your Mac. In English by a speech model MicMic downloads once (NVIDIA's Parakeet, the one the Handy app uses), in Hebrew by macOS. Where macOS has no on-device recognizer for your language, macOS uses Apple's speech service. Your voice is never written to disk. What MicMic learns about
 you, like your name and who you talk to, stays in a folder on your Mac. Contacts are
 shortlisted to a few dozen before any of them leave it. Every connection to your
 message databases is read-only.

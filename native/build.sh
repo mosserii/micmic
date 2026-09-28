@@ -120,6 +120,16 @@ release_build() {
   cp "$HERE/listener.py" "$RES/app/listener.py"
   cp "$HERE/panel.py"    "$RES/app/panel.py"
   cp "$HERE/bar.py"      "$RES/app/bar.py"
+  cp "$HERE/local_asr.py" "$RES/app/local_asr.py"   # the model itself is an in-app download
+  cp "$HERE/guide_overlay.py" "$RES/app/guide_overlay.py"   # the green ring of guide mode
+  # Gate: every module of native/ that the listener imports is in the bundle. 1.1.0
+  # shipped without guide_overlay.py and guide mode quietly fell back to words only.
+  for m in $(grep -hoE '^[[:space:]]*(from|import) [a-z_]+' "$HERE/listener.py" "$HERE/local_asr.py" \
+             "$HERE/guide_overlay.py" | awk '{print $2}' | sort -u); do
+    if [ -f "$HERE/$m.py" ] && [ ! -f "$RES/app/$m.py" ]; then
+      echo "  native/$m.py is imported by the app but not copied into the bundle"; exit 1
+    fi
+  done
   cp "$HERE/../brand/AppIcon.icns" "$RES/AppIcon.icns"
   # The branded menu-bar mark (idle/hearing you; see brand/menubar/render.py).
   # _menubar_dir() in listener.py looks for these right here, next to AppIcon.
@@ -237,7 +247,9 @@ ENT
   _sign() {
     local out rc
     out="$(codesign --force --options runtime "${TS[@]}" \
-             --entitlements "$DIST/entitlements.plist" --sign "$IDENTITY" "$@" 2>&1)"; rc=$?
+             --entitlements "$DIST/entitlements.plist" --sign "$IDENTITY" "$@" 2>&1)" && rc=0 || rc=$?
+    # (set -e used to end the build right here on a failed codesign, before the
+    # message below: a build that stopped at "signing N native libraries" and said nothing.)
     if [ $rc -ne 0 ]; then
       echo "  codesign FAILED: $*" >&2
       printf '%s\n' "$out" | sed 's/^/    /' >&2

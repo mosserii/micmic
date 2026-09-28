@@ -48,9 +48,10 @@ def check(name: str, ok, detail: str = "") -> bool:
 
 
 # ---------------------------------------------------------------- fixtures
-def _song(tid, name, artist, album, cid, streamable=True):
+def _song(tid, name, artist, album, cid, streamable=True, date="1969-08-05", aid=None):
     return {"wrapperType": "track", "kind": "song", "trackId": tid, "trackName": name,
-            "artistName": artist, "collectionName": album, "releaseDate": "1969-08-05T07:00:00Z",
+            "artistName": artist, "collectionName": album, "releaseDate": f"{date}T07:00:00Z",
+            **({"artistId": aid} if aid else {}),
             "isStreamable": streamable,
             "trackViewUrl": f"https://music.apple.com/il/album/x/{cid}?i={tid}&uo=4"}
 
@@ -75,7 +76,8 @@ ABBA = {"resultCount": 2, "results": [
 FETCHED: list[str] = []
 SCRIPTS: list[str] = []
 OPENS: list[list] = []
-STATE = {"library": ["achille"], "catalog": CATALOG, "playing": True, "more": {}}
+STATE = {"library": ["achille"], "catalog": CATALOG, "playing": True, "more": {},
+         "now": ("paused", ""), "wiki": {"query": {"pages": {}}}, "lookup": {"results": []}}
 
 
 def fake_fetch(url, timeout):
@@ -83,6 +85,10 @@ def fake_fetch(url, timeout):
     if STATE["catalog"] is None:
         raise OSError("offline")
     from urllib.parse import parse_qs, urlsplit
+    if "wikipedia.org" in url:
+        return STATE["wiki"]
+    if "/lookup?" in url:
+        return STATE["lookup"]
     term = parse_qs(urlsplit(url).query)["term"][0]
     for word, found in STATE["more"].items():
         if word in term.lower():
@@ -103,6 +109,8 @@ def fake_osa(script: str, timeout: float = 4.0):
         return True, "".join(FIELD.join(r) + ROW for r in rows)
     if "whose persistent ID is" in script:
         return True, FIELD.join(["playing" if STATE["playing"] else "stopped", "1969", "yes"])
+    if "name of current track" in script:          # music._now_playing
+        return True, FIELD.join(STATE["now"])
     return True, ""
 
 
@@ -120,6 +128,7 @@ APPS_HERE = ["Calculator", "Music", "Maps", "Pages", "Photos", "Safari", "Telegr
 tg.installed_apps = lambda: list(APPS_HERE)
 
 am._fetch = fake_fetch
+REAL_YT_SEARCH = router.yt.search
 am._open = fake_open
 am.spotify_installed = lambda: False
 REAL_COUNTRY = am.country
@@ -140,6 +149,7 @@ class ScriptedJev:
         self.asked: list[dict] = []
         self.say: dict = {}
         self.pick = None           # fn(options) -> key, for pick_from
+        self.fits = None           # fn(instructions) -> noul, for fits_<i>
 
     def ask(self, state, qs):
         self.calls += 1
@@ -164,6 +174,10 @@ class ScriptedJev:
             sel = self.pick(qs["pick"]["criteria"])
             out["pick"] = {"choice": sel, "confidence": 0.9, "probabilities": {sel: 0.9}}
             out["any_good"] = {"noul": 0.9}
+        if self.fits:
+            for k, q in qs.items():
+                if k.startswith("fits_"):
+                    out[k] = {"noul": self.fits(q["instructions"])}
         for k, v in self.say.items():
             if k in qs:
                 out[k] = ({"choice": v, "confidence": 0.9, "probabilities": {v: 0.9}}
@@ -186,7 +200,7 @@ def by(artist_word: str, lib: bool | None = None):
 
 
 def turn(utterance, *, intent="music", player=None, subject=None, pick=None, lang=None,
-         extra=None):
+         extra=None, fits=None):
     j = ScriptedJev()
     j.say = {"intent": intent}
     if player:
@@ -198,8 +212,19 @@ def turn(utterance, *, intent="music", player=None, subject=None, pick=None, lan
         j.say["language"] = lang
     j.say.update(extra or {})
     j.pick = pick
+    j.fits = fits
     r = router.handle(j, utterance, speak=False, client="native", activation="push")
     return r, j
+
+
+# Music's own proactive warm-up (actions/music.ensure_running), fired the moment her
+# words plausibly want it, even on a turn that ends up finding nothing: a different
+# thing from "a song was opened", so tests that check the latter filter this out.
+WARMUP_OPEN = ["open", "-g", "-a", "Music"]
+
+
+def opened_songs() -> list:
+    return [o for o in OPENS if o != WARMUP_OPEN]
 
 
 def fresh():
@@ -209,7 +234,11 @@ def fresh():
         x.clear()
     APPS_HERE[:] = ["Calculator", "Music", "Maps", "Pages", "Photos", "Safari", "Telegram",
                     "WhatsApp", "Messages"]
-    STATE.update(library=["achille"], catalog=CATALOG, playing=True, more={})
+    STATE.update(library=["achille"], catalog=CATALOG, playing=True, more={},
+                 now=("paused", ""), wiki={"query": {"pages": {}}}, lookup={"results": []})
+    am._CACHE.clear()
+    am._ax = lambda: None                    # no Accessibility unless a test hands a fake
+    router.yt.search = REAL_YT_SEARCH
     mac._osa = fake_osa
     router.prefs._update(lambda d: d.update(music_app=""))
 
@@ -325,7 +354,8 @@ def t_in_library_plays():
     check("by its persistent ID",
           any('persistent ID is "A1B2C3D4E5F60718"' in s for s in SCRIPTS))
     check("and said so", r["say"] == "Playing 1969 by The Stooges in Apple Music.", r["say"])
-    check("nothing opened in a browser or app", not OPENS and not tm.OPENED, (OPENS, tm.OPENED))
+    check("nothing opened in a browser or app",
+          not opened_songs() and not tm.OPENED, (OPENS, tm.OPENED))
     check("the undo button is offered", bool(r.get("undo")))
     check("the catalog copy of a library song is not offered twice",
           sum("The Stooges, from The Stooges" in (l or "")
@@ -485,7 +515,7 @@ def t_not_found_and_unreachable():
     r, _ = turn("put 1969 on apple music", player="apple_music", subject="1969",
                 pick=lambda opts: "__none__")
     check("Jev finds none of them right: not found, nothing opened",
-          r["did"] == "not_found" and not OPENS, (r["did"], OPENS))
+          r["did"] == "not_found" and not opened_songs(), (r["did"], OPENS))
     fresh()
     STATE.update(catalog=None, library=[])
     r, _ = turn("put 1969 on apple music", player="apple_music", subject="1969")
@@ -945,13 +975,742 @@ def t_named_generic_apps():
           r["did"] != "opened_there" and not tm.APPS and not tm.LAUNCHED, (r["did"], tm.APPS))
 
 
+
+# ================================================================== the owner's 1.1.0 session
+def _bb(tid, name, album, cid):
+    return _song(tid, name, "Bad Bunny", album, cid)
+
+
+BAD_BUNNY = {"results": [
+    _bb(901, "MIA (feat. Drake)", "MIA (feat. Drake) - Single", 900),
+    _bb(902, "MÍA (feat. Drake)", "X 100PRE", 910),
+    _bb(903, "EL MUNDO ES MÍO", "EL ÚLTIMO TOUR DEL MUNDO", 920),
+    _bb(904, "DtMF", "DeBÍ TiRAR MáS FOToS", 930),
+]}
+
+
+def t_song_keys_and_precheck():
+    k = am.song_key
+    check("key: accents and (feat.) do not make a new song",
+          am.same_key(k("MIA (feat. Drake)", "Bad Bunny"), k("MÍA (feat. Drake)", "Bad Bunny")))
+    check("key: a YouTube title is the same song as the catalog's",
+          am.same_key(k("Bad Bunny - MÍA ft. Drake (Official Video)"),
+                      k("MIA (feat. Drake)", "Bad Bunny")), k("Bad Bunny - MÍA ft. Drake (Official Video)"))
+    check("key: '- Remastered' and '[Official ...]' dropped",
+          am.same_key(k("Hips Don't Lie - Remastered 2009"), k("Hips Don't Lie [Official Audio]", "Shakira")))
+    check("key: featured and joint artists match the main artist",
+          am.same_key(k("Hips Don't Lie (feat. Wyclef Jean)", "Shakira & Wyclef Jean"),
+                      k("Hips Don't Lie", "Shakira")))
+    check("key: a different song is different",
+          not am.same_key(k("EL MUNDO ES MÍO", "Bad Bunny"), k("MIA", "Bad Bunny")))
+    check("key: the same title by someone else is different",
+          not am.same_key(k("1969", "The Stooges"), k("1969", "Boards of Canada")))
+    for s, on, want in [("please change to our latest world cup song", False, True),
+                        ("play the song from Titanic", False, True),
+                        ("play Shakira's newest song", False, True),
+                        ("put on the one they play at weddings", False, True),
+                        ("תשימי את השיר החדש של עומר אדם", False, True),
+                        ("her latest one", True, True),
+                        ("play Waka Waka", False, False), ("play Bad Bunny", False, False),
+                        ("another one", True, False), ("another song please", True, False),
+                        ("put 1969 on apple music", False, False),
+                        ("now switch to shakira", True, False),
+                        ("what's the latest news", False, False)]:
+        check(f"describes a song: {s!r} -> {want}", am.describes_a_song(s, on) == want)
+
+
+def t_another_one_never_repeats():
+    """21:02:20 MIA (feat. Drake), 21:02:29 "another one": MÍA (feat. Drake)."""
+    fresh()
+    STATE["more"] = {"bad bunny": BAD_BUNNY}
+    STATE["library"] = []
+    r, _ = turn("please play bad bunny on apple music", player="apple_music",
+                subject="bad bunny", pick=by("MIA"))
+    check("first: MIA", r["did"] == "opened_in_app" and r["say"].startswith("MIA (feat. Drake)"),
+          r["say"])
+    seen = ["mia"]
+    for n in range(3):
+        # The picker takes the first choice offered: the worst case for a repeat.
+        r, j = turn("another one", extra={"rejects_last": 0.9, "refers_back": 0.87},
+                    pick=lambda opts: "0")
+        if n < 2:
+            title = router.MEM.last_played.get("title", "")
+            key = am.song_key(title)[0]
+            check(f"another one #{n + 1}: a new song, not a version of one played ({title})",
+                  r["did"] == "opened_in_app" and key not in seen, f"{r['did']} {r['say']}")
+            labels = " ".join(j.asked[-1]["pick"]["criteria"].values())
+            check(f"  neither MIA nor MÍA was offered again",
+                  "MIA (feat" not in labels and "MÍA (feat" not in labels, labels[:300])
+            seen.append(key)
+        else:
+            check("everything found has been played: says so, not 'not found'",
+                  r["did"] == "exhausted" and "not find" not in r["say"], f"{r['did']} {r['say']}")
+
+    # YouTube: "Bad Bunny - MÍA (Lyrics)" after "Bad Bunny - MIA ft. Drake".
+    fresh()
+    vids = [{"id": "y1", "title": "Bad Bunny - MIA ft. Drake (Official Video)", "channel": "Bad Bunny",
+             "length": "3:30", "views": "1B views"},
+            {"id": "y2", "title": "Bad Bunny - MÍA (feat. Drake) [Lyrics]", "channel": "Lyrics Hub",
+             "length": "3:31", "views": "50M views"},
+            {"id": "y3", "title": "Bad Bunny - DtMF (Visualizer)", "channel": "Bad Bunny",
+             "length": "3:57", "views": "300M views"}]
+    router.yt.search = lambda q, n=18: [dict(v) for v in vids]
+    turn("play bad bunny", subject="bad bunny")
+    r, _ = turn("another one", extra={"rejects_last": 0.9})
+    check("YouTube: another one skips the lyrics copy of the same song",
+          r["did"] == "playing" and router.MEM.last_played["id"] == "y3",
+          f"{r['did']} {router.MEM.last_played and router.MEM.last_played.get('title')}")
+
+
+class FakeLLM:
+    available = True
+    last_ms = 0.0
+    calls, busy_ms = 0, 0.0
+
+    def __init__(self, got):
+        self.got, self.asked = got, []
+
+    def identify_song(self, request, language="english", context="", singer_on="", gender=""):
+        self.asked.append({"request": request, "singer_on": singer_on, "context": context})
+        return self.got
+
+    def answer(self, *a, **k):
+        return None
+
+
+def _with_llm(got):
+    llm = FakeLLM(got)
+    router.LLM_CLIENT = llm
+    return llm
+
+
+REAL_LLM = router.LLM_CLIENT
+SHAKIRA = {"results": [_song(301, "Hips Don't Lie (feat. Wyclef Jean)", "Shakira", "Oral Fixation", 300),
+                       _song(302, "Whenever, Wherever", "Shakira", "Laundry Service", 310)]}
+WAKA = {"results": [_song(371784883, "Waka Waka (This Time for Africa) [The Official 2010 FIFA "
+                                     "World Cup (TM) Song]", "Shakira", "Listen Up!", 371784865)]}
+
+
+def t_described_song():
+    """21:03:32 "please change to our latest world cup song" over Shakira: the search
+    stayed "shakira" and Whenever, Wherever was offered."""
+    try:
+        fresh()
+        STATE["more"] = {"waka": WAKA, "shakira": SHAKIRA}
+        turn("now switch to shakira on apple music", player="apple_music", subject="shakira",
+             pick=by("Hips"))
+        llm = _with_llm({"title": "Waka Waka", "artist": "Shakira",
+                         "sentence": "Shakira's latest World Cup song is Waka Waka."})
+        FETCHED.clear()
+        r, j = turn("please change to our latest world cup song",
+                    extra={"describes_song": 0.9, "rejects_last": 0.9}, pick=by("Waka"))
+        check("the describes-song question rode in understand()", "describes_song" in j.asked[0])
+        check("identified, then played: says which song first",
+              r["did"] == "opened_in_app" and r["say"].startswith(
+                  "Shakira's latest World Cup song is Waka Waka. Waka Waka"), r["say"])
+        check("the singer she was listening to went to the identification",
+              llm.asked and llm.asked[0]["singer_on"] == "Shakira", llm.asked)
+        check("the catalog was searched for the title, never replayed 'shakira'",
+              any("Waka" in u for u in FETCHED) and not any("term=shakira" in u for u in FETCHED),
+              FETCHED)
+        # The sources' songs held no Waka Waka (the pick said none), so this went on to
+        # the one Gemini call: understand + the pick among found songs + the play pick.
+        check("sources gave nothing usable: three Jev round trips, then the model",
+              j.calls == 3 and r["detail"]["identified"]["source"] == "model", j.calls)
+        check("the trace says what was identified",
+              r["detail"]["identified"]["title"] == "Waka Waka", r["detail"])
+
+        # Named by the model, but the real search does not have it: honest.
+        fresh()
+        _with_llm({"title": "Imaginary Anthem", "artist": "Shakira", "sentence": ""})
+        r, j = turn("play shakira's newest song on apple music", player="apple_music",
+                    extra={"describes_song": 0.9}, pick=by("Waka"))
+        check("not in the catalog: 'I think you mean ..., but I could not find it'",
+              r["did"] == "not_found" and r["say"] ==
+              "I think you mean Imaginary Anthem by Shakira, but I could not find it in Apple Music.",
+              r["say"])
+        check("  and nothing opened", not opened_songs(), OPENS)
+
+        # The model does not know: asks, never guesses.
+        fresh()
+        _with_llm(None)
+        r, _ = turn("play the song from that film", extra={"describes_song": 0.9})
+        check("unknown: asks what it is called", r["did"] == "asked_back" and r.get("asked_back")
+              and "What is it called" in r["say"], r["say"])
+
+        # YouTube: the song from Titanic.
+        fresh()
+        _with_llm({"title": "My Heart Will Go On", "artist": "Celine Dion",
+                   "sentence": "The song from Titanic is My Heart Will Go On."})
+        vids = [{"id": "t1", "title": "Céline Dion - My Heart Will Go On (Official HD Video)",
+                 "channel": "CelineDionVEVO", "length": "4:41", "views": "1B views"}]
+        router.yt.search = lambda q, n=18: [dict(v) for v in vids]
+        r, _ = turn("play the song from Titanic", extra={"describes_song": 0.9})
+        check("YouTube: identified, checked in the search, played, and said which",
+              r["did"] == "playing" and r["say"].startswith(
+                  "The song from Titanic is My Heart Will Go On."), f"{r['did']} {r['say']}")
+
+        # The model named it but wrote no sentence: a plain one says which.
+        fresh()
+        _with_llm({"title": "My Heart Will Go On", "artist": "Celine Dion", "sentence": ""})
+        router.yt.search = lambda q, n=18: [dict(v) for v in vids]
+        r, _ = turn("play the song from Titanic", extra={"describes_song": 0.9})
+        check("no sentence from the model: 'That is ... by ...' first",
+              r["say"].startswith("That is My Heart Will Go On by Celine Dion."), r["say"])
+
+        # What the model sends back is checked before anything is said or searched.
+        from savta.llm import LLM
+        l = LLM()
+        for out, want in [
+                ('```json\n{"title": "Waka Waka", "artist": "Shakira", "sentence": '
+                 '"Her World Cup song is Waka Waka \u2014 from 2010."}\n```',
+                 {"title": "Waka Waka", "artist": "Shakira",
+                  "sentence": "Her World Cup song is Waka Waka, from 2010."}),
+                ('{"title": "Waka Waka", "artist": "Shakira", "sentence": "It is her big hit."}',
+                 {"title": "Waka Waka", "artist": "Shakira", "sentence": ""}),
+                ('{"title": ""}', None), ("I am not sure.", None),
+                ('{"title": "' + "x" * 200 + '", "artist": "y"}', None)]:
+            l.text = lambda *a, _o=out, **k: _o
+            check(f"identify_song parses {out[:40]!r}", l.identify_song("q") == want,
+                  l.identify_song("q"))
+
+        # Ordinary requests are sent exactly as before.
+        fresh()
+        _with_llm(None)
+        for s in ("play Waka Waka", "play Bad Bunny"):
+            _, j = turn(s, subject=s.split(" ", 1)[1])
+            check(f"{s!r}: the question is not asked", "describes_song" not in j.asked[0])
+        _, j = turn("another one", extra={"rejects_last": 0.9})
+        check("'another one': the question is not asked", "describes_song" not in j.asked[0])
+        # A high score on a sentence that is not a music request does nothing.
+        fresh()
+        llm = _with_llm({"title": "X", "artist": "Y", "sentence": ""})
+        r, _ = turn("what's the latest world cup song", intent="look_up",
+                    extra={"describes_song": 0.9, "needs_world_knowledge": 0.9})
+        check("a question about a song is answered, not played", not llm.asked, r["did"])
+    finally:
+        router.LLM_CLIENT = REAL_LLM
+
+
+# ---------------------------------------------------------------- a fake Music window
+def _el(role, children=(), **attrs):
+    return {"AXRole": role, "AXChildren": list(children), **attrs}
+
+
+class FakeAX:
+    """Music's window as Accessibility shows it (read off the owner's Mac, 2026-09-27):
+    the album header's Play button, and the song's row with its own play toggle."""
+
+    def __init__(self, track_id=371784883, album=371784865, row=True, sheet=False,
+                 starts=True, title="Waka Waka"):
+        self.pressed = []
+        header = _el("AXUnknown", [_el("AXButton", AXTitle="Play", AXDescription="Play")],
+                     AXIdentifier=f"Music.shelfItem.AlbumDetailHeaderLockup[id=album-detail-header-{album}")
+        rows = [_el("AXGroup", [_el("AXStaticText", AXValue="1"),
+                                _el("AXButton", AXTitle="R. Kelly")],
+                    AXIdentifier=f"Music.shelfItem.AlbumTrackLockup[id=track-lockup-{album}-371784873,p")]
+        if row:
+            self.toggle = _el("AXCheckBox", AXSubrole="AXToggle", AXDescription="play", AXValue=0)
+            rows.append(_el("AXGroup", [_el("AXButton", AXDescription="Favourite"), self.toggle],
+                            AXIdentifier=f"Music.shelfItem.AlbumTrackLockup[id=track-lockup-{album}-{track_id},p"))
+        win = _el("AXWindow", [_el("AXSplitGroup", [header] + rows)]
+                  + ([_el("AXSheet")] if sheet else []), AXTitle="Music")
+        self.root = {"AXWindows": [win]}
+        self.starts, self.title = starts, title
+
+    def get(self, el, name, _):
+        v = el.get(name) if isinstance(el, dict) else None
+        return (0, v) if v is not None else (-25212, None)
+
+    def press(self, el, action):
+        self.pressed.append(el)
+        if self.starts:
+            STATE["now"] = ("playing", self.title)
+        return 0
+
+    def api(self):
+        return {"app": lambda pid: self.root, "get": self.get, "press": self.press,
+                "trusted": lambda: True, "timeout": None}
+
+
+def t_apple_music_playback():
+    # Catalog: the song's own play toggle is pressed, and Music is read back.
+    fresh()
+    STATE["more"] = {"waka": WAKA}
+    fake = FakeAX(title="Waka Waka (This Time for Africa) [The Official 2010 FIFA World Cup (TM) Song]")
+    am._ax, am._music_pid = fake.api, lambda: 4242
+    r, _ = turn("play waka waka on apple music", player="apple_music", subject="waka waka",
+                pick=by("Waka"))
+    check("catalog song: its row's play toggle pressed, and now it is playing",
+          r["did"] == "playing" and fake.pressed == [fake.toggle]
+          and r["say"].startswith("Playing Waka Waka"), f"{r['did']} {r['say']} {r['detail'].get('press')}")
+    check("  the album's own Play button was never pressed",
+          all(p.get("AXDescription") == "play" for p in fake.pressed))
+    check("  not left as 'open only': pause/resume work on it",
+          not router.MEM.last_played.get("open_only"))
+
+    # Pressed, but Music does not start it: never "playing".
+    fresh()
+    STATE["more"] = {"waka": WAKA}
+    fake = FakeAX(starts=False)
+    am._ax, am._music_pid = fake.api, lambda: 4242
+    r, _ = turn("play waka waka on apple music", player="apple_music", subject="waka waka",
+                pick=by("Waka"))
+    check("pressed but not playing: 'press play', honestly",
+          r["did"] == "opened_in_app" and "Press play" in r["say"]
+          and r["detail"]["press"]["why"] == "not_playing_after_press", r["detail"].get("press"))
+
+    # No such row on the page (another layout, another language): nothing pressed.
+    fresh()
+    STATE["more"] = {"waka": WAKA}
+    fake = FakeAX(row=False)
+    am._ax, am._music_pid = fake.api, lambda: 4242
+    real_find = am.press_song_play.__defaults__
+    am.press_song_play.__defaults__ = (0.3, 0.3)
+    r, _ = turn("play waka waka on apple music", player="apple_music", subject="waka waka",
+                pick=by("Waka"))
+    am.press_song_play.__defaults__ = real_find
+    check("no row for the song: nothing pressed, 'press play'",
+          r["did"] == "opened_in_app" and not fake.pressed, r["detail"].get("press"))
+
+    # Music cannot be read: never press blind.
+    fresh()
+    STATE["more"] = {"waka": WAKA}
+    STATE["now"] = ("", "")
+    fake = FakeAX()
+    am._ax, am._music_pid = fake.api, lambda: 4242
+    r, _ = turn("play waka waka on apple music", player="apple_music", subject="waka waka",
+                pick=by("Waka"))
+    check("Music unreadable: nothing pressed", not fake.pressed and r["did"] == "opened_in_app",
+          r["detail"].get("press"))
+
+    # Library copy will not start because a dialog is up in Music: said, not dismissed.
+    fresh()
+    STATE.update(library=["stooges"], playing=False)
+    fake = FakeAX(sheet=True)
+    am._ax, am._music_pid = fake.api, lambda: 4242
+    r, _ = turn("put 1969 on apple music", player="apple_music", subject="1969",
+                pick=by("The Stooges", lib=True))
+    check("a dialog in Music: named to her, nothing pressed or opened",
+          r["did"] == "not_started" and r["say"].startswith("Music has a window open")
+          and not fake.pressed and not opened_songs(), f"{r['did']} {r['say']} {OPENS}")
+
+    # Library copy will not start, no dialog: its catalog twin's page, and its button.
+    fresh()
+    STATE.update(library=["stooges"], playing=False)
+    fake = FakeAX(track_id=89317104, album=89319049, title="1969")
+    am._ax, am._music_pid = fake.api, lambda: 4242
+    r, _ = turn("put 1969 on apple music", player="apple_music", subject="1969",
+                pick=by("The Stooges", lib=True))
+    check("her copy would not start: the same song's catalog page, pressed, playing",
+          r["did"] == "playing" and OPENS and fake.pressed, f"{r['did']} {OPENS}")
+    check("the library play waits longer and asks once more when loaded but paused",
+          any("repeat 12 times" in s_ and "if persistent ID of current track is" in s_
+              for s_ in SCRIPTS))
+
+
+# What the sources held on 2026-09-27 (iTunes Search in the Israeli store, English
+# Wikipedia), trimmed. The model alone said "Waka Waka" for the latest World Cup song.
+SHAK = 889327
+WC_ROWS = {"results": [
+    _song(701, "La La La (Brazil 2014) [feat. Carlinhos Brown]", "Shakira",
+          "The 2014 FIFA World Cup™ Official Album", 700, date="2014-03-21", aid=SHAK),
+    _song(702, "Waka Waka (This Time for Africa) [The Official 2010 FIFA World Cup (TM) Song]",
+          "Shakira", "Listen Up! The Official 2010 FIFA World Cup Album", 710, date="2010-05-07", aid=SHAK),
+    _song(703, "Waka Waka (This Time for Africa)", "Shakira", "Hits Internacionais Virais 2023",
+          720, date="2023-01-11", aid=SHAK),
+    _song(704, "Dai Dai", "Shakira & Burna Boy", "Official FIFA World Cup 2026™ Album", 730,
+          date="2026-05-14", aid=SHAK),
+    _song(705, "Whenever, Wherever", "Shakira", "Laundry Service", 740, date="2001-08-27", aid=SHAK),
+    _song(706, "World Cup (Champions)", "IShowSpeed", "World Cup (Champions) - Single", 750,
+          date="2026-06-01", aid=5),
+]}
+SHAK_ROWS = {"results": [r for r in WC_ROWS["results"] if r.get("artistId") == SHAK]}
+SHAK_RECENT = {"results": [
+    {"wrapperType": "artist", "artistId": SHAK},
+    _song(801, "AGUA", "Shakira", "AGUA - Single", 800, date="2026-09-17", aid=SHAK),
+    _song(802, "Dai Dai (Clean Bandit Remix)", "Shakira & Burna Boy", "Dai Dai - EP", 810,
+          date="2026-06-11", aid=SHAK),
+    _song(803, "Hips Don't Lie (Edit) [Mixed]", "Shakira", "SYBER: 019 (DJ Mix)", 820,
+          date="2026-08-08", aid=SHAK),
+]}
+WC_WIKI = {"query": {"pages": {
+    "1": {"pageid": 1, "index": 1, "title": "Shakira",
+          "extract": "Shakira Isabel Mebarak Ripoll (born 2 February 1977) is a Colombian singer-songwriter."},
+    "2": {"pageid": 2, "index": 2, "title": "Waka Waka (This Time for Africa)",
+          "extract": "\"Waka Waka (This Time for Africa)\" is a song by Colombian singer Shakira, the official song of the 2010 FIFA World Cup."},
+    "3": {"pageid": 3, "index": 3, "title": "Dai Dai",
+          "extract": "\"Dai Dai\" is a song by Colombian singer Shakira and Nigerian singer Burna Boy. It was released on 15 May 2026, as the official song of the 2026 FIFA World Cup."},
+    "4": {"pageid": 4, "index": 4, "title": "World Cup (Champions)",
+          "extract": "\"World Cup (Champions)\" is a song by American influencer IShowSpeed, released on June 1, 2026."},
+}}}
+TITANIC_ROWS = {"results": [
+    _song(901, "My Heart Will Go On (Love Theme from \"Titanic\")", "James Horner & Céline Dion",
+          "Titanic (Music from the Motion Picture)", 900, date="1997-11-18", aid=11),
+    _song(902, "Titanic", "Robin Schulz", "Sugar", 910, date="2015-09-25", aid=12),
+]}
+TITANIC_WIKI = {"query": {"pages": {
+    "1": {"pageid": 11, "index": 1, "title": "Titanic (Falco song)",
+          "extract": "\"Titanic\" is a song by Falco from his 1992 studio album Nachtflug."},
+    "2": {"pageid": 12, "index": 2, "title": "My Heart Will Go On",
+          "extract": "\"My Heart Will Go On\" is a song recorded by the Canadian singer Celine Dion as the theme for the 1997 film Titanic."},
+}}}
+
+
+def _world_cup_fits(instr):
+    # Jev's judgement, scripted: a World Cup song by Shakira fits; another singer's does not.
+    label = instr.split(": this song matches", 1)[0]
+    return 0.9 if ("World Cup" in label and ", by Shakira" in label) else 0.05
+
+
+def t_described_song_from_sources():
+    """Search first: the sources' candidates, Jev's pick, the sources' dates."""
+    try:
+        fresh()
+        am.country = lambda: "il"
+        STATE["more"] = {"world cup": WC_ROWS, "shakira": SHAK_ROWS}
+        STATE.update(wiki=WC_WIKI, lookup=SHAK_RECENT)
+        turn("now switch to shakira on apple music", player="apple_music", subject="shakira",
+             pick=lambda o: "0")
+        llm = _with_llm({"title": "Waka Waka", "artist": "Shakira", "sentence": ""})
+        r, j = turn("please change to our latest world cup song",
+                    extra={"describes_song": 0.9, "rejects_last": 0.9},
+                    pick=lambda o: "0", fits=_world_cup_fits)
+        ident = (r.get("detail") or {}).get("identified") or {}
+        check("owner's sentence: Dai Dai, the newest World Cup song by the sources' dates",
+              r["did"] == "opened_in_app" and r["say"].startswith("That is Dai Dai, from 2026.")
+              and ident.get("source") == "search", f"{r['did']} {r['say']} {ident.get('search')}")
+        check("  no Gemini call", not llm.asked, llm.asked)
+        check("  the World Cup songs Jev said fit, with their dates",
+              ident["search"]["fitting"] and all("World Cup" in f or "Dai Dai" in f or "La La La" in f
+                                                  for f in ident["search"]["fitting"]),
+              ident["search"].get("fitting"))
+        check("  Waka Waka dated 2010, not its 2023 compilation",
+              any(f.startswith("Waka Waka") and "2010-05-07" in f for f in ident["search"]["fitting"]),
+              ident["search"]["fitting"])
+        check("  two Jev round trips: understand + the pick among what was found",
+              j.calls == 2, j.calls)
+        check("  Music opened on Dai Dai itself", OPENS and "?i=704" in OPENS[-1][-1], OPENS)
+
+        # "Shakira's newest song": the lookup's release dates, not popularity.
+        fresh()
+        STATE["more"] = {"shakira": SHAK_ROWS}
+        STATE.update(wiki={"query": {"pages": {}}}, lookup=SHAK_RECENT)
+        llm = _with_llm(None)
+        r, j = turn("play Shakira's newest song on apple music", player="apple_music",
+                    extra={"describes_song": 0.9}, pick=lambda o: "0",
+                    fits=lambda instr: 0.9 if ", by Shakira" in instr else 0.1)
+        check("newest song: AGUA (2026-09-17), from Apple's dates; DJ mixes left out",
+              r["say"].startswith("That is AGUA, from 2026.") and not llm.asked,
+              f"{r['say']} {r['detail'].get('identified', {}).get('search')}")
+        check("  the artist's newest songs were looked up",
+              any("/lookup?" in u and "sort=recent" in u for u in FETCHED), FETCHED)
+
+        # "the song from Titanic": a plain pick among real songs, played on YouTube.
+        fresh()
+        STATE["more"] = {"titanic": TITANIC_ROWS}
+        STATE["wiki"] = TITANIC_WIKI
+        llm = _with_llm(None)
+        vids = [{"id": "t1", "title": "Céline Dion - My Heart Will Go On (Official HD Video)",
+                 "channel": "CelineDionVEVO", "length": "4:41", "views": "1B views"}]
+        router.yt.search = lambda q, n=18: [dict(v) for v in vids]
+        r, j = turn("play the song from Titanic", extra={"describes_song": 0.9},
+                    pick=lambda o: next(k for k, v in o.items() if "My Heart" in (v or "")))
+        check("Titanic: My Heart Will Go On from the sources, played, said first, no Gemini",
+              r["did"] == "playing" and r["say"].startswith("That is My Heart Will Go On")
+              and "1997" in r["say"] and not llm.asked, f"{r['did']} {r['say']}")
+        check("  Wikipedia's song article came in as a candidate",
+              r["detail"]["identified"]["search"]["wiki_songs"] == 2, r["detail"]["identified"]["search"])
+
+        # Nothing usable in the sources: the one Gemini call, validated as before.
+        fresh()
+        STATE["more"] = {"waka": WAKA}
+        llm = _with_llm({"title": "Waka Waka", "artist": "Shakira", "sentence": ""})
+        r, _ = turn("play the one they play at weddings on apple music", player="apple_music",
+                    extra={"describes_song": 0.9}, pick=by("Waka"))
+        check("sources empty: Gemini, once, still checked in the catalog",
+              len(llm.asked) == 1 and r["detail"]["identified"]["source"] == "model"
+              and r["did"] == "opened_in_app", f"{r['did']} {r['say']}")
+    finally:
+        router.LLM_CLIENT = REAL_LLM
+
+
+# ==================================================== 2026-09-28 owner session
+# fix/music2: "the song on my screen", misheard titles matched by sound within a
+# known artist, a year refining a described-song search, rejecting plays another
+# instead of "not found", a named app winning mid-rejection, and turn speed.
+
+def t_screen_song():
+    """"now play this one", "play the song i see on my screen", "no look at my
+    screen where you will see the song i wanna play": the owner's session searched
+    the literal words ("see screen") and played the wrong thing entirely. All three
+    happen mid Apple-Music session, as they did live (a Shakira song already
+    playing), so the app carries over exactly as it does for any other follow-up."""
+    real_ctx = router._screen_context
+    try:
+        fresh()
+        STATE["more"] = {"shakira": SHAK_ROWS, "waka": SHAK_ROWS, "dai dai": SHAK_ROWS}
+        turn("play shakira on apple music", player="apple_music", subject="shakira",
+            pick=by("Whenever"))
+
+        # Music itself is in front: its own current-track pointer names the song,
+        # read the same way "playing" already is (music._now_playing), never her
+        # sentence's own words.
+        FETCHED.clear()
+        STATE["now"] = ("stopped", "Waka Waka (This Time for Africa)")
+        router._screen_context = lambda max_chars=6000: {
+            "permissions": {"accessibility": True, "screen_recording": False},
+            "frontmost": {"app": "Music", "pid": 9, "bundle_id": "com.apple.Music", "window": "Music"},
+            "selected": "", "focused": {"role": "", "value": "", "secure": False},
+            "visible": {"text": "", "truncated": False}, "page": None, "has_image": False}
+        r, j = turn("now play this one", extra={"screen_song": 0.9}, pick=by("Waka Waka"))
+        check("Music's own current track is read, not her sentence's words",
+              r["did"] == "opened_in_app" and "Waka Waka" in (r["say"] or ""), r["say"])
+        check("never searched the literal words 'this one'",
+              not any("term=this" in u.lower() or "term=one" in u.lower() for u in FETCHED), FETCHED)
+
+        # A browser tab's title carries the song, the way YouTube and Spotify's web
+        # player do; the site's own name and an "(Official Video)" tag are stripped.
+        FETCHED.clear()
+        router._screen_context = lambda max_chars=6000: {
+            "permissions": {"accessibility": True, "screen_recording": False},
+            "frontmost": {"app": "Google Chrome", "pid": 1, "bundle_id": "com.google.Chrome",
+                          "window": "Dai Dai"},
+            "selected": "", "focused": {"role": "", "value": "", "secure": False},
+            "visible": {"text": "", "truncated": False},
+            "page": {"url": "https://youtube.com/watch?v=x",
+                     "title": "Dai Dai (Official Video) - YouTube"},
+            "has_image": False}
+        r, j = turn("play the song i see on my screen", extra={"screen_song": 0.9},
+                    pick=by("Dai Dai"))
+        check("the tab's own title names the song ('Dai Dai'), not 'see screen'",
+              r["did"] == "opened_in_app" and r["say"].startswith("Dai Dai"), r["say"])
+        check("never searched 'see screen'",
+              not any("term=see" in u.lower() or "screen" in u.split("term=")[-1].lower()
+                      for u in FETCHED), FETCHED)
+
+        # Nothing on screen looks like a song at all: she is asked, never told a
+        # literal search of her own words ("see screen") failed.
+        FETCHED.clear()
+        router._screen_context = lambda max_chars=6000: {
+            "permissions": {"accessibility": True, "screen_recording": False},
+            "frontmost": {"app": "Finder", "pid": 2, "bundle_id": "com.apple.finder",
+                         "window": "Desktop"},
+            "selected": "", "focused": {"role": "", "value": "", "secure": False},
+            "visible": {"text": "", "truncated": False}, "page": None, "has_image": False}
+        r, j = turn("no look at my screen where you will see the song i wanna play",
+                    extra={"screen_song": 0.9})
+        check("nothing on screen: asks, never 'could not find see screen'",
+              r["did"] == "asked_back" and "see screen" not in (r["say"] or "").lower()
+              and not FETCHED, f"{r['did']} {r['say']} {FETCHED}")
+    finally:
+        router._screen_context = real_ctx
+
+
+# A small, self-contained artist catalog (her real library search finds nothing so
+# the exact-search path always fails first, forcing the sound-match fallback).
+BB_ID = 42042
+BAD_BUNNY_FULL = {"results": [
+    _song(6001, "NUEVAYoL", "Bad Bunny", "Debí Tirar Más Fotos", 6100, date="2025-01-05", aid=BB_ID),
+    _song(6002, "MIA (feat. Drake)", "Bad Bunny", "X 100PRE", 6200, date="2018-12-24", aid=BB_ID),
+    _song(6003, "DtMF", "Bad Bunny", "Debí Tirar Más Fotos", 6300, date="2025-01-05", aid=BB_ID),
+    _song(6004, "EL CLúB", "Bad Bunny", "Debí Tirar Más Fotos", 6400, date="2025-01-05", aid=BB_ID),
+]}
+
+
+def t_sound_match_within_artist():
+    """"nueva yella" (= NUEVAYoL) right after a Bad Bunny song, and "die die"
+    (= Dai Dai) right after Shakira played through the rejection path: Apple's own
+    search finds nothing for either, and the owner's session reused a stale query
+    ("could not find Waka Waka ... Shakira") instead of her actual new words."""
+    fresh()
+    STATE["more"] = {"bad bunny": BAD_BUNNY_FULL}
+    STATE["lookup"] = BAD_BUNNY_FULL
+    STATE["library"] = []
+    turn("play bad bunny on apple music", player="apple_music", subject="bad bunny", pick=by("MIA"))
+    check("setup: MIA is playing", router.MEM.last_played["title"].startswith("MIA"))
+
+    r, j = turn("nueva yella", subject="nueva yella")
+    check("a fresh, garbled title is matched by sound within the known artist",
+          r["did"] == "opened_in_app" and r["say"].startswith("NUEVAYoL"),
+          f"{r['did']} {r['say']}")
+    check("  no extra Jev call needed: one clear match, decided in code",
+          j.calls == 1, j.calls)
+
+    # "die die" for Shakira's "Dai Dai", through the rejection path: a real title
+    # attempt, not a bare "no", must never replay the stale previous search.
+    fresh()
+    STATE["more"] = {"shakira": SHAK_ROWS, "waka": SHAK_ROWS}
+    STATE["lookup"] = SHAK_ROWS
+    STATE["library"] = []
+    turn("play shakira on apple music", player="apple_music", subject="shakira",
+         pick=by("Whenever"))
+    r, j = turn("die die", extra={"rejects_last": 0.9})
+    check("'die die' plays Dai Dai, not a stale replay of the Shakira search",
+          r["did"] in ("opened_in_app", "playing") and r["say"].startswith("Dai Dai"),
+          f"{r['did']} {r['say']} {r['detail'].get('query')}")
+    check("  the previous turn's stale query was never reused as the search",
+          r["detail"].get("query") != "shakira", r["detail"])
+
+    # An artist named right in the sentence, with no session context at all
+    # ("change to where all by bad bunny"): the name after "by" is enough on its own.
+    fresh()
+    STATE["more"] = {"bad bunny": BAD_BUNNY_FULL}
+    STATE["lookup"] = BAD_BUNNY_FULL
+    STATE["library"] = []
+    r, j = turn("change to nueva yol by bad bunny on apple music", player="apple_music",
+                subject="nueva yol")
+    check("an artist named in this very sentence is enough, no prior context needed",
+          r["did"] == "opened_in_app" and r["say"].startswith("NUEVAYoL"),
+          f"{r['did']} {r['say']}")
+
+
+def t_named_app_switch_on_reject():
+    """"ok so on youtube" right after a song in Apple Music: the named app wins,
+    switching there with the same artist, rather than yet another Apple Music pick
+    (the owner's session kept replaying Bad Bunny in Apple Music instead)."""
+    fresh()
+    STATE["more"] = {"bad bunny": BAD_BUNNY_FULL}
+    STATE["lookup"] = BAD_BUNNY_FULL
+    STATE["library"] = []
+    turn("play bad bunny on apple music", player="apple_music", subject="bad bunny", pick=by("MIA"))
+    check("setup: playing in Apple Music", router.MEM.last_played["player"] == "apple_music")
+
+    vids = [{"id": "y1", "title": "Bad Bunny - NUEVAYoL (Official Video)", "channel": "Bad Bunny",
+            "length": "3:14", "views": "50M views"}]
+    queries: list[str] = []
+    router.yt.search = lambda q, n=18: (queries.append(q), [dict(v) for v in vids])[1]
+    r, j = turn("ok so on youtube", player="youtube", extra={"rejects_last": 0.9})
+    check("switched to YouTube with the same subject, not another Apple Music pick",
+          r["did"] == "playing" and router.MEM.last_played["player"] == "youtube",
+          f"{r['did']} {router.MEM.last_played}")
+    check("  searched YouTube for what she was already listening to (bad bunny)",
+          any("bad bunny" in (q or "").lower() for q in queries), queries)
+    router.yt.search = REAL_YT_SEARCH
+
+
+def t_reject_plays_another_never_not_found():
+    """"not this one" / "look well for sure you should find": rejecting a song must
+    hand her another real one by the artist, never "not found" - the owner's
+    session said "I could not find bad bunny" for an artist that plainly was found,
+    just not yet exhausted."""
+    fresh()
+    STATE["more"] = {"bad bunny": BAD_BUNNY_FULL}
+    STATE["lookup"] = BAD_BUNNY_FULL
+    STATE["library"] = []
+    turn("play bad bunny on apple music", player="apple_music", subject="bad bunny", pick=by("MIA"))
+    # Jev's own pick call scores every option too low to trust (as it did live);
+    # code must still hand her a fresh, real song rather than giving up.
+    r, j = turn("not this one", extra={"rejects_last": 0.9}, pick=lambda o: "__none__")
+    check("a rejection is answered with another real song, never 'not found'",
+          r["did"] != "not_found", f"{r['did']} {r['say']}")
+    check("  a different song than the one just rejected",
+          router.MEM.last_played["title"] != "MIA (feat. Drake)", router.MEM.last_played)
+    check("  the fallback is named honestly in the trace",
+          r["detail"].get("fallback_pick") is True, r["detail"])
+
+
+def t_year_refines_described_song_search():
+    """"ok now the one from 2026" right after a (wrongly) picked 2010 song: a year
+    refines the SAME described-song search rather than a blind new one. The owner's
+    session searched "Shakira ok 2026" from nothing and a model call guessed wrong,
+    when the real dated candidates - Dai Dai included - had already been fetched a
+    moment before, for "our latest World Cup song"."""
+    fresh()
+    year_rows = {"results": [
+        _song(8801, "Waka Waka (This Time for Africa)", "Shakira", "Sale el Sol", 8800,
+              date="2010-04-26", aid=8888),
+        _song(8802, "Dai Dai", "Shakira", "Dai Dai - Single", 8810, date="2026-05-14", aid=8888),
+    ]}
+    year_wiki = {"query": {"pages": {
+        "1": {"pageid": 1, "index": 1, "title": "Waka Waka (This Time for Africa)",
+              "extract": "\"Waka Waka (This Time for Africa)\" is a song by Colombian singer "
+                        "Shakira, the official song of the 2010 FIFA World Cup."},
+        "2": {"pageid": 2, "index": 2, "title": "Dai Dai",
+              "extract": "\"Dai Dai\" is a song by Colombian singer Shakira, the official song "
+                        "of the 2026 FIFA World Cup."},
+    }}}
+    STATE["more"] = {"shakira": year_rows, "world cup": year_rows}
+    STATE.update(wiki=year_wiki, lookup={"results": []})
+    turn("now switch to shakira on apple music", player="apple_music", subject="shakira",
+         pick=lambda o: "0")
+
+    def prefer_waka(instr):
+        return 0.9 if "Waka Waka" in instr.split(": this", 1)[0] else 0.05
+    r, j = turn("please change to our latest world cup song",
+                extra={"describes_song": 0.9, "rejects_last": 0.9},
+                pick=lambda o: "0", fits=prefer_waka)
+    check("setup: the (live-Jev) pick is the 2010 song, not Dai Dai",
+          "Waka Waka" in r["say"] and "2010" in r["say"], r["say"])
+    fetched_before = len(FETCHED)
+
+    r2, j2 = turn("ok now the one from 2026", extra={"describes_song": 0.9})
+    check("a year on its own resolves to Dai Dai, from the search already done",
+          r2["say"].startswith("That is Dai Dai, from 2026.")
+          and r2["detail"]["identified"].get("source") == "cache", f"{r2['did']} {r2['say']}")
+    check("  no blind new described-song search: no Wikipedia call, no fresh 'ok "
+          "2026'-style catalog query, only the one _play_in_app makes to find the "
+          "preset song's own playable row",
+          not any("wikipedia.org" in u or "term=ok" in u.lower() or "term=2026" in u.lower()
+                  for u in FETCHED[fetched_before:]), FETCHED[fetched_before:])
+    check("  only the plain understanding round trip, no extra Jev or model call",
+          j2.calls == 1, j2.calls)
+    check("  never 'I could not work out which song that is'",
+          r2["did"] != "asked_back", r2["say"])
+
+
+def t_warms_apple_music_and_shorter_press_wait():
+    """Speed (owner's session: 7.6s for the first "play ... on apple music", of
+    which Jev accounted for well under a second; 8.1s on a press that waited the
+    full old timeout and still found nothing). Not independently re-measured live
+    (no live Music playback in this lane's tests, per its budget); this checks the
+    two changes are actually wired in."""
+    fresh()
+    started: list[str] = []
+    real_ensure = am.ensure_running
+    am.ensure_running = lambda app: started.append(app)
+    try:
+        turn("play shakira on apple music", player="apple_music", subject="shakira")
+        check("Music is started in the background before the search/pick round trip",
+              "Music" in started, started)
+        started.clear()
+        turn("make it louder", intent="control", extra={"control_action": "louder"})
+        check("an unrelated request never starts Music",
+              "Music" not in started, started)
+    finally:
+        am.ensure_running = real_ensure
+    check("press_song_play's worst-case wait was cut (5.0/3.0 -> 3.0/2.0)",
+          am.press_song_play.__defaults__[:2] == (3.0, 2.0), am.press_song_play.__defaults__)
+
+
+def t_source_units():
+    got = am.wiki_songs.__wrapped__ if hasattr(am.wiki_songs, "__wrapped__") else None
+    STATE["wiki"] = TITANIC_WIKI
+    songs = am.wiki_songs("Titanic song")
+    check("wiki: song articles kept, their artist and year read",
+          [(s_["title"], s_["artist"], s_["year"]) for s_ in songs] ==
+          [("Titanic", "Falco", "1992"), ("My Heart Will Go On", "Celine Dion", "1997")], songs)
+    STATE["wiki"] = WC_WIKI
+    check("wiki: a biography is not a song", all(s_["title"] != "Shakira"
+                                                 for s_ in am.wiki_songs("x")))
+    check("search title drops feat. and versions, keeps the rest",
+          am.search_title("La La La (Brazil 2014) [feat. Carlinhos Brown]") == "La La La (Brazil 2014)"
+          and am.search_title("Dai Dai (Clean Bandit Remix)") == "Dai Dai")
+    STATE["wiki"] = {"query": {"pages": {}}}
+
+
 def main():
     for t in (t_units, t_owner_case_catalog_only, t_measured_span_shapes, t_in_library_plays,
               t_stop_and_undo_pause_music, t_another_one_stays_in_music, t_hebrew,
               t_follow_ups_stay_in_the_player,
               t_spotify, t_unspecified_and_preference, t_not_found_and_unreachable,
               t_named_units, t_named_media, t_named_messages, t_named_search,
-              t_named_generic_apps):
+              t_named_generic_apps, t_song_keys_and_precheck, t_another_one_never_repeats,
+              t_described_song, t_apple_music_playback, t_source_units,
+              t_described_song_from_sources,
+              t_screen_song, t_sound_match_within_artist, t_named_app_switch_on_reject,
+              t_reject_plays_another_never_not_found, t_year_refines_described_song_search,
+              t_warms_apple_music_and_shorter_press_wait):
         print(f"\n{t.__name__}")
         try:
             t()

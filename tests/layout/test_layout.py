@@ -69,7 +69,12 @@ def start_server():
     # A profile of its own, or the checkout's real one is copied in and the Mac looks
     # set up (paths.state's legacy migration).
     (state / "profile.json").write_text("{}")
+    # Its own asr dir, and the downloader's seam: no page here may start a real model
+    # download (savta/asr_models.py leaves REAL_DOWNLOAD_IN_TEST if one is tried).
+    global ASR_DIR
+    ASR_DIR = Path(tempfile.mkdtemp(prefix="layout-asr-"))
     env = dict(os.environ, MICMIC_PORT=str(PORT), MICMIC_STATE_DIR=str(state),
+               MICMIC_ASR_DIR=str(ASR_DIR), MICMIC_ASR_NO_DOWNLOAD="1",
                MICMIC_DRY_OPEN="1", **OFFLINE)
     env.pop("MICMIC_ALLOW_SEND", None)
     env.pop("MICMIC_ALLOW_CALL", None)
@@ -81,6 +86,15 @@ def start_server():
         time.sleep(0.1)
     proc.kill()
     raise SystemExit(f"server on {PORT} did not start")
+
+
+ASR_DIR = None
+
+
+def no_model_download():
+    trip = ASR_DIR / "REAL_DOWNLOAD_IN_TEST" if ASR_DIR else None
+    check("no real model download was started", not (trip and trip.exists()),
+          trip.read_text() if trip and trip.exists() else "")
 
 
 def no_model_calls():
@@ -1142,6 +1156,7 @@ def main():
             finally:
                 browser.close()
         no_model_calls()
+        no_model_download()
     finally:
         proc.terminate()
         try:

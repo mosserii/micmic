@@ -29,7 +29,7 @@
   <p>MicMic sends what it needs to answer you, and we keep none of it. We keep a count of how many requests each device made each day, and, if you pay, the Stripe references for your subscription. No recordings, no transcripts, no screenshots, no advertising, no selling of data.</p>
 
   <h2>What reaches our servers</h2>
-  <p>When you speak to MicMic, your Mac turns your voice into text. That text, and a short description of what MicMic is doing, is sent to our server to work out what you asked for. When you ask about your screen, the text on the screen, and for some questions a picture of the window in front, is sent too. When you ask MicMic to guide you through something on your screen step by step, the same is sent once for each step, and never while a password field is being typed in (then only the names of the buttons and fields go, without a picture).</p>
+  <p>When you speak to MicMic, your voice is turned into text. In English and Hebrew this happens on your Mac: English by a speech model MicMic downloads to your Mac (macOS&#39;s own on-device recognizer is used until it is ready), Hebrew by macOS on your Mac. When macOS has no on-device recognizer for your language, which today is often the case for Arabic and Russian, macOS sends your voice to Apple&#39;s speech service to turn it into text. MicMic itself never keeps a recording. That text, and a short description of what MicMic is doing, is sent to our server to work out what you asked for. When you ask about your screen, the text on the screen, and for some questions a picture of the window in front, is sent too. When you ask MicMic to guide you through something on your screen step by step, the same is sent once for each step, and never while a password field is being typed in (then only the names of the buttons and fields go, without a picture).</p>
   <p>Our server passes each request on to the service that answers it and hands the answer back. It does not write the request or the answer to disk, and it does not put them in logs.</p>
 
   <h2>Who else processes it</h2>
@@ -38,6 +38,7 @@
     <li><strong>Google (Gemini API)</strong> answers questions about your screen.</li>
     <li><strong>Stripe</strong> takes payment for MicMic Pro. Your card details go to Stripe, never to us.</li>
     <li><strong>Railway</strong> hosts our server.</li>
+    <li><strong>Apple</strong> turns your voice into text when your Mac has no on-device recognizer for your language (see above). This goes from macOS to Apple directly, not through us.</li>
   </ul>
   <p>Each handles the data under its own terms.</p>
 

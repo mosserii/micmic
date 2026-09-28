@@ -3,7 +3,7 @@
 this" with nothing selected), the "I selected it" continuation, a calendar date
 with no time, and prefs "always ask" reaching a screen-sourced send.
 
-    cd /Users/zohar/jev/savta && python3 tests/test_screenshot2.py
+    python3 tests/test_screenshot2.py
 
 Same shape and the same zero-cost design as tests/test_screenshot.py (read that
 file's docstring for why): router.understand() is replaced by a controlled

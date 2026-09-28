@@ -634,9 +634,31 @@ def set_timer(minutes: float, text: str, language: str = "english") -> dict:
     t = threading.Timer(minutes * 60, fire)
     t.daemon = True
     t.start()
-    row = {"at": when, "text": text, "minutes": minutes, "timer": t}
+    # "id": what a follow-up ("make it 10 minutes instead", "cancel it") points at,
+    # so it moves or stops this reminder and never another one she has running.
+    row = {"at": when, "text": text, "minutes": minutes, "timer": t, "id": f"{when:.6f}"}
     _TIMERS.append(row)
     return row
+
+
+def timer_row(timer_id: str) -> dict | None:
+    """The reminder with this id while it has not gone off yet, else None."""
+    now = time.time()
+    return next((t for t in _TIMERS if t.get("id") == timer_id and t["at"] > now), None)
+
+
+def cancel_timer(timer_id: str) -> bool:
+    """Stop this one pending reminder, and only it. Nothing is deleted anywhere: the
+    reminder was never written outside this process."""
+    row = timer_row(timer_id)
+    if row is None:
+        return False
+    try:
+        row["timer"].cancel()
+    except Exception:  # noqa: BLE001
+        return False
+    _TIMERS[:] = [t for t in _TIMERS if t is not row]
+    return True
 
 
 def pending_timers() -> list[dict]:
@@ -657,31 +679,27 @@ def add_event(title: str, date: str, start: str, end: str = "",
     or nothing, on a Hebrew or Russian system. Day is set to 1 first so that moving
     from the 31st into a shorter month cannot roll over into the month after.
     Written into the first calendar she can write to: the first one in the list is
-    often a read-only subscription such as holidays, which silently refuses."""
+    often a read-only subscription such as holidays, which silently refuses.
+
+    On success the text is the calendar's name and the new event's uid, one per line:
+    what a follow-up ("move it to Friday") needs to change this event and no other."""
     import re as _re
     m = _re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", date or "")
     if not m:
         return False, "bad date"
     y, mo, d = (int(x) for x in m.groups())
-    esc = lambda v: (v or "").replace("\\", "\\\\").replace('"', '\\"')[:200]
+    esc = _esc
 
     def when(var, h, mi):
-        return (f"set {var} to current date\n"
-                f"set day of {var} to 1\n"
-                f"set year of {var} to {y}\n"
-                f"set month of {var} to {mo}\n"
-                f"set day of {var} to {d}\n"
-                f"set hours of {var} to {min(h, 23)}\n"
-                f"set minutes of {var} to {mi}\n"
-                f"set seconds of {var} to 0\n")
+        return _as_date(var, y, mo, d, h, mi)
     if all_day:
         script = (when("s", 0, 0) +
                   'tell application "Calendar"\n'
                   '  set cal to first calendar whose writable is true\n'
-                  f'  make new event at end of events of cal with properties '
+                  f'  set ev to make new event at end of events of cal with properties '
                   f'{{summary:"{esc(title)}", start date:s, allday event:true, '
                   f'location:"{esc(location)}"}}\n'
-                  '  return name of cal\n'
+                  '  return (name of cal) & linefeed & (uid of ev)\n'
                   'end tell')
         return _osa(script, timeout=10.0)
     t = _re.fullmatch(r"(\d{1,2}):(\d{2})", start or "")
@@ -693,12 +711,155 @@ def add_event(title: str, date: str, start: str, end: str = "",
     script = (when("s", sh, sm) + when("e", eh, em) +
               'tell application "Calendar"\n'
               '  set cal to first calendar whose writable is true\n'
-              f'  make new event at end of events of cal with properties '
+              f'  set ev to make new event at end of events of cal with properties '
               f'{{summary:"{esc(title)}", start date:s, end date:e, location:"{esc(location)}"}}\n'
-              '  return name of cal\n'
+              '  return (name of cal) & linefeed & (uid of ev)\n'
               'end tell')
     ok, out = _osa(script, timeout=10.0)
     return ok, out
+
+
+def _esc(v: str) -> str:
+    return (v or "").replace("\\", "\\\\").replace('"', '\\"')[:200]
+
+
+def _as_date(var: str, y: int, mo: int, d: int, h: int, mi: int) -> str:
+    """An AppleScript date built field by field (see add_event for why)."""
+    return (f"set {var} to current date\n"
+            f"set day of {var} to 1\n"
+            f"set year of {var} to {y}\n"
+            f"set month of {var} to {mo}\n"
+            f"set day of {var} to {d}\n"
+            f"set hours of {var} to {min(h, 23)}\n"
+            f"set minutes of {var} to {mi}\n"
+            f"set seconds of {var} to 0\n")
+
+
+def change_event(uid: str, calendar: str, date: str, start: str = "", end: str = "",
+                 all_day: bool = False) -> tuple[bool, str]:
+    """Move or resize the one event MicMic created, found by its uid in the calendar it
+    was written to. Returns (True, "ok"), (False, "missing") when it is not there any
+    more (she deleted or moved it herself), or (False, why). Never looks at, and so can
+    never change, any other event: an event without a uid on record is refused here."""
+    import re as _re
+    m = _re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", date or "")
+    if not (uid and calendar and m):
+        return False, "missing" if not uid else "bad date"
+    y, mo, d = (int(x) for x in m.groups())
+    head = ('tell application "Calendar"\n'
+            f'  set evs to (every event of (first calendar whose name is "{_esc(calendar)}") '
+            f'whose uid is "{_esc(uid)}")\n'
+            '  if (count of evs) is 0 then return "missing"\n'
+            '  set ev to item 1 of evs\n')
+    if all_day:
+        script = (_as_date("s", y, mo, d, 0, 0) + head +
+                  '  set allday event of ev to true\n'
+                  '  set start date of ev to s\n'
+                  '  return "ok"\nend tell')
+    else:
+        t = _re.fullmatch(r"(\d{1,2}):(\d{2})", start or "")
+        e = _re.fullmatch(r"(\d{1,2}):(\d{2})", end or "")
+        if not (t and e):
+            return False, "bad time"
+        (sh, sm), (eh, em) = ((int(x) for x in t.groups()), (int(x) for x in e.groups()))
+        # Moved later, the end goes first, so the event never ends before it starts.
+        script = (_as_date("s", y, mo, d, sh, sm) + _as_date("e", y, mo, d, eh, em) + head +
+                  '  set allday event of ev to false\n'
+                  '  if s > (end date of ev) then\n'
+                  '    set end date of ev to e\n'
+                  '    set start date of ev to s\n'
+                  '  else\n'
+                  '    set start date of ev to s\n'
+                  '    set end date of ev to e\n'
+                  '  end if\n'
+                  '  return "ok"\nend tell')
+    ok, out = _osa(script, timeout=10.0)
+    if ok and out.strip() == "missing":
+        return False, "missing"
+    return ok and out.strip() == "ok", out
+
+
+# ---------------------------------------------------------------- a video in a tab
+# What MicMic put on in the browser (YouTube, Netflix and the rest) is driven in its own
+# tab and nowhere else: the tab is found by the address MicMic opened (a video id, the
+# service's host). If it is gone, nothing is pressed anywhere. Exact control through the
+# page's own video element when Chrome allows JavaScript from Apple Events (off by
+# default); otherwise the site's own keyboard shortcuts, pressed with that tab in front.
+_VIDEO_JS = {
+    "pause": "if(v.paused)return 'already';v.pause();return 'done';",
+    "resume": "if(!v.paused)return 'already';v.play();return 'done';",
+    "back_10": "v.currentTime=Math.max(0,v.currentTime-10);return 'done';",
+    "forward_10": "v.currentTime=v.currentTime+10;return 'done';",
+    "restart": "v.currentTime=0;v.play();return 'done';",
+}
+# System Events: a character, or (key code, modifiers).
+_TAB_KEYS = {
+    "youtube": {"pause": "k", "resume": "k", "back_10": "j", "forward_10": "l",
+                "full_screen": "f", "exit_full_screen": (53, ""), "restart": "0",
+                "next": ("n", "shift"), "next_episode": ("n", "shift"),
+                "previous": ("p", "shift")},
+    "other": {"pause": (49, ""), "resume": (49, ""), "back_10": (123, ""),
+              "forward_10": (124, ""), "full_screen": "f", "exit_full_screen": (53, "")},
+}
+
+
+def _press(key) -> str:
+    if isinstance(key, str):
+        return f'tell application "System Events" to keystroke "{key}"'
+    k, mods = key
+    using = f" using {mods} down" if mods else ""
+    if isinstance(k, str):
+        return f'tell application "System Events" to keystroke "{k}"{using}'
+    return f'tell application "System Events" to key code {k}{using}'
+
+
+def tab_player(fragment: str, action: str, site: str = "other") -> str:
+    """Do `action` to the video in the Chrome tab whose address holds `fragment`.
+    Returns "done", "already" (it was paused already, and so on), "keys" (the site's
+    shortcut was pressed in that tab), "missing" (no such tab: nothing was touched),
+    "unsupported" (that site has no way to do it), or "failed"."""
+    frag = (fragment or "").replace('"', "")
+    keys = _TAB_KEYS.get(site, _TAB_KEYS["other"])
+    js = _VIDEO_JS.get(action)
+    key = keys.get(action)
+    if not frag or (js is None and key is None):
+        return "unsupported" if frag else "missing"
+    run_js = ""
+    if js:
+        body = ("(function(){var v=document.querySelector('video');"
+                "if(!v)return 'novideo';" + js + "})()")
+        run_js = ('        try\n'
+                  f'          set r to (execute t javascript "{body}")\n'
+                  '        end try\n')
+    press = ('        if r is "keys" or r is "novideo" then\n'
+             + ('          set active tab index of w to i\n'
+                '          set index of w to 1\n'
+                '          activate\n'
+                '          delay 0.3\n'
+                f'          {_press(key)}\n'
+                if key is not None else '          return "unsupported"\n')
+             + '          return "keys"\n'
+               '        end if\n')
+    script = ('if application "Google Chrome" is not running then return "missing"\n'
+              'tell application "Google Chrome"\n'
+              '  repeat with w in windows\n'
+              '    set i to 0\n'
+              '    repeat with t in tabs of w\n'
+              '      set i to i + 1\n'
+              f'      if URL of t contains "{frag}" then\n'
+              '        set r to "keys"\n'
+              + run_js + press +
+              '        return r\n'
+              '      end if\n'
+              '    end repeat\n'
+              '  end repeat\n'
+              '  return "missing"\n'
+              'end tell')
+    ok, out = _osa(script, timeout=6.0)
+    out = (out or "").strip()
+    if not ok:
+        return "failed"
+    return out if out in ("done", "already", "keys", "missing", "unsupported") else "failed"
 
 
 def cancel_last_timer() -> bool:

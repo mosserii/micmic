@@ -172,7 +172,7 @@ class LLM:
             self.last_error = "no GEMINI_API_KEY"
             return None
         # Direct, on a kept-alive connection too. It used to open a fresh TLS
-        # connection per call, about 300 ms of every answer (measured with tests/perf/bench.py).
+        # connection per call, about 300 ms of every answer (tests/perf/BASELINE.md).
         u = urllib.parse.urlsplit(BASE)
         return self._post_kept(payload, True, u.hostname, 443,
                                f"{u.path}/{model}:generateContent",
@@ -444,3 +444,54 @@ class LLM:
         out = self._spoken(prompt, sys_prompt, language, lang, 320, 0.3)
         out = _drop_trailing_question(out) if out else None
         return out[:400] if out else None
+
+    def identify_song(self, request: str, language: str = "english", context: str = "",
+                      singer_on: str = "", gender: str = "") -> dict | None:
+        """The one song a description points at ("our latest World Cup song", "the song
+        from Titanic"): {"title", "artist", "sentence"}, or None when the model does not
+        know or answered out of shape. ONE call. The title is only a claim: the caller
+        plays it only once the real catalog or YouTube search finds it."""
+        lang = {"hebrew": "Hebrew", "arabic": "Arabic", "russian": "Russian"}.get(
+            language, "English")
+        now = time.localtime()
+        sys_prompt = (
+            "You identify the one song a person describes instead of naming it. "
+            f"Today is {time.strftime('%A, %d %B %Y', now)}: the newest or latest means "
+            "the most recent one released by that day.\n"
+            'Reply with ONLY a JSON object: {"title": "...", "artist": "...", '
+            '"sentence": "..."}.\n'
+            "title: the song's title as released, without featured artists, versions or "
+            "anything in brackets. artist: its main performer.\n"
+            f"sentence: one short sentence in {lang} that answers her description by "
+            "naming the song, for example: Shakira's latest World Cup song is Dai Dai. "
+            "Name the singer rather than saying our or your. Plain words, no dashes, no "
+            f"quotation marks, no question.{self._address(language, gender)}\n"
+            "Words like her, his, their, our or the singer mean the singer she was just "
+            "listening to, when one is given.\n"
+            "You may be given background information from an automatic search. Use it "
+            "only if it is clearly about this song.\n"
+            'If you do not know which one song she means, reply {"title": ""}.')
+        prompt = (f"She was just listening to: {singer_on}\n" if singer_on else "")
+        prompt += (f"Background information, which may or may not be relevant:\n{context}\n"
+                   if context else "")
+        prompt += f"She said: {request}"
+        out = self.text(prompt, sys_prompt, max_tokens=160, temperature=0.0,
+                        timeout=SPOKEN_TIMEOUT)
+        if not out:
+            return None
+        m = re.search(r"\{.*\}", out, re.S)
+        try:
+            d = json.loads(m.group(0)) if m else {}
+        except ValueError:
+            self.last_error = "identify_song: not JSON"
+            return None
+        title = str(d.get("title") or "").strip()
+        artist = str(d.get("artist") or "").strip()
+        if not title or len(title) > 120 or len(artist) > 80 or "\n" in title + artist:
+            return None
+        sentence = re.sub(r"\s*[–—]\s*", ", ", str(d.get("sentence") or ""))
+        sentence = re.sub(r"\s+", " ", sentence).strip().strip('"')
+        if (not sentence or len(sentence) > 200 or foreign_script(sentence, language)
+                or title.casefold() not in sentence.casefold()):
+            sentence = ""
+        return {"title": title, "artist": artist, "sentence": sentence}

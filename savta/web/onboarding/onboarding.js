@@ -15,7 +15,7 @@
 
   const STEP_KEY = "micmic.onboarding.step";
   const REDUCE = matchMedia("(prefers-reduced-motion: reduce)");
-  const SPEECH = {he:"he-IL", en:"en-US", ar:"ar-SA", ru:"ru-RU"};
+  const SPEECH = Object.fromEntries(LANGS.map(l => [l.code, l.speech]));   // index.html's list
   const PERMS = [
     {k:"microphone",    label:"obMic",    why:"obMicWhy",    icon:"mic"},
     {k:"speech",        label:"obSpeech", why:"obSpeechWhy", icon:"wave"},
@@ -37,6 +37,10 @@
   let root = null, step = 0, perms = null, succeeded = false, closing = false;
   let permTimer = null, turnTimer = null, demoTimers = [], advanceTimer = null, closeTimer = null;
   let orig = {};
+  // The local model for her language (savta/asr_models.py): downloaded in the
+  // background from the moment a language is chosen. asrTimer re-schedules itself
+  // only while it is still downloading, from wherever go() last called pollAsr().
+  let asrStatus = null, asrTimer = null, asrInstalled = false;
   // Keyboard or pointer, whichever she used last: a focus ring painted on a button she
   // never tabbed to reads as a second border, so focus follows the keyboard only.
   let byKey = false;
@@ -75,6 +79,13 @@
     </div>
     <div class="ob-steps">
       <section class="ob-step" data-n="1">
+        <div class="ob-lang">
+          <p class="ob-lang-t" data-t="obLangPick"></p>
+          <div class="ob-lopts" role="radiogroup" data-aria="obLangPick">${LANGS.map(l => `
+            <button type="button" role="radio" class="ob-lopt" data-code="${l.code}" aria-checked="false">${l.name}</button>`).join("")}
+          </div>
+          <p class="ob-asr" hidden></p>
+        </div>
         <div class="ob-hero">
           <div class="ob-demo" data-p="idle" aria-hidden="true">
             <div class="ob-bar">
@@ -114,6 +125,7 @@
             <span class="ob-sparks">${sparks()}</span>
           </button>
         </div>
+        <p class="ob-asr" hidden></p>
         <h2 class="ob-title" tabindex="-1" data-t="ob3Title"></h2>
         <p class="ob-sub" data-t="ob3Sub"></p>
         <p class="ob-quote"><span class="ob-qcheck">${SVG.check}</span><span class="ob-qtext" data-t="ob3Phrase"></span></p>
@@ -200,6 +212,8 @@
     prog.setAttribute("aria-valuenow", String(step));
     prog.setAttribute("aria-valuetext", t("obStep").replace("{n}", step));
     paintPerms();
+    paintLangPicks();
+    paintAsrLine();
     // The words in the demo are the language's own sentence, one span a word.
     const words = q(".ob-words");
     words.innerHTML = "";
@@ -211,6 +225,71 @@
     if(step === 1) runDemo();
   }
   window.onboardingLanguage = paint;
+
+  // ------------------------------------------------------------------ 0. language
+  // She picks it once, here, and MicMic listens and answers only in it from then on
+  // (product decision: no more silently defaulting to English). The choices are the
+  // page's own LANGS (index.html): a language is offered here the day it is added there.
+  // The owner's decision (2026-09-28): the local model for the chosen language downloads
+  // automatically from here; Apple hears every turn until it is ready, and Settings >
+  // Better recognition has Cancel and Try again. A language Apple covers asks for nothing.
+  function paintLangPicks(){
+    for(const b of qa(".ob-lopt")) b.setAttribute("aria-checked", b.dataset.code === LANG ? "true" : "false");
+  }
+
+  function pickLanguage(code){
+    if(code === LANG){ paintLangPicks(); return; }
+    const speech = SPEECH[code];
+    applyLanguage(code);
+    paintLangPicks();
+    asrInstalled = true;
+    // The download is for the language the server has saved, so it waits for the save.
+    (speech ? post("/api/settings", {language_hint: speech}) : Promise.resolve())
+      .catch(()=>{})
+      .then(() => post("/api/asr", {action: "install"}))
+      .catch(()=>{})
+      .then(pollAsr);
+  }
+
+  // The first-run download: started the moment a language is settled on. A change
+  // already triggers it above; this covers leaving step 1 with the preselected
+  // language untouched, so the download still starts, exactly once.
+  function ensureAsrInstall(){
+    if(asrInstalled) return;
+    asrInstalled = true;
+    // Polled once the server has the job: a poll sent alongside the POST saw "none" and
+    // never looked again, so the line stayed empty until step 3.
+    post("/api/asr", {action: "install"}).catch(()=>{}).then(pollAsr);
+  }
+
+  // ------------------------------------------------------------------ 0b. its status
+  // Fed by /api/asr, shown under the language choice (step 1) and again on step 3
+  // while it is still running. Never blocks moving on: it is just a line of text.
+  function asrText(){
+    if(!asrStatus) return "";
+    if(asrStatus.state === "downloading"){
+      const pct = asrStatus.total ? Math.floor((asrStatus.done || 0) / asrStatus.total * 100) : 0;
+      return t("obAsrDownloading").replace("{pct}", pct);
+    }
+    if(asrStatus.state === "ready") return t("obAsrReady");
+    if(asrStatus.state === "failed") return t("obAsrFailed");
+    return "";                                    // apple or none: nothing to say
+  }
+
+  function paintAsrLine(){
+    const text = asrText();
+    for(const el of qa(".ob-asr")){ el.textContent = text; el.hidden = !text; }
+  }
+
+  async function pollAsr(){
+    try{
+      const r = await fetch("/api/asr", {cache:"no-store"});
+      if(r.ok) asrStatus = await r.json();
+    }catch(_){}
+    paintAsrLine();
+    clearTimeout(asrTimer); asrTimer = null;
+    if(asrStatus && asrStatus.state === "downloading") asrTimer = setTimeout(pollAsr, 1000);
+  }
 
   // ------------------------------------------------------------------ 1. the demo
   function runDemo(){
@@ -354,7 +433,9 @@
 
   function go(n){
     if(!root || closing) return;
+    const leaving1 = step === 1;
     step = Math.max(1, Math.min(3, n));
+    if(leaving1 && step !== 1) ensureAsrInstall();
     try{ sessionStorage.setItem(STEP_KEY, String(step)); }catch(_){}
     for(const s of qa(".ob-step")){
       const k = Number(s.dataset.n);
@@ -380,6 +461,7 @@
       turnTimer = setInterval(pollTurn, 700);
       live("idle");
     }
+    if(step === 1 || step === 3) pollAsr();
     footer();
     // Focus where the next press should land: the one action, else the headline so a
     // screen reader starts at the top of the new screen.
@@ -400,7 +482,7 @@
     if(!root || closing) return;
     closing = true;
     [permTimer, turnTimer].forEach(clearInterval);
-    [advanceTimer, closeTimer, ...demoTimers].forEach(clearTimeout);
+    [advanceTimer, closeTimer, asrTimer, ...demoTimers].forEach(clearTimeout);
     try{ sessionStorage.removeItem(STEP_KEY); }catch(_){}
     if(orig.state !== undefined) window.panelState = orig.state;
     if(orig.heard !== undefined) window.panelHeard = orig.heard;
@@ -439,6 +521,22 @@
   function onKeyCapture(e){
     if(!root || closing) return;
     byKey = true;
+    // The language radiogroup: arrow keys move the selection, wrapping, and each move
+    // picks the language it lands on, the way any native radiogroup behaves. Left/Right
+    // follow the reading direction, not the physical key, so RTL is not reversed.
+    if(document.activeElement.classList.contains("ob-lopt")
+       && ["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"].includes(e.key)){
+      e.preventDefault(); e.stopPropagation();
+      const opts = qa(".ob-lopt");
+      const i = opts.indexOf(document.activeElement);
+      const rtl = document.documentElement.dir === "rtl";
+      const fwd = e.key === "ArrowDown" ? true : e.key === "ArrowUp" ? false
+        : e.key === "ArrowRight" ? !rtl : rtl;
+      const n = (i + (fwd ? 1 : -1) + opts.length) % opts.length;
+      opts[n].focus();
+      pickLanguage(opts[n].dataset.code);
+      return;
+    }
     // Enter anywhere that is not a control is the screen's one action.
     if(e.key === "Enter" && !(e.target instanceof HTMLButtonElement)){
       const act = primary();
@@ -492,6 +590,7 @@
       if(b.dataset.go === "next") go(step + 1);
       else if(b.dataset.go === "done") finish("done");
       else if(b.classList.contains("ob-skip")) finish("skip");
+      else if(b.classList.contains("ob-lopt")) pickLanguage(b.dataset.code);
       else if(b.dataset.pane) post("/api/permissions/open", {pane:b.dataset.pane}).catch(()=>{});
       else if(b.classList.contains("ob-orb") && !succeeded){
         // Without Accessibility the key cannot reach MicMic, so the circle is the

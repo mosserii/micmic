@@ -1030,6 +1030,12 @@ l-753 0 0 1115 c0 1114 0 1115 20 1115 106 0 558 60 793 106 1223 236 2275
     </div>
 
     <div class="srow">
+      <div class="slabel" id="lAsr"></div>
+      <div class="shint" id="hAsr" hidden></div>
+      <button type="button" class="acct-btn" id="asrBtn" hidden></button>
+    </div>
+
+    <div class="srow">
       <div class="slabel" id="lListen"></div>
       <div class="srange">
         <input id="listenRange" type="range" min="4" max="60" step="1">
@@ -1077,7 +1083,7 @@ const COPY = {
       ob3Title:"בואו ננסה.", ob3Sub:"מחזיקים ⌥ ואומרים", ob3Phrase:"מה השעה?", obWaiting:"מחכה לך",
       obNoKey:"⌥ עוד לא עובד? לוחצים על העיגול.", obSetTitle:"הכל מוכן.", obSetSub:"MicMic שמעה אותך.", obListen:"להתחיל להקשיב",
       axNote:"כדי ש-{key} יפעיל את MicMic, צריך להפעיל נגישות.", axOpen:"פתיחת הגדרות נגישות", send:"שליחה", language:"שפה", secShort:"{n} שנ׳",
-      ob1TitleFn:"לוחצים פעמיים על Fn ומדברים.", ob1SubFn:"לחיצה נוספת על Fn שולחת.", ob3SubFn:"לוחצים פעמיים על Fn ואומרים", ob1TitlePress:"לוחצים ⌥ ומדברים.", ob1SubPress:"לחיצה נוספת שולחת.", ob3SubPress:"לוחצים ⌥ ואומרים", guideMe:"תדריכי אותי", gStep:"שלב {n}", gDone:"עשיתי", gDoIt:"תעשי בשבילי", gStop:"הפסקה", gWhy:"למה?", gLooking:"מסתכלת על המסך", gFinished:"סיימנו", gClose:"סגירה", gSecret:"את זה מקלידים לבד. MicMic לא קוראת את זה.", gStopped:"ההדרכה הופסקה"},
+      ob1TitleFn:"לוחצים פעמיים על Fn ומדברים.", ob1SubFn:"לחיצה נוספת על Fn שולחת.", ob3SubFn:"לוחצים פעמיים על Fn ואומרים", ob1TitlePress:"לוחצים ⌥ ומדברים.", ob1SubPress:"לחיצה נוספת שולחת.", ob3SubPress:"לוחצים ⌥ ואומרים", obLangPick:"בחירת שפת הדיבור.", obAsrDownloading:"זיהוי משופר: מורידה {pct}%", obAsrReady:"זיהוי משופר פעיל", obAsrFailed:"לא הצלחתי להוריד. MicMic משתמשת בזיהוי המובנה.", sAsr:"זיהוי משופר", sAsrDownload:"הורדה ({size})", sAsrProgress:"מורידה {pct}%", sAsrBuiltIn:"מובנה עבור השפה הזו", sAsrRetry:"ניסיון נוסף", guideMe:"תדריכי אותי", gStep:"שלב {n}", gDone:"עשיתי", gDoIt:"תעשי בשבילי", gStop:"הפסקה", gWhy:"למה?", gLooking:"מסתכלת על המסך", gFinished:"סיימנו", gClose:"סגירה", gSecret:"את זה מקלידים לבד. MicMic לא קוראת את זה.", gStopped:"ההדרכה הופסקה"},
   he_m:{off:"גע כדי לדבר", idle:"גע כדי לדבר", wake:"אמור מיקמיק",
       foot:"גע בעיגול או לחץ על מקש הרווח", footWake:"אמור מיקמיק כדי להתחיל",
       footAlways:"פשוט תדבר", mic:"תן הרשאה למיקרופון ואז רענן",
@@ -1105,7 +1111,7 @@ const COPY = {
       ob3Title:"Try it.", ob3Sub:"Hold ⌥ and say", ob3Phrase:"What time is it?", obWaiting:"Waiting for you",
       obNoKey:"No ⌥ yet? Click the circle.", obSetTitle:"You're set.", obSetSub:"MicMic heard you.", obListen:"Start listening",
       axNote:"{key} needs Accessibility before it can start MicMic.", axOpen:"Open Accessibility settings", send:"Send", language:"Language", secShort:"{n}s",
-      ob1TitleFn:"Double-tap Fn and talk.", ob1SubFn:"Press Fn once more to send.", ob3SubFn:"Double-tap Fn and say", ob1TitlePress:"Press ⌥ and talk.", ob1SubPress:"Press it again to send.", ob3SubPress:"Press ⌥ and say", guideMe:"Guide me", gStep:"Step {n}", gDone:"Done", gDoIt:"Do it for me", gStop:"Stop", gWhy:"Why?", gLooking:"Looking at your screen", gFinished:"All done", gClose:"Close", gSecret:"Only you type this. MicMic does not read it.", gStopped:"Guide stopped"},
+      ob1TitleFn:"Double-tap Fn and talk.", ob1SubFn:"Press Fn once more to send.", ob3SubFn:"Double-tap Fn and say", ob1TitlePress:"Press ⌥ and talk.", ob1SubPress:"Press it again to send.", ob3SubPress:"Press ⌥ and say", obLangPick:"Choose the language you'll speak.", obAsrDownloading:"Better recognition: downloading {pct}%", obAsrReady:"Better recognition is on", obAsrFailed:"Couldn't download it. MicMic uses the built-in recognition.", sAsr:"Better recognition", sAsrDownload:"Download ({size})", sAsrProgress:"Downloading {pct}%", sAsrBuiltIn:"Built in for this language", sAsrRetry:"Try again", guideMe:"Guide me", gStep:"Step {n}", gDone:"Done", gDoIt:"Do it for me", gStop:"Stop", gWhy:"Why?", gLooking:"Looking at your screen", gFinished:"All done", gClose:"Close", gSecret:"Only you type this. MicMic does not read it.", gStopped:"Guide stopped"},
   ar:{
       settings:"الإعدادات", sHotkey:"اختصار لوحة المفاتيح", sHotkeyHint:"اضغط مطولاً واحكِ، واترك المفتاح للإرسال. أو نقرة للبدء ونقرة ثانية للإرسال. للتغيير: اضغط الزر ثم تركيبة مفاتيح أو مفتاح يمين واحد. Esc للإلغاء.", sRightCmd:"⌘ اليمين", sRightOpt:"⌥ اليمين", sRightCtrl:"⌃ اليمين", sRightShift:"⇧ اليمين", sNotSaved:"ما قدرت احفظ هاد", sFnTwice:"Fn مرتين", sTap:"نقرة", sFn:"نقرة مزدوجة على Fn", sPressNow:"بانتظار تركيبة مفاتيح…", sStart:"كيف يبدأ", sPush:"ضغطة", sWake:"كلمة تنبيه", sAlways:"يستمع دائماً", sDisplay:"شو بيظهر لما تحكي", sSend:"ابعت رسائل عني", sOn:"نعم", sOff:"لا", hSend:"كل رسالة بتنقرا قبل ما تنبعت، وإذا قلت لأ بتوقف.", sDispPanel:"نافذة كاملة", sDispBar:"شريط صغير", sDispNone:"ولا شي", hDisplay:"بدون شي عالشاشة، MicMic بيعمل الشغلة وبيقول بصوت عالي شو عمل.", sLogin:"الفتح عند تسجيل الدخول", hLogin:"بيفتح تلقائياً لما تسجل دخول عالماك.", sWords:"كلمات التنبيه", sLang:"لغة الكلام", sListen:"مدة الاستماع", sSeconds:"ثانية", sSaved:"تم الحفظ", sDone:"تم", sAccount:"الحساب", aFree:"مجاني", aPro:"Pro", aUsage:"{n} من {m} طلب اليوم", aUsageTotal:"{n} من {m} طلب مجاني للتجربة", aUpgrade:"الترقية إلى Pro", aManage:"إدارة الاشتراك", aOwnKey:"تستخدم مفتاحك الخاص", aOffline:"لا يوجد اتصال الآن، سأحاول مرة أخرى قريباً", aSetup:"جارٍ إعداد الحساب…", aTooMany:"هذا الحساب فيه أجهزة كثيرة أصلاً", aPayOff:"الدفع غير متاح الآن، حاول لاحقاً", aOpenFail:"لم أتمكن من فتح الصفحة، حاول مرة أخرى",
      typehere:"أو اكتب هنا", newchat:"محادثة جديدة", fresh:"منبدأ من جديد", youSaid:"طلبت", ready:"أستمع", think:"لحظة", working:"عم أشتغل عليها", acting:"حالاً", off:"المس للتحدث",
@@ -1127,7 +1133,7 @@ const COPY = {
       ob3Title:"جرّبه.", ob3Sub:"اضغط ⌥ مطولاً وقل", ob3Phrase:"كم الساعة؟", obWaiting:"بانتظارك",
       obNoKey:"⌥ لسا ما اشتغل؟ اضغط على الدائرة.", obSetTitle:"كل شي جاهز.", obSetSub:"MicMic سمعك.", obListen:"ابدأ الاستماع",
       axNote:"لازم تفعّل إمكانية الوصول حتى يشغّل {key} MicMic.", axOpen:"فتح إعدادات إمكانية الوصول", send:"إرسال", language:"اللغة", secShort:"{n} ث",
-      ob1TitleFn:"اضغط Fn مرتين واحكِ.", ob1SubFn:"ضغطة كمان على Fn للإرسال.", ob3SubFn:"اضغط Fn مرتين وقل", ob1TitlePress:"اضغط ⌥ واحكِ.", ob1SubPress:"اضغط مرة ثانية للإرسال.", ob3SubPress:"اضغط ⌥ وقل", guideMe:"أرشدني خطوة بخطوة", gStep:"الخطوة {n}", gDone:"تمّ", gDoIt:"نفّذها عني", gStop:"إيقاف", gWhy:"لماذا؟", gLooking:"أنظر إلى الشاشة", gFinished:"انتهينا", gClose:"إغلاق", gSecret:"هذا تكتبه بنفسك. MicMic لا يقرؤه.", gStopped:"توقّف الإرشاد"},
+      ob1TitleFn:"اضغط Fn مرتين واحكِ.", ob1SubFn:"ضغطة كمان على Fn للإرسال.", ob3SubFn:"اضغط Fn مرتين وقل", ob1TitlePress:"اضغط ⌥ واحكِ.", ob1SubPress:"اضغط مرة ثانية للإرسال.", ob3SubPress:"اضغط ⌥ وقل", obLangPick:"اختيار لغة الحديث.", obAsrDownloading:"التعرف المحسّن: جارٍ التنزيل {pct}%", obAsrReady:"التعرف المحسّن مفعّل", obAsrFailed:"ما قدرت أنزّله. MicMic بتستخدم التعرف المدمج.", sAsr:"التعرف المحسّن", sAsrDownload:"تنزيل ({size})", sAsrProgress:"جارٍ التنزيل {pct}%", sAsrBuiltIn:"مدمج لهذه اللغة", sAsrRetry:"إعادة المحاولة", guideMe:"أرشدني خطوة بخطوة", gStep:"الخطوة {n}", gDone:"تمّ", gDoIt:"نفّذها عني", gStop:"إيقاف", gWhy:"لماذا؟", gLooking:"أنظر إلى الشاشة", gFinished:"انتهينا", gClose:"إغلاق", gSecret:"هذا تكتبه بنفسك. MicMic لا يقرؤه.", gStopped:"توقّف الإرشاد"},
   ru:{
       settings:"Настройки", sHotkey:"Сочетание клавиш", sHotkeyHint:"Удерживайте клавишу и говорите, отпустите, чтобы отправить. Или нажмите один раз, чтобы начать, и ещё раз, чтобы отправить. Чтобы сменить: нажмите кнопку, затем сочетание или правую клавишу. Esc отменяет.", sRightCmd:"Правый ⌘", sRightOpt:"Правый ⌥", sRightCtrl:"Правый ⌃", sRightShift:"Правый ⇧", sNotSaved:"Не удалось сохранить", sFnTwice:"Fn дважды", sTap:"нажатие", sFn:"двойное нажатие Fn / Globe", sPressNow:"ждём сочетание клавиш…", sStart:"Как начинать", sPush:"нажатие", sWake:"слово-активатор", sAlways:"всегда слушает", sDisplay:"Что показывать, когда вы говорите", sSend:"Отправлять сообщения за меня", sOn:"да", sOff:"нет", hSend:"Каждое сообщение зачитывается перед отправкой, и «нет» его останавливает.", sDispPanel:"всё окно", sDispBar:"узкая полоса", sDispNone:"ничего", hDisplay:"Без окна MicMic просто делает и вслух говорит, что сделал.", sLogin:"Запуск при входе в систему", hLogin:"Запускается автоматически при входе в Mac.", sWords:"Слова-активаторы", sLang:"Язык речи", sListen:"Сколько слушать", sSeconds:"секунд", sSaved:"сохранено", sDone:"Готово", sAccount:"Аккаунт", aFree:"Бесплатно", aPro:"Pro", aUsage:"{n} из {m} запросов сегодня", aUsageTotal:"{n} из {m} бесплатных запросов", aUpgrade:"Перейти на Pro", aManage:"Управлять подпиской", aOwnKey:"Используется ваш собственный ключ", aOffline:"Нет связи, попробую ещё раз чуть позже", aSetup:"Настраиваю аккаунт…", aTooMany:"На этом аккаунте уже слишком много устройств", aPayOff:"Оплата сейчас недоступна, попробуйте позже", aOpenFail:"Не удалось открыть страницу, попробуйте ещё раз",
      typehere:"или просто напишите здесь", newchat:"новый разговор", fresh:"начинаем заново", youSaid:"вы просили", ready:"слушаю", think:"секунду", working:"Работаю над этим", acting:"сейчас", off:"нажмите, чтобы говорить",
@@ -1149,7 +1155,7 @@ const COPY = {
       ob3Title:"Попробуйте.", ob3Sub:"Удерживайте ⌥ и скажите", ob3Phrase:"Который час?", obWaiting:"Жду вас",
       obNoKey:"⌥ пока не работает? Нажмите на круг.", obSetTitle:"Всё готово.", obSetSub:"Получилось.", obListen:"Начать слушать",
       axNote:"Чтобы {key} запускал MicMic, включите универсальный доступ.", axOpen:"Открыть универсальный доступ", send:"Отправить", language:"Язык", secShort:"{n} с",
-      ob1TitleFn:"Дважды нажмите Fn и говорите.", ob1SubFn:"Нажмите Fn ещё раз, чтобы отправить.", ob3SubFn:"Дважды нажмите Fn и скажите", ob1TitlePress:"Нажмите ⌥ и говорите.", ob1SubPress:"Нажмите ещё раз, чтобы отправить.", ob3SubPress:"Нажмите ⌥ и скажите", guideMe:"Покажи по шагам", gStep:"Шаг {n}", gDone:"Готово", gDoIt:"Сделай за меня", gStop:"Стоп", gWhy:"Зачем?", gLooking:"Смотрю на экран", gFinished:"Всё готово", gClose:"Закрыть", gSecret:"Это вводите только вы. MicMic это не читает.", gStopped:"Подсказки остановлены"},
+      ob1TitleFn:"Дважды нажмите Fn и говорите.", ob1SubFn:"Нажмите Fn ещё раз, чтобы отправить.", ob3SubFn:"Дважды нажмите Fn и скажите", ob1TitlePress:"Нажмите ⌥ и говорите.", ob1SubPress:"Нажмите ещё раз, чтобы отправить.", ob3SubPress:"Нажмите ⌥ и скажите", obLangPick:"Выберите язык общения.", obAsrDownloading:"Улучшенное распознавание: загрузка {pct}%", obAsrReady:"Улучшенное распознавание включено", obAsrFailed:"Не удалось загрузить. MicMic использует встроенное распознавание.", sAsr:"Улучшенное распознавание", sAsrDownload:"Скачать ({size})", sAsrProgress:"Загрузка {pct}%", sAsrBuiltIn:"Встроено для этого языка", sAsrRetry:"Повторить попытку", guideMe:"Покажи по шагам", gStep:"Шаг {n}", gDone:"Готово", gDoIt:"Сделай за меня", gStop:"Стоп", gWhy:"Зачем?", gLooking:"Смотрю на экран", gFinished:"Всё готово", gClose:"Закрыть", gSecret:"Это вводите только вы. MicMic это не читает.", gStopped:"Подсказки остановлены"},
 };
 // language_hint is one of four codes everywhere else in this system (router.py's own
 // taxonomy); collapsing ar/ru to "en" here was why an Arabic or Russian speaker saw
@@ -2106,6 +2112,7 @@ function paintSettingsCopy(){
   $("wAlways").textContent  = t("sAlways");
   $("lWords").textContent   = t("sWords");
   $("lLang").textContent    = t("sLang");
+  $("lAsr").textContent     = t("sAsr");
   $("lListen").textContent  = t("sListen");
   $("lSeconds").textContent = t("sSeconds");
   $("savedw").textContent   = t("sSaved");
@@ -2114,10 +2121,66 @@ function paintSettingsCopy(){
   $("wRightOpt").textContent = t("sRightOpt");
   $("wFnTwice").textContent  = t("sFnTwice");
   paintAccount();
+  paintAsrRow();
   if(!recordingHotkey) paintHotkey(SETTINGS.hotkey || "right-option");
 }
 
 let SETTINGS = {};
+
+/* ---------------------------------------------------------------- better recognition
+   The local model for her speech language (savta/asr_models.py), same /api/asr status
+   the onboarding polls. One row: a Download button, a Downloading line with Cancel, a
+   plain "On", a "built in" hint for the languages Apple already covers well, or the
+   failure text with a way to try again. */
+let ASR = null, asrSettingsTimer = null;
+
+function paintAsrRow(){
+  if(!$("lAsr")) return;
+  const s = ASR || {};
+  const hint = $("hAsr"), btn = $("asrBtn");
+  if(s.state === "downloading"){
+    const pct = s.total ? Math.floor((s.done || 0) / s.total * 100) : 0;
+    hint.textContent = t("sAsrProgress").replace("{pct}", pct); hint.hidden = false;
+    btn.textContent = t("cancelBtn"); btn.dataset.action = "cancel"; btn.hidden = false;
+  } else if(s.state === "ready"){
+    hint.textContent = t("obOn"); hint.hidden = false;
+    btn.hidden = true;
+  } else if(s.state === "apple"){
+    hint.textContent = t("sAsrBuiltIn"); hint.hidden = false;
+    btn.hidden = true;
+  } else if(s.state === "failed"){
+    hint.textContent = t("obAsrFailed"); hint.hidden = false;
+    btn.textContent = t("sAsrRetry"); btn.dataset.action = "install"; btn.hidden = false;
+  } else {                                       // "none": nothing downloaded yet
+    hint.hidden = true;
+    const mb = s.total ? Math.round(s.total / 1e6) : 0;
+    btn.textContent = t("sAsrDownload").replace("{size}", mb + " MB");
+    btn.dataset.action = "install"; btn.hidden = false;
+  }
+}
+
+async function pollAsrSettings(){
+  try{
+    const r = await fetch("/api/asr", {cache:"no-store"});
+    if(r.ok) ASR = await r.json();
+  }catch(_){}
+  paintAsrRow();
+  clearTimeout(asrSettingsTimer); asrSettingsTimer = null;
+  if(ASR && ASR.state === "downloading" && $("settings").classList.contains("on"))
+    asrSettingsTimer = setTimeout(pollAsrSettings, 1000);
+}
+
+$("asrBtn").addEventListener("click", async ()=>{
+  const btn = $("asrBtn"), action = btn.dataset.action;
+  btn.disabled = true;
+  try{
+    const r = await fetch("/api/asr", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({action: action === "cancel" ? "cancel" : "install"})});
+    ASR = await r.json();
+  }catch(_){}
+  btn.disabled = false;
+  pollAsrSettings();
+});
 
 /* ---------------------------------------------------------------- account
    The plan, today's usage and the way to Pro, from /api/account (which never carries
@@ -2279,11 +2342,13 @@ async function openSettings(){
   paintSettingsValues();
   $("settings").classList.add("on");
   loadAccount(false);
+  pollAsrSettings();
 }
 function closeSettings(){
   recordingHotkey = false;
   $("hotkeybtn").classList.remove("recording");
   $("settings").classList.remove("on");
+  clearTimeout(asrSettingsTimer); asrSettingsTimer = null;
   paintHotkey(SETTINGS.hotkey || "right-option");
 }
 
@@ -2349,11 +2414,13 @@ $("segHotkey").addEventListener("click", e=>{
   recordingHotkey = false; $("hotkeybtn").classList.remove("recording");
   saveSettings({hotkey: b.dataset.v});
 });
-$("segLang").addEventListener("click", e=>{
+$("segLang").addEventListener("click", async e=>{
   const b = e.target.closest("button"); if(!b) return;
   e.stopPropagation();
   applyLanguage(resolveLang(b.dataset.v));
-  saveSettings({language_hint: b.dataset.v});
+  await saveSettings({language_hint: b.dataset.v});
+  // A different language may have a different local model, or none at all.
+  pollAsrSettings();
 });
 $("listenRange").addEventListener("input", e=>{
   $("listenVal").textContent = e.target.value;

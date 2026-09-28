@@ -10,6 +10,7 @@ from .actions import mac
 from . import account
 from . import onboarding_api
 from . import login_item
+from . import asr_models
 from . import profile as _prof
 
 WEB = Path(__file__).resolve().parent / "web"
@@ -282,14 +283,16 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, json.dumps(GUIDE.state(), ensure_ascii=False).encode())
         if self.path.startswith(("/api/onboarding", "/api/permissions")):
             return onboarding_api.get(self)
+        if self.path.startswith("/api/asr"):
+            return self._send(200, json.dumps(
+                asr_models.status(speech_language())).encode())
         if self.path.startswith("/api/config"):
             cfg = load_config()
             return self._send(200, json.dumps({
                 "language_hint": speech_language(cfg),
                 # The language the setup conversation heard her speak. Not the
-                # recogniser's language (Settings alone decides that), but the second
-                # language a turn is also read in beside English (native/listener.py
-                # _make_recognizers), so a Russian speaker is still read in Russian.
+                # recogniser's language: Settings (language_hint) alone decides that,
+                # and the listener listens in that one language only.
                 "language": _prof.load().get("language", ""),
                 "activation": cfg.get("activation", "push"),
                 "wake_words": cfg.get("wake_words", ["savta"]),
@@ -322,6 +325,10 @@ class H(BaseHTTPRequestHandler):
                 # cached, never a wait: the first read copies WhatsApp's data (2.5 s).
                 **({"contacts": get_contacts(wait=0.0)}
                    if "contacts=1" in (self.path or "") else {}),
+                # Better recognition for her language (savta/asr_models.py): the
+                # listener loads the local model once "state" is "ready"; the page
+                # shows the download. Added field; a client that ignores it is on Apple.
+                "asr": asr_models.status(speech_language(cfg)),
             }, ensure_ascii=False).encode())
         if self.path.startswith("/api/memory"):
             from . import memory as _mem
@@ -507,6 +514,17 @@ class H(BaseHTTPRequestHandler):
     def _post(self):
         if self.path.startswith("/api/guide/"):
             return self._guide()
+        if self.path.startswith("/api/asr"):
+            # {"action": "install"} downloads her language's model (and its runtime);
+            # {"action": "cancel"} stops it, keeping what arrived for a resume.
+            try:
+                payload = json.loads(self._drain() or b"{}")
+            except Exception:  # noqa: BLE001
+                payload = {}
+            if payload.get("action") == "cancel":
+                asr_models.cancel()
+                return self._send(200, json.dumps(asr_models.status(speech_language())).encode())
+            return self._send(200, json.dumps(asr_models.install(speech_language())).encode())
         if self.path.startswith(("/api/onboarding", "/api/permissions")):
             return onboarding_api.post(self, self._drain())
         if self.path.startswith("/api/upgrade"):

@@ -52,6 +52,27 @@ GUIDE_QUESTIONS = {
             "stop": "She wants the guiding to end: stop, enough, stop guiding, I will do it myself. די, עצרי, תפסיקי. وقّفي، خلص. хватит, стоп."}},
 }
 
+# Asked only when her words may describe a song instead of naming it and a song is
+# plausible (actions/music.describes_a_song). The owner's session (1.1.0): "please
+# change to our latest world cup song" searched "shakira" and played another of her
+# songs. A song she describes is identified first (router._identify_song).
+SONG_DESC_QUESTIONS = {
+    "describes_song": {"type": "noul",
+        "instructions": "She wants one particular song but describes it instead of saying its title: by when it came out (the newest, the latest, the first), by what it was made for or is known from (a film, a series, the World Cup, Eurovision, weddings), or by what it is about or how it goes",
+        "criteria": {"true": "Play Shakira's newest song. Put on the song from Titanic. Change to our latest World Cup song. The one they play at weddings. The theme from Friends. השיר החדש של עומר אדם. أغنية كأس العالم الأخيرة. песню из Титаника.",
+                     "false": "She says the song's title (play Waka Waka, put on 1969, the song Hallelujah), names only a singer or a band (play Bad Bunny, put on Shakira), asks for a kind of music (something happy, older songs, a man singing), asks for another one, something else or the next one, or is not asking for a song at all."}},
+}
+
+# Asked only when her words may be pointing at the screen instead of naming a song
+# (actions/music.mentions_screen_song). The owner's session: "play the song i see on
+# my screen" searched the literal words "see screen" and played the wrong thing.
+SCREEN_SONG_QUESTIONS = {
+    "screen_song": {"type": "noul",
+        "instructions": "She wants a particular song to play, but instead of naming it (no title, no artist of her own) she is pointing at her screen for it: this one, this song, that one, the song she sees on her screen, telling MicMic to look at the screen for the song she wants.",
+        "criteria": {"true": "Play this one. Play this song. Play the song I see on my screen. No, look at my screen, you will see the song I want to play. תשימי את השיר הזה. תסתכל במסך, שם השיר שאני רוצה. شغل هاي الأغنية يلي عالشاشة. включи эту песню, она на экране.",
+                     "false": "She names a song or an artist of her own (play Waka Waka, put on Bad Bunny), asks for a kind of music, rejects what is playing (no, not this one, something else) with nothing about a screen, or is not asking for a song at all."}},
+}
+
 INTENTS = {
     "watch":    "Watch something on screen: a film, a show, a video, a clip, a match, the television news.",
     "music":    "Listen to music or a song or a singer.",
@@ -81,7 +102,9 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
                playing: str = "", likes: dict | None = None,
                spans: dict[str, str | tuple[str, str | None]] | None = None,
                draft: dict | None = None, standing: dict | None = None,
-               guide: dict | None = None, named: dict | None = None) -> dict:
+               guide: dict | None = None, named: dict | None = None,
+               follow: dict | None = None,
+               song_desc: bool = False, screen_song: bool = False) -> dict:
     """One request. Everything the decision tree could need.
 
     `standing` is savta.prefs.questions(): the preference questions when her words
@@ -108,7 +131,21 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
     exactly as pick_span returns.
 
     `guide` is the step-by-step guide running right now ({"goal", "current_step"}),
-    or None. While there is one, guide_command rides along, like the draft questions."""
+    or None. While there is one, guide_command rides along, like the draft questions.
+
+    `follow` is savta.followup.question(): asked only when MicMic has just done
+    something she can change (a reminder, a calendar event, what is playing, an answer
+    about her screen) AND her words hold a modifier word (instead, move, pause,
+    shorter, cancel...). One choice rides along, whose options code enumerated from
+    what was done, and what was done goes into the state. Without it nothing is added.
+
+    `song_desc`: her words may describe a song rather than name it
+    (actions/music.describes_a_song), so describes_song rides along. Otherwise it is
+    not asked and the request is exactly what it was.
+
+    `screen_song`: her words may be pointing at the screen instead of naming a song
+    (actions/music.mentions_screen_song), so screen_song rides along. Otherwise not
+    asked, and the request is exactly what it was."""
     contact_opts = {c: None for c in contacts[:MAX_OPTIONS - 1]}
     contact_opts["nobody"] = "She did not name a person."
 
@@ -386,6 +423,12 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
         qs.update(GUIDE_QUESTIONS)
     if named:
         qs.update(named)
+    if follow:
+        qs.update(follow["questions"])
+    if song_desc:
+        qs.update(SONG_DESC_QUESTIONS)
+    if screen_song:
+        qs.update(SCREEN_SONG_QUESTIONS)
     cands = span_candidates(utterance) if spans else []
     for name, spec in (spans or {}).items():
         if not cands:
@@ -425,6 +468,8 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
     if guide:
         state["guide_in_progress"] = {"goal": guide.get("goal") or "",
                                       "current_step": guide.get("current_step") or ""}
+    if follow:
+        state["last_thing_micmic_did"] = follow["state"]
     state["utterance"] = utterance
     a = j.ask(state, qs)
 
@@ -484,6 +529,10 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
         "named_app_only_look": (noul(a, "named_app_only_look")
                                 if named and "named_app_only_look" in a else 0.0),
         "standing": {k: v for k, v in a.items() if k.startswith("pref_")},
+        "describes_song": (noul(a, "describes_song")
+                           if song_desc and "describes_song" in a else 0.0),
+        "screen_song": (noul(a, "screen_song")
+                       if screen_song and "screen_song" in a else 0.0),
         "guide_command": choice(a, "guide_command")[0] if guide and "guide_command" in a else "none",
         "guide_command_confidence": (choice(a, "guide_command")[1]
                                      if guide and "guide_command" in a else 0.0),

@@ -74,6 +74,9 @@ class Server:
         if _port_open():
             raise SystemExit(f"something is already listening on {PORT}; stop it first")
         self.state = Path(tempfile.mkdtemp(prefix="ob-test-state-"))
+        # Never the owner's real asr dir, and never a real model download: the
+        # downloader's seam (MICMIC_ASR_NO_DOWNLOAD) holds every job at 0 bytes.
+        self.asr = Path(tempfile.mkdtemp(prefix="ob-test-asr-"))
         # Always write one, even for "a new Mac": with no profile.json in the state
         # dir, the app copies in the checkout's own (legacy migration in paths.state),
         # and a developer's real, finished profile made every Mac look set up.
@@ -83,6 +86,7 @@ class Server:
 
     def __enter__(self):
         env = dict(os.environ, MICMIC_PORT=str(PORT), MICMIC_STATE_DIR=str(self.state),
+                   MICMIC_ASR_DIR=str(self.asr), MICMIC_ASR_NO_DOWNLOAD="1",
                    MICMIC_DRY_OPEN="1", **OFFLINE)
         env.pop("MICMIC_ALLOW_SEND", None)
         env.pop("MICMIC_ALLOW_CALL", None)
@@ -97,6 +101,11 @@ class Server:
         raise SystemExit(f"server on {PORT} did not start")
 
     def __exit__(self, *exc):
+        # savta/asr_models.py leaves this tripwire when anything tried a real model
+        # download (733 MB) under a test state dir.
+        trip = self.asr / "REAL_DOWNLOAD_IN_TEST"
+        if trip.exists():
+            check("no real model download was started", False, trip.read_text())
         # Every server here is keyless unless MICMIC_LIVE=1: its own count of paid Jev
         # calls says so before it goes.
         if not LIVE:
@@ -293,7 +302,16 @@ def test_skip_persists(srv, browser):
     check("the page underneath is hidden while it is up",
           page.evaluate("getComputedStyle(document.querySelector('.stage')).visibility") == "hidden")
     page.keyboard.press("Escape")
-    page.wait_for_timeout(700)
+    # Polled, not a fixed 700 ms: at load averages of 60 the closing animation and the
+    # skip's POST took longer, and the check failed while the skip itself landed.
+    for _ in range(40):
+        if not shown(page) and not page.query_selector(".ob"):
+            break
+        page.wait_for_timeout(100)
+    for _ in range(30):
+        if call("GET", "/api/onboarding")[1].get("onboarded") is True:
+            break
+        page.wait_for_timeout(100)
     check("Esc skips it and it is gone", not shown(page) and not page.query_selector(".ob"))
     code, d = call("GET", "/api/onboarding")
     check("skip is saved on the server", d["onboarded"] is True and d["show"] is False, d)
@@ -321,6 +339,117 @@ def test_only_first_run(browser):
         check("set up already: no onboarding in the panel", not shown(page))
         check("set up already: its script is not even fetched",
               not any("/onboarding/" in u for u in page.__requests), page.__requests)
+        ctx.close()
+
+
+def test_onboarding_language_choice(browser):
+    """Step 1's language radiogroup: all four, keyboard- and click-reachable, and
+    picking one is what she is then set up to listen and answer in."""
+    with Server():
+        ctx, page = new_page(browser)
+        settle(page)
+        opts = page.evaluate(
+            "[...document.querySelectorAll('.ob-lopt')].map(b => b.dataset.code)")
+        check("step 1 shows all four languages, in the page's own order",
+              opts == ["he", "en", "ar", "ru"], opts)
+        check("it is a radiogroup", page.get_attribute(".ob-lopts", "role") == "radiogroup")
+        check("English (the default) starts checked", page.get_attribute(
+            '.ob-lopt[data-code="en"]', "aria-checked") == "true")
+        page.click('.ob-lopt[data-code="he"]')
+        # The POST is fire-and-forget from the page's side, so poll rather than
+        # guess how long the round trip takes under load.
+        hint = None
+        for _ in range(30):
+            hint = call("GET", "/api/config")[1].get("language_hint")
+            if hint == "he-IL":
+                break
+            page.wait_for_timeout(100)
+        check("choosing Hebrew is what she is set up to listen and answer in",
+              hint == "he-IL", hint)
+        check("and the page repaints in Hebrew at once",
+              page.evaluate("document.documentElement.lang") == "he"
+              and page.evaluate("document.documentElement.dir") == "rtl")
+        check("Hebrew is now the one checked", page.get_attribute(
+            '.ob-lopt[data-code="he"]', "aria-checked") == "true")
+        check("no page errors", not page.__errors, page.__errors)
+        ctx.close()
+
+
+def test_onboarding_downloads_the_english_model(browser):
+    """The owner's decision: English's local model downloads on its own from the
+    onboarding (Apple hears every turn meanwhile). Here the downloader's seam stands in
+    for the network: it must be CALLED for English, and never for Hebrew, whose
+    recogniser is Apple's own ("Built in")."""
+    with Server() as srv:
+        ctx, page = new_page(browser)
+        settle(page)
+        seam = srv.asr / "DOWNLOAD_REQUESTED"
+        check("nothing is requested before she has settled on a language", not seam.exists())
+        page.click('.ob-next[data-go="next"]')      # English, as preselected
+        st = {}
+        for _ in range(40):
+            st = call("GET", "/api/asr")[1]
+            if st.get("state") == "downloading" and seam.exists():
+                break
+            page.wait_for_timeout(100)
+        check("leaving step 1 in English requests the English model",
+              st.get("state") == "downloading" and seam.exists()
+              and str(st.get("engine", "")).startswith("parakeet-unified-en"),
+              (st, seam.exists()))
+        line = ""
+        for _ in range(30):
+            line = page.evaluate("[...document.querySelectorAll('.ob-asr')].map(e => e.textContent).join('|')")
+            if "0%" in line:
+                break
+            page.wait_for_timeout(100)
+        check("the onboarding shows the download's progress", "0%" in line, line)
+        check("no page errors", not page.__errors, page.__errors)
+        ctx.close()
+    with Server() as srv:
+        ctx, page = new_page(browser)
+        settle(page)
+        page.click('.ob-lopt[data-code="he"]')
+        page.wait_for_timeout(300)
+        page.click('.ob-next[data-go="next"]')
+        hint = state = None
+        for _ in range(30):
+            hint = call("GET", "/api/config")[1].get("language_hint")
+            state = call("GET", "/api/asr")[1].get("state")
+            if hint == "he-IL":
+                break
+            page.wait_for_timeout(100)
+        page.wait_for_timeout(500)
+        check("Hebrew: Apple's recogniser, nothing to download",
+              hint == "he-IL" and state == "apple", (hint, state))
+        check("and the downloader was never called for Hebrew",
+              not (srv.asr / "DOWNLOAD_REQUESTED").exists())
+        ctx.close()
+
+
+def test_settings_asr_row(browser):
+    """QA: the Settings row for the local recogniser (right after Speech language)
+    shows what /api/asr says, per language."""
+    with Server(profile={"setup_complete": True, "step": "done"},
+                settings={"language_hint": "he-IL"}):
+        ctx, page = new_page(browser, lang="he")
+        page.goto(BASE + "/")
+        page.wait_for_function("document.documentElement.lang.length === 2")
+        page.wait_for_timeout(700)
+        page.click("#gear")
+        page.wait_for_timeout(300)
+        check("Hebrew: Apple's recogniser, a hint and no button",
+              not page.is_hidden("#hAsr") and page.is_hidden("#asrBtn"))
+        ctx.close()
+    with Server(profile={"setup_complete": True, "step": "done"},
+                settings={"language_hint": "en-US"}):
+        ctx, page = new_page(browser)
+        page.goto(BASE + "/")
+        page.wait_for_function("document.documentElement.lang.length === 2")
+        page.wait_for_timeout(700)
+        page.click("#gear")
+        page.wait_for_timeout(300)
+        check("English: a Download button naming the model's size",
+              "733 MB" in page.inner_text("#asrBtn") and page.is_hidden("#hAsr"))
         ctx.close()
 
 
@@ -553,7 +682,8 @@ def main():
                 test_onboarded_ends_voice_setup()
             except Exception as e:  # noqa: BLE001
                 check("test_onboarded_ends_voice_setup ran to the end", False, repr(e)[:400])
-            for t in (test_only_first_run, test_speech_language_default,
+            for t in (test_only_first_run, test_onboarding_language_choice,
+                      test_onboarding_downloads_the_english_model, test_settings_asr_row, test_speech_language_default,
                       test_languages_and_motion):
                 print(f"\n-- {t.__name__}")
                 try:

@@ -102,11 +102,3 @@ canon-diff on one of the still-missing keys the next time this is picked up.
 For everyday work this already does what it needs to: the majority of the suite runs
 at $0 with 0 live calls, and `MICMIC_REPLAY_ALLOW_LIVE=1` is a cheap top-up for the
 rest until the gap above is closed.
-
-
-## Recordings are local
-
-`tests/recordings/` is not in this repository. A recording is made on your own Mac
-(`MICMIC_REPLAY=record`) and can contain names from your address book, so it stays on
-your machine. Without one, run the suite with `MICMIC_REPLAY=off` (live) or
-`MICMIC_REPLAY_ALLOW_LIVE=1` to record as you go.

@@ -6,17 +6,24 @@ each app allows, checked on the owner's Mac (macOS 15.6, Apple Music subscriber,
 
   * A song in her library is played directly: `play` of the library track, found by
     its persistent ID, and the player state is read back before she is told it is
-    playing. Not confirmed live on the owner's Mac: Music had an "Open Stream" dialog
-    open (not ours, left alone), `play` returned no error and the state stayed
-    "stopped", so what she would have heard is "Music would not start it".
+    playing. Checked live 2026-09-27 (two quiet checks, volume 5, paused within a
+    second, state put back): a streamed Apple Music track in the library that was not
+    loaded started 0.35 s after `play`. In the owner's session it did not, three times
+    running, with no error: Music had had an "Open Stream" dialog up earlier that day,
+    and a track asked for then became Music's current track later, paused. So the
+    state is read for up to three seconds, a track that loaded but sits paused is
+    asked once more, and when it still will not start, a dialog in Music is looked for
+    and named to her ("close it and ask me again") instead of a bare failure.
   * A song that is only in the Apple Music catalog: Music's AppleScript can only play
     what is in the library, and starting a catalog song from outside the app needs
     MusicKit with a developer token. Opening its link puts the Music app on that song
-    (its album page, the song marked); pressing play there is hers, and that is what
-    she is told, rather than "playing" for something that is not. Pressing Play for
-    her through Accessibility was not tried live (Music sat on another Space with a
-    dialog up), and the album page's own Play button starts the album's first track,
-    which is not always this song.
+    (its album page, the song marked). On that page the song's own row carries a play
+    toggle (AXCheckBox, description "play") inside a group whose AXIdentifier holds
+    "AlbumTrackLockup[id=track-lockup-<album>-<track id>": pressing it through
+    Accessibility started exactly that song in 0.3 s (checked live 2026-09-27). The
+    album header's Play button is never pressed: it starts the album's first track.
+    The player is read back after the press; only a song that is really playing is
+    called playing, anything else is "press play", as before.
   * Spotify's search needs an API key, so without one Spotify is opened on a search
     for the exact song (title and artist, from the Apple catalog) and she presses play.
     Without the Spotify app, its web player (open.spotify.com) is opened on the same
@@ -32,7 +39,7 @@ Every AppleScript goes through mac._osa, looked up when called, so a test that s
 it stubs this too.
 """
 from __future__ import annotations
-import json, os, plistlib, re, subprocess, urllib.parse, urllib.request
+import json, os, plistlib, re, subprocess, time, unicodedata, urllib.parse, urllib.request
 from pathlib import Path
 
 from . import mac
@@ -126,6 +133,67 @@ def _uniq(items: list[str]) -> list[str]:
     return out
 
 
+# A song she describes instead of naming: "our latest World Cup song", "the song from
+# Titanic", "the one they play at weddings". The owner's session (1.1.0): the search
+# kept "shakira" and played "Whenever, Wherever". Only a hint that the question is
+# worth asking (brain.SONG_DESC_QUESTIONS); the answer is Jev's. Two parts, both
+# needed, so an ordinary request is sent exactly as before: words that describe, and
+# a sign that a song is plausible at all (a word for songs, a player, or a song on).
+_DESCRIBING = re.compile(
+    r"\b(?:latest|newest|recent|new\s+(?:song|single|hit|one)|last\s+(?:song|single|hit)|"
+    r"first\s+(?:song|single|hit)|from\s+the\s+(?:movie|film|show|series|musical|cartoon|ad|"
+    r"commercial|game)|song\s+(?:from|about|that|where|with|they|which|for|of\s+the)|"
+    r"the\s+one\s+(?:that|they|from|about|with|where|which)|that\s+song|theme|anthem|"
+    r"world\s*cup|mundial|eurovision|olympic\w*|wedding\w*|christmas|soundtrack|"
+    r"most\s+famous|best[-\s]known|biggest\s+hit|number\s+one)\b|"
+    r"החדש|החדשה|האחרון|האחרונה|מהסרט|מהסדרה|שיר\s+הנושא|הפתיח|המנון|המונדיאל|מונדיאל|"
+    r"גביע\s+העולם|אירוויזיון|אולימפיאד|בחתונות|חתונה|השיר\s+ש|השיר\s+על|השיר\s+מ|המפורסם|"
+    r"الجديدة|الجديد|الأخيرة|الاخيرة|من\s+فيلم|من\s+الفيلم|المسلسل|شارة|نشيد|كأس\s+العالم|"
+    r"المونديال|يوروفيجن|الأعراس|العرس|الأشهر|"
+    r"новую|новая|новой|последн\w*|из\s+фильма|из\s+сериала|саундтрек|гимн|"
+    r"чемпионат\w*\s+мира|евровидени\w*|олимпиад\w*|свадьб\w*|свадебн\w*|самую\s+известную",
+    re.I)
+_SONGISH = re.compile(
+    r"\b(?:songs?|singles?|tracks?|music|tunes?|hits?|anthem|theme|play|put\s+on|listen|hear)\b|"
+    r"שיר|שירים|תשים|תשימי|שים|שימי|תנגן|תנגני|מוזיקה|"
+    r"أغنية|اغنية|أغاني|اغاني|شغل|شغلي|شغّلي|موسيقى|"
+    r"песн\w*|включи\w*|музык\w*|трек\w*", re.I)
+
+
+def describes_a_song(utterance: str, song_on: bool = False) -> bool:
+    """Words that may describe a song rather than name it, where a song is plausible."""
+    u = utterance or ""
+    return bool(_DESCRIBING.search(u)) and bool(song_on or _SONGISH.search(u)
+                                                 or PLAYER_WORDS.search(u))
+
+
+# She points at the screen instead of naming a song: "play this one", "the song I
+# see on my screen", "look at my screen, you will see the song I want". The owner's
+# session: "play the song i see on my screen" searched the literal words "see
+# screen" and played "Screen" by twenty one pilots. Only a hint that the question
+# below is worth asking (router._screen_song_hint reads the real screen); the
+# answer is Jev's, since "this one" also means "not this one" (a rejection) and
+# "the next one" (another try), which are not about the screen at all.
+#
+# On its own this half is far too common in ordinary speech ("I see", "that one",
+# "look at") to gate a question on alone - paired with a song word or a song already
+# playing (same idiom as describes_a_song below) it stays rare.
+_SCREEN_REF = re.compile(
+    r"\bmy\s+screen\b|\bthe\s+screen\b|\bthis\s+one\b|\bthis\s+song\b|\bthat\s+one\b|"
+    r"\bthat\s+song\b|\bi\s+see\b|\byou\s+(?:will\s+)?see\b|\blook\s+at\b|"
+    r"במסך|על\s+המסך|השיר\s+הזה|האחד\s+הזה|תסתכל\w*\s+(?:ב|על\s+ה)?מסך|"
+    r"ع(?:ل[ىة]|الشاشة)|هاي\s+الأغنية|هالأغنية|هاد(?:\s+الشي)?|"
+    r"на\s+экране|эту?\s+песню|этот\s+вариант", re.I)
+
+
+def mentions_screen_song(utterance: str, song_on: bool = False) -> bool:
+    """A reference to the screen where a song is plausible: her words say something
+    (song, play, music...), a song is already playing, or a player was named."""
+    u = utterance or ""
+    return bool(_SCREEN_REF.search(u)) and bool(song_on or _SONGISH.search(u)
+                                                or PLAYER_WORDS.search(u))
+
+
 # ---------------------------------------------------------------- the catalog
 
 def country() -> str:
@@ -158,17 +226,28 @@ def _fetch(url: str, timeout: float) -> dict:
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
+# The same search twice in one turn (a described song is checked in the catalog
+# before it is played) is asked of Apple once.
+_CACHE: dict[str, tuple[float, list[dict]]] = {}
+CACHE_S = 120.0
+
+
 def catalog(term: str, where: str | None = None, limit: int = 10,
             timeout: float = 4.0) -> list[dict] | None:
     """Songs in the Apple Music catalog. None when Apple could not be reached, which
     is a different thing to say from "no such song"."""
     q = urllib.parse.urlencode({"term": term, "entity": "song", "limit": limit,
                                 "country": (where or country()).upper()})
+    hit = _CACHE.get(q)
+    if hit and time.time() - hit[0] < CACHE_S:
+        return [dict(r) for r in hit[1]]
     try:
         data = _fetch(f"{SEARCH}?{q}", timeout)
     except Exception:  # noqa: BLE001
         return None
-    return parse_catalog(data)
+    rows = parse_catalog(data)
+    _CACHE[q] = (time.time(), rows)
+    return [dict(r) for r in rows]
 
 
 def parse_catalog(data: dict) -> list[dict]:
@@ -187,8 +266,238 @@ def parse_catalog(data: dict) -> list[dict]:
                     "title": r["trackName"], "artist": r.get("artistName", ""),
                     "album": r.get("collectionName", ""),
                     "year": str(r.get("releaseDate", ""))[:4],
+                    "date": str(r.get("releaseDate", ""))[:10],
+                    "artist_id": r.get("artistId"),
                     "url": r.get("trackViewUrl", ""), "art": r.get("artworkUrl100", ""),
                     "where": "catalog"})
+    return out
+
+
+LOOKUP = "https://itunes.apple.com/lookup"
+
+
+def recent_by(artist_id, where: str | None = None, limit: int = 50,
+              timeout: float = 4.0) -> list[dict]:
+    """An artist's songs, newest first, from Apple's own release dates (the lookup
+    API's sort=recent). DJ mixes and other artists' compilations are left out."""
+    q = urllib.parse.urlencode({"id": artist_id, "entity": "song", "limit": limit,
+                                "sort": "recent", "country": (where or country()).upper()})
+    hit = _CACHE.get(q)
+    if hit and time.time() - hit[0] < CACHE_S:
+        return [dict(r) for r in hit[1]]
+    try:
+        data = _fetch(f"{LOOKUP}?{q}", timeout)
+    except Exception:  # noqa: BLE001
+        return []
+    rows = [r for r in parse_catalog(data)
+            if not re.search(r"\(mixed\)|dj mix", f"{r['title']} {r['album']}", re.I)]
+    _CACHE[q] = (time.time(), rows)
+    return [dict(r) for r in rows]
+
+
+def artist_songs(artist_id, where: str | None = None, limit: int = 200,
+                 timeout: float = 5.0) -> list[dict]:
+    """As many of an artist's songs as one call reasonably holds, in Apple's own
+    order (not date-sorted, unlike recent_by: a misheard title can be an old song).
+    Used when her exact words find nothing and the artist is known (named, or the
+    one she was just listening to), so the real fix is matching what she said
+    against the real list, not asking Apple to guess again from the same words."""
+    if not artist_id:
+        return []
+    q = urllib.parse.urlencode({"id": artist_id, "entity": "song", "limit": limit,
+                                "country": (where or country()).upper()})
+    hit = _CACHE.get(q)
+    if hit and time.time() - hit[0] < CACHE_S:
+        return [dict(r) for r in hit[1]]
+    try:
+        data = _fetch(f"{LOOKUP}?{q}", timeout)
+    except Exception:  # noqa: BLE001
+        return []
+    rows = parse_catalog(data)
+    _CACHE[q] = (time.time(), rows)
+    return [dict(r) for r in rows]
+
+
+def find_artist_id(name: str, where: str | None = None) -> int | None:
+    """The catalog's artistId for a name, from one ordinary song search (Apple has
+    no plain name-to-id lookup without a developer token): the artist most of the
+    hits agree on."""
+    hits = catalog(name, where, limit=5) or []
+    ids = [r["artist_id"] for r in hits if r.get("artist_id")]
+    return max(set(ids), key=ids.count) if ids else None
+
+
+# ---------------------------------------------------------------- matching by sound
+# A title heard through a microphone and an accent: "nueva yella" for "NUEVAYoL",
+# "die die" for "Dai Dai", "where all" for whatever Bad Bunny song that was. Apple's
+# own search is a lexical/popularity match, not a phonetic one, and comes back empty
+# or wrong on these. Once an artist is known, matching her words against that
+# artist's real titles - by spelling AND by how they sound - finds the real song
+# without ever asking a model to invent one.
+_VOWELS = str.maketrans("", "", "aeiou")
+
+
+def _skeleton(s: str) -> str:
+    """Consonants only, doubled letters collapsed: a rough stand-in for how a word
+    sounds once the vowel it was actually said with is lost to a microphone and an
+    accent. "die" and "dai" both collapse to "d"; "nuevayella" and "nuevayol" both
+    collapse to "nvyl", one letter apart."""
+    out: list[str] = []
+    for c in _plain(s).replace(" ", "").translate(_VOWELS):
+        if not out or out[-1] != c:
+            out.append(c)
+    return "".join(out)
+
+
+def _edit_distance(a: str, b: str) -> int:
+    """Plain Levenshtein distance. Short strings only (song titles), so the naive
+    O(len(a)*len(b)) table costs nothing."""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb))
+        prev = cur
+    return prev[-1]
+
+
+def _ratio(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    return 1 - _edit_distance(a, b) / max(len(a), len(b))
+
+
+def similarity(said: str, title: str) -> float:
+    """How likely `said` is a mishearing of `title`: the better of a plain spelling
+    match and a match on the consonant skeleton (which absorbs a wrong vowel, a
+    dropped accent, or a whole extra syllable Apple's own fuzzy search does not)."""
+    a, b = _plain(said).replace(" ", ""), _plain(title).replace(" ", "")
+    return max(_ratio(a, b), _ratio(_skeleton(said), _skeleton(title)))
+
+
+SOUND_MATCH_GATE = 0.55  # below this a "match" is coincidence, not a mishearing
+
+
+def by_sound(said: str, songs: list[dict], limit: int = 5) -> list[dict]:
+    """Real songs ranked by how likely `said` is a mishearing of their title, best
+    first, past SOUND_MATCH_GATE, capped to `limit` - small enough that a Jev pick
+    among them (when more than one is close) costs nothing extra."""
+    scored = sorted(({**s, "sound_score": similarity(said, s["title"])} for s in songs),
+                    key=lambda s: -s["sound_score"])
+    return [s for s in scored if s["sound_score"] >= SOUND_MATCH_GATE][:limit]
+
+
+def ensure_running(app: str) -> None:
+    """Start `app` in the background, not in front of her, well before her words
+    are even fully understood: called the moment they plausibly want it (before the
+    catalog search and Jev's pick, which take under a second), so a cold Music that
+    otherwise adds several seconds to the very first song of a session has a head
+    start on the same wall-clock time rather than sitting entirely on the critical
+    path (the owner's session measured 7.6s for a first "play ... on apple music",
+    of which Jev accounted for well under a second). `open` itself returns as soon
+    as it has told launchd to start the app - it does not wait for the app to
+    actually be ready - so this costs only that brief hand-off, not the launch.
+
+    Goes through _open, like every other launch in this module, so a test that
+    stubs it stubs this too."""
+    _open(["open", "-g", "-a", app])
+
+
+# ---------------------------------------------------------------- described songs
+# "Our latest World Cup song", "Shakira's newest song": which song is found by
+# searching real sources first (Wikipedia's articles about songs, Apple's catalog
+# with its release dates); a model is asked only when they find nothing usable
+# (router._identify_song). Measured 2026-09-27: the model alone said "Waka Waka"
+# (2010) for Shakira's latest World Cup song; the sources have "Dai Dai" (2026).
+RECENT = re.compile(r"\b(?:latest|newest|recent|new|last)\b|החדש|החדשה|האחרון|האחרונה|"
+                    r"الجديدة|الجديد|الأخيرة|الاخيرة|нов\w*|последн\w*", re.I)
+WIKI = "https://en.wikipedia.org/w/api.php"
+_SONG_ARTICLE = re.compile(r"\bis\s+(?:a|an|the)\s+(?:[\w'-]+\s+){0,4}(?:song|single)\b", re.I)
+_BY = re.compile(r"\b(?:song|single)\b[^.]{0,40}?\bby\s+(?:the\s+)?(?:[\w-]+\s+){0,4}?"
+                 r"(?:singer(?:-songwriter)?|rapper|band|group|duo|musician|DJ|artist|"
+                 r"streamer|influencer)\s+([A-Z][\w.'&-]*(?:\s+[A-Z][\w.'&-]*){0,3})")
+_BY_NAME = re.compile(r"\b(?:song|single)\s+(?:recorded\s+)?by\s+([A-Z][\w.'&-]*"
+                      r"(?:\s+[A-Z][\w.'&-]*){0,3})")
+
+
+def wiki_songs(term: str, limit: int = 8, timeout: float = 3.0) -> list[dict]:
+    """Songs among the Wikipedia articles a search finds: title, artist when the
+    article says, and the first year it mentions (its release)."""
+    q = urllib.parse.urlencode({"action": "query", "format": "json",
+                                "generator": "search", "gsrsearch": term,
+                                "gsrlimit": limit, "prop": "extracts", "exintro": 1,
+                                "explaintext": 1, "exlimit": limit, "exchars": 400})
+    try:
+        data = _fetch(f"{WIKI}?{q}", timeout)
+    except Exception:  # noqa: BLE001
+        return []
+    pages = sorted(((data or {}).get("query") or {}).get("pages", {}).values(),
+                   key=lambda p: p.get("index", 0))
+    out = []
+    for p in pages:
+        text = re.sub(r"\s+", " ", p.get("extract") or "")
+        if not _SONG_ARTICLE.search(text[:200]):
+            continue
+        title = p.get("title") or ""
+        tag = re.search(r"\s*\(([^)]*\b(?:song|single))\)$", title)
+        artist = ""
+        if tag:
+            title = title[:tag.start()]
+            artist = re.sub(r"\s*\b(?:song|single)$", "", tag.group(1)).strip()
+        m = _BY.search(text[:300]) or _BY_NAME.search(text[:300])
+        artist = artist or (m.group(1).strip() if m else "")
+        year = re.search(r"\b(19\d\d|20\d\d)\b", text)
+        out.append({"id": f"wiki:{p.get('pageid')}", "title": title, "artist": artist,
+                    "year": year.group(1) if year else "",
+                    "date": year.group(1) if year else "",
+                    "about": text[:160], "where": "wiki"})
+    return out
+
+
+def search_title(title: str) -> str:
+    """A catalog title as words to search for: no "(feat. ...)", versions or mixes."""
+    t = re.sub(r"\s*[\(\[](?:feat|ft|featuring|with)\b\.?[^\)\]]*[\)\]]", "", title,
+               flags=re.I)
+    t = re.sub(r"\s*[\(\[][^\)\]]*\b(?:version|remaster\w*|mix|remix|edit|live)\b[^\)\]]*"
+               r"[\)\]]", "", t, flags=re.I)
+    return re.sub(r"\s+", " ", t).strip() or title
+
+
+def main_artist(artist: str) -> str:
+    return re.split(r"\s*(?:,|&|\bx\b|\band\b|\bfeat\.?|\bft\.?|\bwith\b)\s*",
+                    artist or "", maxsplit=1, flags=re.I)[0].strip()
+
+
+def merge_songs(rows: list[dict]) -> list[dict]:
+    """One entry per song across the sources. Its date is the EARLIEST any source
+    gives, since a compilation re-dates an old song ("Waka Waka" on a 2023 hits
+    album); its albums are kept, since "Official FIFA World Cup 2026 Album" is what
+    makes a song the World Cup one. A catalog row is preferred as the song itself."""
+    out: list[dict] = []
+    for r in rows:
+        k = row_key(r)
+        same = next((o for o in out if same_key(k, row_key(o))), None)
+        if same is None:
+            out.append({**r, "albums": [r["album"]] if r.get("album") else []})
+            continue
+        albums = same["albums"] + ([r["album"]] if r.get("album")
+                                   and r["album"] not in same["albums"] else [])
+        dates = [d for d in (same.get("date"), r.get("date")) if d]
+        first = min(dates, key=lambda d: d[:4] + d[4:].ljust(6, "9")) if dates else ""
+        base = same
+        if r["where"] == "catalog" and (same["where"] != "catalog"
+                                        or (r.get("date") or "9") < (same.get("date") or "9")):
+            base = r
+        merged = {**base, "albums": albums, "about": same.get("about") or r.get("about"),
+                  "date": first, "year": first[:4]}
+        same.clear()
+        same.update(merged)
     return out
 
 
@@ -257,6 +566,61 @@ def in_library(song: dict, rows: list[dict] | None = None) -> dict | None:
     return None
 
 
+# "Another one" played "MIA (feat. Drake)" and then "MÍA (feat. Drake)": the same
+# song, a single and the album cut, told apart only by an accent (the owner's session,
+# 1.1.0). What was played is kept as a key that such versions share.
+_VIDEO_WORDS = re.compile(r"\b(?:official|video|audio|lyrics?|clip|hd|4k|mv|visualizer|"
+                          r"live|remaster(?:ed)?|version)\b", re.I)
+
+
+# "1969 - Remastered 2009" is a version of 1969, not a song called that by "1969".
+_VERSION = re.compile(r"(?:\d{4}\s+)?(?:remaster|live\b|radio\s+edit|edit\b|mono\b|"
+                      r"stereo\b|version|single\s+version|acoustic|demo\b|from\s)", re.I)
+
+
+def _plain(s: str) -> str:
+    s = unicodedata.normalize("NFKD", (s or "").casefold())
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return re.sub(r"[^\w]+", " ", s).strip()
+
+
+def song_key(title: str, artist: str = "") -> tuple[str, str]:
+    """(title, main artist), casefolded, accents gone, extras dropped. A YouTube title
+    "Bad Bunny - MÍA ft. Drake (Official Video)" gives the same key as the catalog's
+    "MIA (feat. Drake)" by "Bad Bunny"."""
+    t = (title or "").strip()
+    parts = re.split(r"\s[-\u2013\u2014]\s", t, maxsplit=1)
+    if not artist and len(parts) == 2 and not _VERSION.match(parts[1]):
+        artist, t = parts
+    base = t
+    while True:                      # innermost first: "[... World Cup (TM) Song]"
+        base, n = re.subn(r"[\(\[][^\(\)\[\]]*[\)\]]", " ", base)
+        if not n:
+            break
+    base = re.sub(r"\s[-\u2013\u2014|]\s.*$|\s(?:feat\.?|ft\.?|featuring)\s.*$", " ",
+                  base, flags=re.I)
+    title_k = _plain(_VIDEO_WORDS.sub(" ", base)) or _plain(t)
+    main = re.split(r"\s*(?:,|&|\bx\b|\band\b|\bfeat\.?|\bft\.?|\bwith\b)\s*",
+                    artist or "", maxsplit=1, flags=re.I)[0]
+    return title_k, _plain(re.sub(r"(?i)\s*-\s*topic$|vevo$", "", main))
+
+
+def same_key(a: tuple[str, str], b: tuple[str, str]) -> bool:
+    """The same song: the same title, and artists that agree or one of them unknown."""
+    if not a[0] or a[0] != b[0]:
+        return False
+    return not a[1] or not b[1] or a[1] == b[1] or a[1] in b[1] or b[1] in a[1]
+
+
+def row_key(r: dict) -> tuple[str, str]:
+    return song_key(r.get("title", ""), r.get("artist") or "")
+
+
+def played_before(r: dict, keys: list[tuple[str, str]]) -> bool:
+    k = row_key(r)
+    return any(same_key(k, o) for o in keys)
+
+
 # ---------------------------------------------------------------- playing
 
 def play_library(pid: str, audible: bool = True) -> tuple[bool, dict]:
@@ -264,30 +628,187 @@ def play_library(pid: str, audible: bool = True) -> tuple[bool, dict]:
     silence while the reply says "playing", so it is brought up first."""
     raise_it = ('if sound volume < 5 then\nset sound volume to 60\nset raised to "yes"\n'
                 'end if\n') if audible else ""
-    # A song from Apple Music that is in her library but not downloaded takes a
-    # moment to start, so the state is read for up to two seconds, not once. With a
-    # dialog open in Music (the owner's Mac had "Open Stream" up) `play` returns
-    # without error and nothing plays: that is exactly why the state is read back.
+    # A streamed track takes a moment, so the state is read for up to three seconds
+    # (0.35 s measured live when Music is free). In the owner's session the track
+    # asked for became Music's current track later and sat paused: one more `play`
+    # when it is loaded but not playing. See the module docstring.
     script = f'''tell application "Music"
 set raised to "no"
 {raise_it}set t to (first track of library playlist 1 whose persistent ID is "{_q(pid)}")
 play t
-repeat 8 times
+repeat 12 times
 if player state is playing then exit repeat
 delay 0.25
 end repeat
+if player state is not playing then
+try
+if persistent ID of current track is "{_q(pid)}" then
+play
+repeat 4 times
+if player state is playing then exit repeat
+delay 0.25
+end repeat
+end if
+end try
+end if
 set now to ""
 try
 set now to name of current track
 end try
 return (player state as text) & "{FIELD}" & now & "{FIELD}" & raised
 end tell'''
-    ok, text = mac._osa(script, timeout=8.0)
+    ok, text = mac._osa(script, timeout=10.0)
     parts = (text or "").split(FIELD)
     state = parts[0] if ok and parts else ""
     info = {"state": state or text[:120], "now": parts[1] if len(parts) > 1 else "",
             "raised_volume": len(parts) > 2 and parts[2] == "yes"}
-    return ok and state == "playing", info
+    playing = ok and state == "playing"
+    if not playing:
+        info["dialog"] = music_dialog()
+    return playing, info
+
+
+# ---------------------------------------------------------------- Accessibility
+# Music's own window, read the way VoiceOver reads it (actions/apps.py). The bundled
+# app has Accessibility permission; without it nothing here is found and she is told
+# to press play, as before. Every lookup goes through these two seams, so a test
+# hands in a fake tree and never touches the real Music.
+
+def _ax():
+    from . import apps
+    return apps._ax()
+
+
+def _music_pid():
+    from . import apps
+    return apps._pid_for("Music")
+
+
+def _get(ax, el, name):
+    try:
+        err, val = ax["get"](el, name, None)
+        return val if err == 0 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _music_root():
+    ax = _ax()
+    if ax is None:
+        return None, None
+    try:
+        if not ax["trusted"]():
+            return None, None
+    except Exception:  # noqa: BLE001
+        return None, None
+    pid = _music_pid()
+    if pid is None:
+        return None, None
+    root = ax["app"](pid)
+    if ax.get("timeout"):
+        try:
+            ax["timeout"](root, 2.0)
+        except Exception:  # noqa: BLE001
+            pass
+    return ax, root
+
+
+def music_dialog() -> bool:
+    """A dialog or sheet is up in Music ("Open Stream", a sign-in, an alert). Music
+    answers `play` without error and plays nothing while one is open. Read only:
+    never dismissed, it is hers."""
+    ax, root = _music_root()
+    if ax is None:
+        return False
+    for w in _get(ax, root, "AXWindows") or []:
+        sub = str(_get(ax, w, "AXSubrole") or "")
+        if sub in ("AXDialog", "AXSystemDialog", "AXFloatingWindow") or _get(ax, w, "AXModal"):
+            return True
+        if any(str(_get(ax, k, "AXRole") or "") == "AXSheet"
+               for k in _get(ax, w, "AXChildren") or []):
+            return True
+    return False
+
+
+def _song_toggle(ax, root, track_id, cap: int = 4000):
+    """The play toggle in the row of this very song on its album page, or None."""
+    want = re.compile(r"AlbumTrackLockup\[id=track-lockup-\d+-" + re.escape(str(track_id))
+                      + r"\b")
+    seen = 0
+    stack = list(_get(ax, root, "AXWindows") or [])
+    while stack and seen < cap:
+        el = stack.pop()
+        seen += 1
+        if want.search(str(_get(ax, el, "AXIdentifier") or "")):
+            for kid in _get(ax, el, "AXChildren") or []:
+                if str(_get(ax, kid, "AXRole") or "") == "AXCheckBox":
+                    return kid
+            return None
+        stack.extend(reversed(_get(ax, el, "AXChildren") or []))
+    return None
+
+
+def _now_playing() -> tuple[str, str]:
+    ok, text = mac._osa('if application "Music" is running then\ntell application "Music"\n'
+                        'set now to ""\ntry\nset now to name of current track\nend try\n'
+                        f'return (player state as text) & "{FIELD}" & now\nend tell\nend if',
+                        timeout=4.0)
+    parts = (text or "").split(FIELD) if ok else []
+    return (parts[0], parts[1]) if len(parts) == 2 else ("", "")
+
+
+def press_song_play(track_id, title: str, wait_s: float = 3.0,
+                    confirm_s: float = 2.0) -> tuple[bool, dict]:
+    """After open_in_music: press the song's own play toggle on its page, then read
+    the player back. True only when Music is playing a song with this title.
+
+    `wait_s`/`confirm_s`: a real press starts the song in 0.3s (checked live
+    2026-09-27); these are how long to keep looking before giving up. They were 5.0
+    and 3.0 - the owner's session paid the full 5s on a page whose toggle never
+    appeared at all ("bad bunny song", 8.1s total turn, wait_s used in full) and got
+    nothing for it. 3.0/2.0 still leaves 10x that measured 0.3s of headroom for a
+    slow render while capping the worst case; not re-measured live (no live Music
+    playback in this lane's tests), so watch the next real session for a page that
+    now times out where it used to just make it."""
+    info = {"pressed": False}
+    state, _ = _now_playing()
+    if not state:
+        # Music cannot be read (not running, or osascript refused): pressing blind
+        # would leave nothing to check the press against.
+        info["why"] = "music_unreadable"
+        return False, info
+    ax, root = _music_root()
+    if ax is None:
+        info["why"] = "no_accessibility"
+        return False, info
+    end, toggle = time.time() + wait_s, None
+    while toggle is None:
+        toggle = _song_toggle(ax, root, track_id)
+        if toggle is not None or time.time() > end:
+            break
+        time.sleep(0.2)
+    if toggle is None:
+        info["why"] = "no_play_button"
+        return False, info
+    try:
+        err = ax["press"](toggle, "AXPress")
+    except Exception as e:  # noqa: BLE001
+        err = repr(e)[:80]
+    info["pressed"] = err == 0
+    if err != 0:
+        info["why"] = f"press_refused {err}"
+        return False, info
+    want = row_key({"title": title})[0]
+    end = time.time() + confirm_s
+    while True:
+        state, now = _now_playing()
+        if state == "playing" and row_key({"title": now})[0] == want:
+            info.update(state=state, now=now)
+            return True, info
+        if time.time() > end:
+            info.update(state=state, now=now, why="not_playing_after_press")
+            return False, info
+        time.sleep(0.15)
 
 
 def open_in_music(url: str) -> bool:
@@ -295,14 +816,34 @@ def open_in_music(url: str) -> bool:
     return _open(["open", "-a", "Music", app_link(url)])
 
 
+# The same words drive Music and Spotify. The _10 pair are "back 10 seconds" and
+# "forward 10 seconds" said as a follow-up (savta/followup.py).
+_CONTROLS = {"pause": "pause", "stop": "pause", "resume": "play",
+             "restart": "set player position to 0\nplay",
+             "forward": "set player position to (player position + 30)",
+             "back": "set player position to (player position - 15)",
+             "forward_10": "set player position to (player position + 10)",
+             "back_10": "set player position to (player position - 10)",
+             "next": "next track", "previous": "previous track"}
+
+
+def state(app: str) -> str:
+    """"playing", "paused", "stopped", or "not_running", for "apple_music" or
+    "spotify"; "" when it could not be read. Never launches the app to find out."""
+    name = {"apple_music": "Music", "spotify": "Spotify"}.get(app)
+    if not name:
+        return ""
+    ok, out = mac._osa(f'if application "{name}" is running then\n'
+                       f'tell application "{name}" to return (player state as string)\n'
+                       f'else\nreturn "not_running"\nend if')
+    out = (out or "").strip().lower()
+    return out if ok and out in ("playing", "paused", "stopped", "not_running") else ""
+
+
 def control(action: str) -> tuple[bool, str]:
     """pause, resume, restart, forward, back, stop, for whatever Music is playing.
     `stop` pauses rather than stops, so carrying on later picks up where it was."""
-    table = {"pause": "pause", "stop": "pause", "resume": "play",
-             "restart": "set player position to 0\nplay",
-             "forward": "set player position to (player position + 30)",
-             "back": "set player position to (player position - 15)"}
-    cmd = table.get(action)
+    cmd = _CONTROLS.get(action)
     if not cmd:
         return False, "unknown"
     # Never launches Music just to pause it.
@@ -328,10 +869,7 @@ def spotify_search(words: str, web: bool = False) -> bool:
 
 
 def spotify_control(action: str) -> tuple[bool, str]:
-    cmd = {"pause": "pause", "stop": "pause", "resume": "play",
-           "restart": "set player position to 0\nplay",
-           "forward": "set player position to (player position + 30)",
-           "back": "set player position to (player position - 15)"}.get(action)
+    cmd = _CONTROLS.get(action)
     if not cmd:
         return False, "unknown"
     return mac._osa(f'if application "Spotify" is running then\ntell application "Spotify"\n'
@@ -411,6 +949,36 @@ LINES = {
         "hebrew":  "ספוטיפיי לא מותקן במחשב הזה, אז פתחתי את האתר שלו על חיפוש של {q}. «תלחצי|תלחץ» על נגן במה «שתרצי|שתרצה».",
         "arabic":  "سبوتيفاي مش منزّل على هالكمبيوتر، ففتحت موقعه على بحث عن {q}. «اكبسي|اكبس» تشغيل على اللي بدك ياه.",
         "russian": "Spotify на этом компьютере нет, поэтому открыла сайт Spotify на поиске {q}. Нажмите Play на нужной.",
+    },
+    "dialog": {
+        "english": "Music has a window open asking you something, so it would not start {title}. Close that window and ask me again.",
+        "hebrew":  "באפליקציית המוזיקה פתוח חלון ששואל משהו, אז {title} לא התחיל. «תסגרי|תסגור» את החלון «ותבקשי|ותבקש» שוב.",
+        "arabic":  "في شباك مفتوح بتطبيق الموسيقى عم يسأل إشي، فما اشتغلت {title}. «سكّري|سكّر» الشباك و«اطلبي|اطلب» مرة تانية.",
+        "russian": "В Music открыто окно с вопросом, поэтому {title} не включилась. Закройте его и попросите ещё раз.",
+    },
+    "identified_year": {
+        "english": "That is {title}, from {year}.",
+        "hebrew":  "זה {title}, מ־{year}.",
+        "arabic":  "هاي {title}، من سنة {year}.",
+        "russian": "Это {title}, {year} года.",
+    },
+    "identified": {
+        "english": "That is {title} by {artist}.",
+        "hebrew":  "זה {title} של {artist}.",
+        "arabic":  "هاي {title} لـ{artist}.",
+        "russian": "Это {title}, {artist}.",
+    },
+    "identified_missing": {
+        "english": "I think you mean {title} by {artist}, but I could not find it in {app}.",
+        "hebrew":  "נראה לי ש«את מתכוונת|אתה מתכוון» ל{title} של {artist}, אבל לא מצאתי אותו ב{app}.",
+        "arabic":  "بظن «قصدك|قصدك» {title} لـ{artist}، بس ما لقيتها على {app}.",
+        "russian": "Думаю, вы имеете в виду {title}, {artist}, но я не нашла её в {app}.",
+    },
+    "not_identified": {
+        "english": "I could not work out which song that is. What is it called?",
+        "hebrew":  "לא הצלחתי להבין איזה שיר זה. איך קוראים לו?",
+        "arabic":  "ما عرفت أي أغنية هاي. شو اسمها؟",
+        "russian": "Я не поняла, какая это песня. Как она называется?",
     },
     "stopped": {
         "english": "I paused the music.",

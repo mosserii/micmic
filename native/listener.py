@@ -128,21 +128,19 @@ PTT_MAX = 30.0          # a turn nobody ends is ended here. At 120 s a tap turn
                         # nobody tapped again sent two minutes of the room.
 TAP_SILENCE = 1.8       # a TAP turn (not a held key) ends this long after her words stop
 FINAL_WAIT = 1.2        # after the key: how long to wait for the recogniser's final words
-ALT_WAIT = 2.0          # ...and for the second language to read the whole turn
+LOCAL_WAIT = 1.5        # ...or for the local model to read the whole turn (0.17 s p50,
+                        # 0.29 s p95 measured); past this the turn goes out as Apple heard it
 FOLLOWUP_WINDOW = 8.0   # MicMic asked a question: how long to wait for the first word
 FOLLOWUP_SILENCE = 1.6  # ...and the pause that ends her answer
-# A turn's audio is also kept, and when her own language's recogniser is unsure of
-# what it heard, a second one (English beside anything else) reads the same audio and
-# the more confident transcript wins. Measured on recorded speech, n=6 (3 English, 3
-# Hebrew): the right language 0.52-0.98, the wrong one 0.00-0.24, 6/6 correct. The
-# two cannot run at once: Speech gives a process one live session and fails the other
-# with 1110 (measured, both orders, on-device and server). So the second runs after,
-# and only when the first scored under PRIMARY_SURE: a clear sentence costs nothing.
-# Live through a real microphone the wrong language scored far higher than on clean
-# files (en-US 0.71 for a Hebrew sentence), so skipping the second read on a "sure"
-# first one was wrong. It always runs; this stays as the switch.
-PRIMARY_SURE = float(os.environ.get("MICMIC_PRIMARY_SURE", "1.01"))
-ALT_LOCALE = os.environ.get("MICMIC_ALT_LOCALE", "en-US")
+# One language. She chooses it once (onboarding, or Settings) and MicMic listens and
+# answers in it alone. A second recogniser used to read every turn again in English (or
+# beside English, in Hebrew) and the more confident one won; its scores were noise on
+# short turns, so "no this" went out as Hebrew "נודס" (en-US 0.24 vs he-IL 0.37, the
+# owner's session 2026-09-28), and it cost a second read after every turn. Gone.
+# What reads the finished turn instead, when her language has one installed, is a local
+# model (native/local_asr.py; savta/asr_models.py downloads it): on the owner's own
+# voice, 20 English clips x 3, it had WER 6.2% and 85% of names where Apple had 13.3% and
+# 69%. Apple still runs while she speaks: its partial words are what the bar shows.
 
 DUP_WINDOW = 4.0        # drop a second POST of the identical command inside this long
 ENGINE_STALL = 2.0      # no audio buffer at all for this long means the engine is dead
@@ -952,21 +950,16 @@ class Listener:
         self.contextual: list[str] = []
 
         self.recognizer = None
-        self.recognizer_alt = None    # English beside her language, only during a turn
-        self.alt_locale = ALT_LOCALE
-        self.alt_request = None
-        self.alt_task = None
-        self.alt_text = ""            # normalized, like transcript
         self.primary_final = None     # (normalized text, confidence) once final
-        self.alt_final = None
         self.turn = None              # {"kind": "ptt"|"followup", "down_at", "mode", "finish_at", "deadline"}
-        self.turn_audio = None        # AVAudioFile being written while a turn is open
-        self.alt_gen = 0
-        self.alt_parts: list = []      # (text, confidence, words) per utterance of the file read
         self.turn_prefix = ""         # what earlier recognition sessions of this turn heard
-        self.alt_placeholder = False  # the second read's confidence includes a 0.5 stand-in
         self.pick_conf = None         # the chosen transcript's confidence, sent with it
-        self.turn_audio_path = ""
+        # The local model (native/local_asr.py), when her language has one installed.
+        # The turn's samples are kept in memory for it, only while a turn is open and only
+        # when it is loaded: her voice is never written to disk.
+        self.local = None
+        self.turn_samples = None      # list of floats at input_format's rate, or None
+        self.local_result = None      # (text, confidence) from the local read, "" if it failed
         self.input_format = None
         self.swallow_release = False  # the press that ENDED a tap turn: ignore its release
         self.engine = None
@@ -1416,6 +1409,7 @@ class Listener:
         # a name right. They come from the server, which already knows them.
         self.contextual = [str(c) for c in (self.cfg.get("contacts") or [])][:80]
         self.contextual += list(DEFAULT_WAKE)
+        self.apply_local_asr(self.cfg)
 
         # get_config() above already tried and, on failure, silently returned {}.
         # A dead server should not leave the menu bar claiming to be "listening" —
@@ -1455,7 +1449,7 @@ class Listener:
         self.set_status(L("listening", self.locale), "◉")
 
     def _make_recognizers(self) -> bool:
-        """Her language, and the second one that runs beside it during a turn."""
+        """Her language, the only one (see LOCAL_WAIT above)."""
         loc = Foundation.NSLocale.localeWithLocaleIdentifier_(self.locale)
         self.recognizer = Speech.SFSpeechRecognizer.alloc().initWithLocale_(loc)
         if self.recognizer is None:
@@ -1466,27 +1460,38 @@ class Listener:
                   "this Mac. Check MICMIC_LOCALE in listener.env.")
             speak_local("no_recognizer", self.locale)
             return False
-        # The second language: English beside anything else; beside English, the
-        # language she speaks to it otherwise (Hebrew unless her profile says).
-        other = ALT_LOCALE
-        if lang_code(self.locale) == lang_code(ALT_LOCALE):
-            other = {"hebrew": "he-IL", "arabic": "ar-SA", "russian": "ru-RU"}.get(
-                str(self.cfg.get("language") or "hebrew"), "he-IL")
-        self.alt_locale = other
-        if other:
-            try:
-                alt = Speech.SFSpeechRecognizer.alloc().initWithLocale_(
-                    Foundation.NSLocale.localeWithLocaleIdentifier_(other))
-                self.recognizer_alt = alt if alt is not None and alt.isAvailable() else None
-            except Exception as e:  # noqa: BLE001
-                log(f"no {other} recogniser beside {self.locale}: {e!r}")
-                self.recognizer_alt = None
-            if self.recognizer_alt is not None:
-                log(f"turns also listen in {other}")
         return True
 
+    def apply_local_asr(self, cfg: dict) -> None:
+        """Follow the config's "asr" field (savta/asr_models.py): load the local model
+        for her language once it is downloaded, drop it when she changes language or it
+        goes away. Polled with the settings, so a finished download is picked up in a
+        few seconds; until it is loaded every turn is Apple's, exactly as before."""
+        info = cfg.get("asr") if isinstance(cfg.get("asr"), dict) else {}
+        want = (info.get("state") == "ready" and info.get("dir") and info.get("runtime")
+                and info.get("lang") == lang_code(self.locale)
+                and os.environ.get("MICMIC_LOCAL_ASR", "1") != "0")
+        if not want:
+            if self.local is not None:
+                log("local recogniser off: Apple alone")
+                self.local.close()
+            self.local = None
+            return
+        key = (info.get("engine"), info.get("dir"), info.get("runtime"))
+        if self.local is not None and self.local.key == key:
+            return
+        if self.local is not None:
+            self.local.close()
+        try:
+            from local_asr import LocalASR
+        except Exception as e:  # noqa: BLE001
+            log(f"local recogniser unavailable: {e!r}")
+            return
+        self.local = LocalASR(info, log=log)
+        self.local.load_async()
+
     def set_locale(self, locale: str) -> None:
-        """Settings changed the speech language: rebuild both recognisers now."""
+        """Settings changed the speech language: rebuild the recogniser now."""
         if not locale or locale == self.locale or self.turn is not None:
             return
         old = self.locale
@@ -1516,7 +1521,7 @@ class Listener:
                 # Dropping the buffer is how we avoid hearing our own voice.
                 if self.muted_until > time.time() or self.paused:
                     return
-                req, alt = self.request, self.alt_request
+                req = self.request
                 if req is not None:
                     try:
                         req.appendAudioPCMBuffer_(buf)
@@ -1525,17 +1530,13 @@ class Listener:
                         if not self.tap_error:
                             self.tap_error = repr(e)
                             log(f"audio tap cannot feed the recognizer: {e!r}")
-                if alt is not None:
+                keep = self.turn_samples
+                if keep is not None:
                     try:
-                        alt.appendAudioPCMBuffer_(buf)
+                        # Channel 0 as floats: ~0.1 ms for a 2048-frame buffer.
+                        keep.extend(buf.floatChannelData()[0].as_tuple(buf.frameLength()))
                     except Exception:  # noqa: BLE001
-                        pass
-                rec = self.turn_audio
-                if rec is not None:
-                    try:
-                        rec.writeFromBuffer_error_(buf, None)
-                    except Exception:  # noqa: BLE001
-                        self.turn_audio = None
+                        self.turn_samples = None
 
             node.installTapOnBus_bufferSize_format_block_(0, 2048, fmt, tap)
             self.tap_installed = True
@@ -1616,6 +1617,7 @@ class Listener:
         self.register_hotkey()           # no-op unless the spec actually changed
         if not DEFAULT_LOCALE and cfg.get("language_hint"):
             self.set_locale(str(cfg["language_hint"]))
+        self.apply_local_asr(cfg)
         words = list(cfg.get("wake_words") or [])
         variants = wake_variants(DEFAULT_WAKE + words)
         if variants != self.variants:
@@ -1870,9 +1872,8 @@ class Listener:
                          "deadline": now + (PTT_MAX if kind == "ptt" else FOLLOWUP_WINDOW),
                          "open_ts": open_ts}
             self.transcript = ""
-            self.alt_text = ""
             self.turn_prefix = ""
-            self.primary_final = self.alt_final = None
+            self.primary_final = None
             self.pending_tail = ""
             self.wake_at = 0.0
             # The watchdog's own armed-window expiry must not end a turn; the turn
@@ -1882,7 +1883,11 @@ class Listener:
             self.muted_until = 0.0              # she wants the microphone now
             self.interrupt_until = 0.0
             self.last_change = now
-            self._open_turn_audio()
+            # A turn opened over one that never reached its pick drops that one's samples.
+            self.local_result = None
+            if self.local is not None:
+                self.local.wake()               # back from an idle unload while she talks
+            self.turn_samples = [] if self.local is not None and self.local.usable else None
         if kind == "ptt":
             stop_speaking()                     # pressing the key talks over MicMic
         self.start_task(force=True)
@@ -1892,85 +1897,43 @@ class Listener:
         log(f"turn open ({kind})")
         return True
 
-    def _open_turn_audio(self) -> None:
-        self._close_turn_audio()
-        if self.recognizer_alt is None or self.input_format is None:
+    def _start_local_read(self, t) -> None:
+        """The turn is finished: the local model reads its samples, off every Speech and
+        AppKit thread. Its answer lands in local_result and wakes consider()."""
+        samples, self.turn_samples = self.turn_samples, None
+        local = self.local
+        if not samples or local is None or not local.usable:
+            self.local_result = ""
             return
-        try:
-            import tempfile
-            fd, path = tempfile.mkstemp(prefix="micmic-turn-", suffix=".caf")
-            os.close(fd)
-            f, err = AVFoundation.AVAudioFile.alloc().initForWriting_settings_error_(
-                Foundation.NSURL.fileURLWithPath_(path), self.input_format.settings(), None)
-            if f is None:
-                os.unlink(path)
-                return
-            self.turn_audio, self.turn_audio_path = f, path
-        except Exception as e:  # noqa: BLE001
-            log(f"cannot keep the turn's audio: {e!r}")
+        rate = int(self.input_format.sampleRate()) if self.input_format is not None else 48000
+        t["local_at"] = time.time()
 
-    def _close_turn_audio(self) -> str:
-        """Stop writing; the file is complete once the AVAudioFile is gone."""
-        f, path = self.turn_audio, self.turn_audio_path
-        self.turn_audio = None
-        if f is not None:
-            try:
-                if f.respondsToSelector_("close"):
-                    f.close()
-            except Exception:  # noqa: BLE001
-                pass
-            del f
-        return path
-
-    def _drop_turn_audio(self) -> None:
-        path = self._close_turn_audio()
-        self.turn_audio_path = ""
-        if path:
-            try:
-                os.unlink(path)            # her voice is not kept past the turn
-            except OSError:
-                pass
-
-    def _read_turn_audio_alt(self, path: str) -> None:
-        """The second language reads the turn's audio. Main thread: Speech delivers
-        results on the main queue, and the app's run loop is already turning."""
         def go():
-            try:
-                req = Speech.SFSpeechURLRecognitionRequest.alloc().initWithURL_(
-                    Foundation.NSURL.fileURLWithPath_(path))
-                if self.recognizer_alt.supportsOnDeviceRecognition():
-                    req.setRequiresOnDeviceRecognition_(True)
-                if self.contextual:
-                    req.setContextualStrings_(self.contextual)
-                self.alt_gen += 1
-                self.alt_parts = []
-                self.alt_placeholder = False
-                self._alt_live = ""
-                gen = self.alt_gen
-                self.alt_task = self.recognizer_alt.recognitionTaskWithRequest_resultHandler_(
-                    req, lambda result, error: self.on_alt_result(gen, result, error))
-            except Exception as e:  # noqa: BLE001
-                log(f"second-language read failed: {e!r}")
-                with self.lock:
-                    self.alt_final = ("", 0.0)
-        on_main(go)
+            started = time.time()
+            res = local.transcribe(samples, rate)
+            with self.lock:
+                if self.turn is not t:
+                    return                          # a new turn took over meanwhile
+                self.local_result = (normalize(res[0]), res[1]) if res and res[0] else ""
+                t["local_ms"] = int((time.time() - started) * 1000)
+            self.consider()
+        threading.Thread(target=go, daemon=True, name="micmic-local-read").start()
 
     def finish_turn(self, why: str) -> None:
-        """She is done. Ask both recognisers for their final words; consider() sends
-        whichever is more confident once both answer, or after FINAL_WAIT."""
+        """She is done. Ask the recogniser for its final words (and the local model, when
+        there is one, to read the turn); consider() sends the turn once they answer."""
         with self.lock:
             t = self.turn
             if t is None or t["finish_at"]:
                 return
             t["finish_at"] = time.time()
-            for req in (self.request, self.alt_request):
-                if req is not None:
-                    try:
-                        req.endAudio()
-                    except Exception:  # noqa: BLE001
-                        pass
+            if self.request is not None:
+                try:
+                    self.request.endAudio()
+                except Exception:  # noqa: BLE001
+                    pass
         log(f"turn finishing: {why}")
-        # Say so NOW. The final words and the second-language read take a moment, and
+        # Say so NOW. The final words and the local read take a moment, and
         # with nothing changing on screen she pressed again and threw the turn away.
         self.set_status(L("thinking", self.locale), "◐")
         self.view_working()
@@ -1994,13 +1957,13 @@ class Listener:
     def end_turn_empty(self, sound: bool = True, why: str = "nothing", turn=None) -> None:
         self._closed(turn or self.turn, why)
         with self.lock:
-            self._drop_turn_audio()
+            self.turn_samples = None
+            self.local_result = None
             self.turn = None
             self.turn_prefix = ""
             self.armed_until = 0.0
             self.pending_tail = ""
             self.transcript = ""
-            self.alt_text = ""
         server_duck(False)
         self.view_idle()
         self.set_status(L("listening", self.locale), "◉")
@@ -2050,22 +2013,6 @@ class Listener:
             self.task = self.recognizer.recognitionTaskWithRequest_resultHandler_(
                 req, lambda result, error: self.on_result(gen, result, error))
             self.primary_final = None
-            # Never a second live session (see PRIMARY_SURE): it would kill this one.
-            if False:
-                alt = Speech.SFSpeechAudioBufferRecognitionRequest.alloc().init()
-                alt.setShouldReportPartialResults_(True)
-                try:
-                    if self.recognizer_alt.supportsOnDeviceRecognition():
-                        alt.setRequiresOnDeviceRecognition_(True)
-                    if self.contextual:
-                        alt.setContextualStrings_(self.contextual)
-                except Exception:  # noqa: BLE001
-                    pass
-                self.alt_request = alt
-                self.alt_text = ""
-                self.alt_final = None
-                self.alt_task = self.recognizer_alt.recognitionTaskWithRequest_resultHandler_(
-                    alt, lambda result, error: self.on_alt_result(gen, result, error))
 
     def stop_task(self) -> None:
         with self.lock:
@@ -2082,45 +2029,6 @@ class Listener:
                     pass
             self.task = None
             self.request = None
-
-    def on_alt_result(self, gen, result, error) -> None:
-        """The second language. It only records; the turn decides in consider()."""
-        try:
-            if gen != self.alt_gen:
-                return
-            if error is not None:
-                with self.lock:
-                    if self.alt_final is None:
-                        self.alt_final = ("", 0.0)     # finished with nothing
-                return
-            if result is None:
-                return
-            norm = normalize(str(result.bestTranscription().formattedString()))
-            with self.lock:
-                if result.isFinal():
-                    # A file read ends one utterance at each pause, like the live one;
-                    # keep every piece rather than only the last ("פליז" for "undo ...
-                    # please").
-                    words = len(norm.split())
-                    if words:
-                        self.alt_parts.append((norm, _final_conf(result), words))
-                    self._alt_live = ""
-                    text = " ".join(x[0] for x in self.alt_parts)
-                    wsum = sum(x[2] for x in self.alt_parts)
-                    conf = sum(x[1] * x[2] for x in self.alt_parts) / max(1, wsum)
-                    self.alt_final = (text, conf)
-                    self.alt_text = text
-                elif norm:
-                    live = getattr(self, "_alt_live", "")
-                    if new_utterance(live, norm):
-                        self.alt_parts.append((live, 0.5, len(live.split())))
-                        self.alt_placeholder = True
-                    self._alt_live = norm
-                    self.alt_text = " ".join([x[0] for x in self.alt_parts] + [norm])
-            if result.isFinal():
-                self.consider()
-        except Exception as e:  # noqa: BLE001
-            log(f"alt result handler blew up: {e!r}")
 
     def on_result(self, gen, result, error) -> None:
         """Called by the Speech framework on its own queue, repeatedly, as the
@@ -2389,7 +2297,7 @@ class Listener:
             t = self.turn
             if t is None:
                 return
-            said = (self.turn_prefix + " " + self.transcript).strip() or self.alt_text
+            said = (self.turn_prefix + " " + self.transcript).strip()
             self.pending_tail = said
             if not t["finish_at"]:
                 quiet = now - self.last_change
@@ -2404,40 +2312,41 @@ class Listener:
                     t["finish_at"] = now
                 else:
                     return
-                for req in (self.request, self.alt_request):
-                    if req is not None:
-                        try:
-                            req.endAudio()
-                        except Exception:  # noqa: BLE001
-                            pass
-            if self.primary_final is None and now < t["finish_at"] + FINAL_WAIT:
+                if self.request is not None:
+                    try:
+                        self.request.endAudio()
+                    except Exception:  # noqa: BLE001
+                        pass
+            # The local model reads the turn the moment it is finished. With its text in
+            # hand nothing waits for Apple's final; without it (no model, a failed read,
+            # LOCAL_WAIT gone by) the turn goes out as Apple heard it, as it always did.
+            if not t.get("local_started"):
+                t["local_started"] = True
+                if self.turn_samples is not None:
+                    self._start_local_read(t)
+            local = self.local_result
+            if t.get("local_at") and local is None and now < t["finish_at"] + LOCAL_WAIT:
                 return
-            prim_conf = (self.primary_final or ("", 0.0))[1]
-            unsure = (self.recognizer_alt is not None and self.turn_audio_path
-                      and prim_conf < PRIMARY_SURE)
+            if not local and self.primary_final is None and now < t["finish_at"] + FINAL_WAIT:
+                return
             if not t.get("logged"):
                 t["logged"] = True
+                prim_conf = (self.primary_final or ("", 0.0))[1]
+                read = ("none" if not t.get("local_at")
+                        else f"{t.get('local_ms', '?')} ms" if local
+                        else "failed" if local == "" else "too slow")
                 log(f"turn: {self.locale} {prim_conf:.2f} "
-                    f"({'final' if self.primary_final else 'no final'}), "
-                    f"audio={'kept' if self.turn_audio_path else 'none'}, "
-                    f"second language {'will read it' if unsure else 'not needed'}")
-            if unsure and not t.get("alt_at"):
-                t["alt_at"] = now
-                self.alt_final = None
-                self._read_turn_audio_alt(self._close_turn_audio())
-                return
-            if unsure and now < t["alt_at"] + ALT_WAIT and not self._alt_done():
-                return
+                    f"({'final' if self.primary_final else 'no final'}), local read {read}")
             to_send, lang_won = self._pick_transcript()
             conf_won = self.pick_conf
-            self._drop_turn_audio()
+            self.turn_samples = None
+            self.local_result = None
             self.turn_prefix = ""
             self.turn = None
             self.pending_tail = ""
             self.armed_until = 0.0
             self.muted_until = now + 2.0
             self.transcript = ""
-            self.alt_text = ""
             self.last_change = now
             self.gen += 1
             if to_send:
@@ -2456,20 +2365,11 @@ class Listener:
                                                  conf_won),
                          daemon=True).start()
 
-    def _alt_done(self) -> bool:
-        task = self.alt_task
-        if self.alt_final is None:
-            return False
-        try:
-            return task is None or int(task.state()) == 4     # SFSpeechRecognitionTaskStateCompleted
-        except Exception:  # noqa: BLE001
-            return True
-
     def _pick_transcript(self) -> tuple[str, str]:
-        """Her language or English, by the recognisers' own final confidence. Falls
-        back to whatever text there is when a final never came, and to what the bar
-        showed when the final is empty or lost most of it: a turn that put words on
-        screen is never "nothing said"."""
+        """The local model's reading when it gave one; else Apple's final. Falls back to
+        whatever text there is when a final never came, and to what the bar showed when
+        the final is empty or lost most of it: a turn that put words on screen is never
+        "nothing said"."""
         prim = self.primary_final or ((self.turn_prefix + " " + self.transcript).strip(), 0.0)
         # The confidence sent with every turn: the recogniser's own when it gave one,
         # else STAND_IN (the shown partial text, unscored pieces, or no final at all,
@@ -2480,19 +2380,13 @@ class Listener:
         if shown and len(prim[0].split()) * 2 < len(shown.split()):
             log(f"turn: final {prim[0]!r} fell short of what was shown, keeping {shown!r}")
             prim, prim_real = (shown, max(prim[1], 0.5)), False
-        alt = self.alt_final or (self.alt_text, 0.0)
-        alt_real = self.alt_final is not None and alt[1] > 0 and not self.alt_placeholder
         self.pick_conf = prim[1] if prim_real else STAND_IN
-        if not alt[0]:
-            return prim[0], self.locale
-        if not prim[0]:
-            self.pick_conf = alt[1] if alt_real else STAND_IN
-            return alt[0], self.alt_locale
-        log(f"turn: {self.locale} {prim[1]:.2f} {prim[0]!r} vs {self.alt_locale} {alt[1]:.2f} {alt[0]!r}")
-        if alt[1] > prim[1]:
-            self.pick_conf = alt[1] if alt_real else STAND_IN
-            return alt[0], f"{self.alt_locale} {alt[1]:.2f} over {prim[1]:.2f}"
-        return prim[0], f"{self.locale} {prim[1]:.2f} over {alt[1]:.2f}"
+        local = self.local_result
+        if local:
+            log(f"turn: local {local[1]:.2f} {local[0]!r} over {self.locale} {prim[1]:.2f} {prim[0]!r}")
+            self.pick_conf = local[1]
+            return local[0], f"local {local[1]:.2f}"
+        return prim[0], self.locale
 
     def send(self, text: str, activation: str = "wake", released_at: float = 0.0,
              turn=None, asr_confidence=None) -> None:
@@ -2736,6 +2630,8 @@ class Listener:
                 self.engine.stop()
         except Exception:  # noqa: BLE001
             pass
+        if self.local is not None:
+            self.local.close()          # ggml's Metal backend asserts at exit otherwise
 
 
 # A menu bar is thirty small grey shapes in a row. "◉" was one more of them, so

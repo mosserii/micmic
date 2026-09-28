@@ -27,6 +27,7 @@ from .llm import LLM
 from . import profile as prof
 from . import paths
 from . import prefs
+from . import followup as fu
 
 ACT_ON_INTENT = 0.55        # below this we ask her instead of guessing
 # Deliberately NOT gating on the Choice confidence here. When twenty classical-music
@@ -216,6 +217,32 @@ def _span(j: Jev, u: dict, utterance: str, name: str):
     return got if got is not None else pick_span(j, utterance, SPANS[name])
 
 
+# Which of two people who sound alike. The contact choice in understand(), measured
+# 2026-09-28 (jev-latest, the router's exact request, 8 fixture contacts, n=1 each):
+# "take a screenshot and send to dena" (the recogniser's "Dana") Dana 0.44, nobody
+# 0.33, Dina 0.21; "... send to Dana" Dana 1.00, next 0.00; the corrections "to Dana
+# not Dina" and "לדנה לא לדינה" Dana 0.98, Dina 0.02. Asked when the best is under the
+# first gate AND a second person reaches the second one.
+WHICH_TOP_GATE = 0.75
+WHICH_SECOND_GATE = 0.10
+
+
+def _sound_alike(u: dict) -> tuple[str, str] | None:
+    """The two people her name could be, when Jev cannot tell them apart; else None.
+    Read from the contact choice already in understand(): nothing more is asked."""
+    if u.get("contact_named", 0) < 0.5:
+        return None
+    pr = ((u.get("raw") or {}).get("contact") or {}).get("probabilities") or {}
+    ranked = sorted(((k, float(v or 0.0)) for k, v in pr.items() if k != "nobody"),
+                    key=lambda kv: -kv[1])
+    if len(ranked) < 2:
+        return None
+    (a, pa), (b, pb) = ranked[:2]
+    if pa >= WHICH_TOP_GATE or pb < WHICH_SECOND_GATE:
+        return None
+    return a, b
+
+
 def _same_person(j: Jev, utterance: str, contact: str) -> float:
     a = j.ask({"she_said": utterance, "chosen_contact": contact}, {
         "same_person": {"type": "noul",
@@ -278,6 +305,25 @@ _SCREENSHOT_WORDS = (
     "التقطي لقطة", "التقط لقطة", "خذ لقطة", "خدي لقطة",
     "скриншот", "снимок экрана",
 )
+# Sending, in her words. Only consulted beside _SCREENSHOT_WORDS: "take a screenshot and
+# send it to Dana" is one action, a screenshot that is sent, and never two requests.
+_SEND_WORDS = ("send", "share", "שלח", "לשלוח", "ابعت", "ابعث", "أرسل", "ارسل",
+               "отправ", "пошли", "скинь", "перешли")
+# Another request or person after the send word: "... send it to Dana AND Gal", "... and
+# then open Safari". Then the sentence is split as any other.
+_MORE_AFTER = re.compile(r"\band\b|\bthen\b|,|(?:^|\s)ו\S|\sو|\sи\s|\bтакже\b",
+                         re.IGNORECASE)
+
+
+def _one_shot_send(utterance: str) -> bool:
+    """"Take a screenshot and send to Dana": one action, never split (see _handle)."""
+    low = (utterance or "").lower()
+    if not _says_any(low, _SCREENSHOT_WORDS):
+        return False
+    at = [low.find(w) for w in _SEND_WORDS if w in low]
+    return bool(at) and not _MORE_AFTER.search(low[min(at):])
+
+
 # Only consulted once _SCREENSHOT_WORDS has already matched: which part of the screen.
 _SCREENSHOT_WINDOW_WORDS = (
     "this window", "the window", "front window", "current window",
@@ -365,6 +411,26 @@ def _pref_names(canonical: str, lang: str) -> dict:
             "at_ar": with_prefix("لـ", who, "arabic")}
 
 
+def _standing_app(u: dict, app: str, to: str, lang: str) -> str:
+    """"Only on WhatsApp from now on" said as a change to the message just sent or
+    counting down: the change is made (router._message_follow_up), and it is also her
+    standing choice, saved as "use WhatsApp" would be and said once. Read from the
+    preference question that rode in the same understand() request; nothing is asked.
+    For the person only when she named them, else for everyone. Returns the line, or ""."""
+    st = u.get("standing") or {}
+    k = st.get("pref_kind") or {}
+    said_app = (st.get("pref_app") or {}).get("choice")
+    if (k.get("choice") != "message_app" or float(k.get("confidence") or 0.0) < PREF_GATE
+            or app not in prefs.APPS or said_app not in (app, "not_said", None)):
+        return ""
+    who = (to if u.get("contact") == to and u.get("contact_named", 0) >= 0.5
+           and u.get("refers_back", 0) <= 0.5 else None)
+    prefs.set_app(app, who)
+    by = prefs.BY.get(lang, prefs.BY["english"])[app]
+    return (prefs.say(lang, "app_one", by=by, **_pref_names(who, lang)) if who
+            else prefs.say(lang, "app_all", by=by))
+
+
 def _standing_turn(j: Jev, u: dict, utterance: str, lang: str) -> dict | None:
     """She stated, asked about, or asked to forget a standing preference. Returns
     {"did", "say", "detail", "lang"?, "undo"?}, or None when this is not such a turn."""
@@ -416,6 +482,15 @@ def _standing_turn(j: Jev, u: dict, utterance: str, lang: str) -> dict | None:
         by = prefs.BY.get(lang, prefs.BY["english"])[app]
         text = (prefs.say(lang, "app_one", by=by, **_pref_names(who, lang)) if who
                 else prefs.say(lang, "app_all", by=by))
+        # A message still counting down by the other app goes by this one instead,
+        # never by both.
+        with _PLOCK:
+            p = dict(PENDING) if PENDING is not None and not PENDING.get("paused") else None
+        if p and p.get("channel") != app and who in (None, p.get("to")):
+            moved = _send_again({**p, "kind": "message"}, p["to"], app, lang, {}, replace=True)
+            out = done(moved["did"], f"{text} {moved['say']}", undoable=False, app=app,
+                       person=who, moved=True, **moved["kw"].get("detail", {}))
+            return {**out, **({"asked_back": True} if moved["kw"].get("asked_back") else {})}
         return done("preference_set", text, app=app, person=who)
 
     if kind == "video_site" and pick("pref_site") in prefs.SITES:
@@ -532,6 +607,10 @@ def _something_she_likes(kind: str, lang: str) -> str:
 # YouTube, as before. See actions/music.py for what each app can and cannot do.
 PLAYER_GATE = 0.5          # also for any named place (_named_place, actions/targets.py)
 IN_APP = ("apple_music", "spotify")
+# A cheap check on the raw words, for starting Music in the background before Jev's
+# understanding even comes back (see _warm_apple_music below): a real question about
+# what she wants, not this.
+_APPLE_HINT = re.compile(am.PLAYER_WORDS_APPLE, re.I)
 _SONG_PICK = (
     "She asked for: {want}. Choose the one song that is what she asked for. Prefer the "
     "original recording by the artist she named, or else by the best-known artist, over "
@@ -546,6 +625,29 @@ def _music_pref() -> str:
         return prefs.music_app()
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _warm_apple_music(utterance: str) -> None:
+    """Start Music in the background the moment her words plausibly want it, well
+    before Jev's understanding (and the catalog search after it) come back. A cold
+    Music otherwise sits entirely on the critical path: the owner's session measured
+    7.6s for the first "play ... on apple music" of a session, with Jev accounting
+    for well under a second of it. No-op, and safe to call on every turn: opening an
+    app already running costs nothing. Only when she names Apple Music, or names a
+    song or music (not a bare "play", which is as often Netflix or a video) with
+    Apple Music as her player: a Music window popping up for "play Friends on
+    Netflix" would be a surprise."""
+    u = utterance or ""
+    if _APPLE_HINT.search(u) or (
+            _MUSIC_NOUN.search(u) and not _OTHER_PLACE.search(u)
+            and _music_pref() == "apple_music"):
+        am.ensure_running("Music")
+
+
+_MUSIC_NOUN = re.compile(r"\b(?:songs?|singles?|tracks?|music|tunes?|album)\b|שיר|שירים|מוזיקה",
+                         re.I)
+_OTHER_PLACE = re.compile(r"\b(?:youtube|spotify|netflix|disney|prime|hulu|max|apple\s*tv)\b|"
+                          r"יוטיוב|ספוטיפיי|נטפליקס", re.I)
 
 
 def _named_place(u: dict) -> str:
@@ -595,7 +697,8 @@ def _app_query(u: dict, utterance: str, place: str = "") -> str:
 
 
 def _open_chat(chan: str, contact: str, text: str, lang: str,
-               picture: bool = False) -> tuple[str, str, dict]:
+               picture: bool = False, from_screen: str | None = None,
+               attachment: str | None = None) -> tuple[str, str, dict]:
     """Telegram or Signal: MicMic has no way to send through them, so the words go on
     the clipboard, her chat with that person is opened (or the app, or its website),
     and she is told the two keys that send it. Never said to be sent. `picture`: a
@@ -607,6 +710,7 @@ def _open_chat(chan: str, contact: str, text: str, lang: str,
         return (("not_installed", tg.chat_line(chan, "missing", lang, who), det)
                 if res["how"] == "missing"
                 else ("app_failed", tg.line("chat_failed", lang, app=tg.label(chan, lang)), det))
+    _remember_message(contact, text, lang, chan, None, attachment, from_screen, None)
     if picture:
         return "opened_chat", _sp(lang, "paste_it", who=for_speech("sent", contact, lang)), det
     return "opened_chat", tg.chat_line(chan, res["how"], lang, who), det
@@ -621,10 +725,10 @@ def _song_label(r: dict) -> str:
     return s + (" [already in her library]" if r["where"] == "library" else "")
 
 
-def _catalog_for(terms: list[str]) -> tuple[list[dict] | None, str]:
+def _catalog_for(terms: list[str], limit: int = 10) -> tuple[list[dict] | None, str]:
     """Every search at once; the songs found, each marked with the words that found
     it, and the first words that found anything. None when Apple was unreachable."""
-    later = [(t, _in_parallel(am.catalog, t)) for t in terms]
+    later = [(t, _in_parallel(am.catalog, t, None, limit)) for t in terms]
     rows, reached, first = [], False, ""
     for t, got in later:
         found = got()
@@ -636,8 +740,67 @@ def _catalog_for(terms: list[str]) -> tuple[list[dict] | None, str]:
     return (rows if reached else None), first
 
 
+# An artist named at the end of her sentence ("change to where all by bad bunny"),
+# best-effort: catches the common shape without pretending to parse grammar. When
+# nothing matches, the caller falls back to the artist she was already listening to.
+_ARTIST_AFTER = re.compile(
+    r"\bby\s+([A-Za-z][\w'.-]*(?:\s+[A-Za-z][\w'.-]*){0,3})\s*$|"
+    r"של\s+([א-ת][א-ת'-]*(?:\s+[א-ת][א-ת'-]*){0,3})\s*$|"
+    r"ل[ـ]?([؀-ۿ][؀-ۿ'-]*(?:\s+[؀-ۿ][؀-ۿ'-]*){0,3})\s*$",
+    re.I)
+
+
+def _artist_from_utterance(utterance: str) -> str:
+    # The player's own name ("on apple music") is stripped first, so "...by bad
+    # bunny on apple music" still ends in the artist's name the regex looks for.
+    m = _ARTIST_AFTER.search(am.without_player(utterance or "").strip())
+    return next((g for g in m.groups() if g), "").strip() if m else ""
+
+
+# Words that leave nothing behind once stripped from a refusal: "no" and "not this
+# one" name no song, and must fall straight through to the ordinary "another one"
+# replay rather than being tried as a garbled title.
+_REJECTION_ONLY = set("""
+no not this that one another something else nothing none again more too well ok okay
+לא זה זאת אחר אחרת עוד משהו כלום
+لا هاد هاي شي غير كمان ولا
+нет это другую ещё что-то ничего
+""".split())
+
+
+def _rejection_leftover(utterance: str) -> str:
+    """What is left of a refusal once the asking and rejecting words are stripped:
+    "" for a bare "no" or "not this one" (a pure rejection), non-empty for a garbled
+    new title ("die die", "nueva yella") worth trying against the artist she was on."""
+    left = [w for w in re.findall(r"[\w'&.-]+", am.without_player(utterance))
+           if w.lower() not in am._ASKING and w.lower() not in _REJECTION_ONLY]
+    return " ".join(left)
+
+
+def _sound_match(j: Jev, utterance: str, said_words: str, artist: str) -> dict | None:
+    """The real song `said_words` most likely mishears, from `artist`'s own catalog
+    (actions/music.by_sound): the fix for "die die" (Dai Dai), "nueva yella"
+    (NUEVAYoL) and the like, where Apple's own lexical search finds nothing at all.
+    Jev is asked to choose only when code cannot already tell on its own - more than
+    one candidate close enough to be a real contender."""
+    if not artist or len((said_words or "").strip()) < 2:
+        return None
+    aid = am.find_artist_id(artist)
+    if not aid:
+        return None
+    matches = am.by_sound(said_words, am.artist_songs(aid))
+    if not matches:
+        return None
+    if len(matches) == 1 or matches[0]["sound_score"] - matches[1]["sound_score"] > 0.15:
+        return matches[0]
+    pick, _pconf, good = pick_from(j, matches, _song_label, _SONG_PICK.format(
+        want=f"{said_words}, as a song by {artist}"), {"she_said": utterance})
+    return pick if good >= 0.4 else matches[0]
+
+
 def _play_in_app(j: Jev, app: str, subject: str, utterance: str, lang: str,
-                 named: bool = True) -> tuple[str, str, dict]:
+                 named: bool = True, fresh_only: bool = False,
+                 preset: dict | None = None, artist_hint: str = "") -> tuple[str, str, dict]:
     """Find the song and play it in Music, or open it in Spotify (its web player when
     the app is not on this Mac).
 
@@ -649,15 +812,28 @@ def _play_in_app(j: Jev, app: str, subject: str, utterance: str, lang: str,
     Measured (6 real calls): with "on apple music" in the sentence the name span
     came back empty for "put 1969 song on apple music" and as "תשימי 1969" for
     "תשימי 1969 באפל מיוזיק", so the catalog is also searched for her own words
-    without the asking ones (am.search_terms)."""
+    without the asking ones (am.search_terms).
+
+    `fresh_only`: "another one". No song already put on in this session comes back,
+    in any version (MEM.played_keys), and more of the catalog is looked at.
+
+    `preset`: the catalog song a description was already resolved to
+    (_identify_song), so no second pick is asked for.
+
+    `artist_hint`: the artist her words name or imply, tried only when the ordinary
+    search above finds nothing playable. A misheard title ("nueva yella" for
+    NUEVAYoL, "where all" for a real Bad Bunny song) is not in Apple's own lexical
+    search results at all; matched by sound and spelling against that artist's real
+    songs instead (actions/music.by_sound)."""
     web = app == "spotify" and not am.spotify_installed()
+    limit = 25 if fresh_only else 10
     phrases, words = am.search_terms(subject if named else None, utterance)
     if not phrases:
         phrases = [am.without_player(subject) or subject]    # what she likes
     lib_later = _in_parallel(am.library, phrases[-1]) if app == "apple_music" else None
-    found, term = _catalog_for(phrases)
+    found, term = _catalog_for(phrases, limit)
     if found is not None and not found and words:
-        found, term = _catalog_for(words)
+        found, term = _catalog_for(words, limit)
     term = term or phrases[0]
     lib = lib_later() if lib_later else []
     base = {"player": app, "query": term, "searched": phrases + words,
@@ -667,7 +843,8 @@ def _play_in_app(j: Jev, app: str, subject: str, utterance: str, lang: str,
     def words_only() -> tuple[str, str, dict]:
         am.spotify_search(term, web=web)
         MEM.played(term, "song_or_music", False,
-                   {"id": f"sp:{term}", "title": term, "player": "spotify"}, lang)
+                   {"id": f"sp:{term}", "title": term, "player": "spotify",
+                    "words_only": True}, lang)
         return "opened_in_app", am.line("spotify_web_words" if web else "spotify_words",
                                         lang, q=term), base
 
@@ -677,12 +854,57 @@ def _play_in_app(j: Jev, app: str, subject: str, utterance: str, lang: str,
     rows = [r for r in lib if r["id"] not in MEM.rejected]
     rows += [r for r in found or [] if r["id"] not in MEM.rejected
              and not any(am.same_song(r, o) for o in lib)]
+    # One row per song: the single and the album cut, "MIA" and "MÍA", are one choice.
+    keys: list[tuple[str, str]] = []
+    unique = []
+    for r in rows:
+        k = am.row_key(r)
+        if not any(am.same_key(k, o) for o in keys):
+            keys.append(k)
+            unique.append(r)
+    rows = unique
+    if fresh_only:
+        had = len(rows)
+        rows = [r for r in rows if not am.played_before(r, MEM.played_keys)]
+        base["already_played"] = had - len(rows)
+        if had and not rows:
+            # Everything this search turned up has been played. Rather than tell her
+            # "not found" (it was found, she just heard it already), the artist's own
+            # catalog is fetched wider before admitting defeat: this is real, only
+            # this particular search (limited to `limit` rows) was too narrow.
+            aid = am.find_artist_id(term)
+            wider = [r for r in (am.artist_songs(aid) if aid else [])
+                    if r["id"] not in MEM.rejected and not am.played_before(r, MEM.played_keys)]
+            if wider:
+                rows = wider
+                base["fetched_more"] = len(wider)
+            else:
+                return "exhausted", _sp(lang, "exhausted", q=term), base
     pick = None
-    if rows:
+    if preset:
+        pick = next((r for r in rows if r["where"] == "library"
+                     and am.same_song(preset, r)), None) or {**preset, "term": term}
+        base.update(preset=True)
+    elif rows:
         pick, pconf, good = pick_from(j, rows, _song_label,
                                       _SONG_PICK.format(want=f"{term}, as a song"),
                                       {"she_asked_for": term, "her_words": utterance})
         base.update(pick_conf=round(pconf, 2), any_good=round(good, 2))
+    if not pick and fresh_only and rows:
+        # She has already said what she does NOT want ("not this one"); Jev's own
+        # judgement of fit is a nicety here, not a gate. The owner's session: real
+        # Bad Bunny rows came back, the pick call scored them low, and she was told
+        # "not found" for an artist that was found and simply not yet exhausted.
+        pick = rows[0]
+        base["fallback_pick"] = True
+    if not pick and artist_hint:
+        # The name she actually gave (phrases[0], never the "leftover words" fallback
+        # `term` can end up as): her words plus "change", "on apple music" and the
+        # rest would drown out the real similarity to any title.
+        sound = _sound_match(j, utterance, phrases[0] if phrases else term, artist_hint)
+        if sound:
+            pick = sound
+            base.update(sound_match=True, artist_hint=artist_hint)
     if not pick:
         return (words_only() if app == "spotify"
                 else ("not_found", am.line("not_found", lang, q=term), base))
@@ -705,15 +927,268 @@ def _play_in_app(j: Jev, app: str, subject: str, utterance: str, lang: str,
         if ok:
             MEM.played(query, "song_or_music", False, {**pick, "player": app}, lang)
             return "playing", am.line("playing", lang, **said), base
+        if info.get("dialog"):
+            # A dialog in Music is why her copy would not start, and opening the
+            # catalog page behind it would not help either. It is hers: named, never
+            # dismissed.
+            return "not_started", am.line("dialog", lang, **said), base
         if not pick.get("url"):
-            return "not_started", am.line("not_started", lang, **said), base
-    # Only in the catalog, or her copy would not start: Music is put on the song and
-    # she presses play. Music cannot be told to play a catalog song from outside it
-    # (see actions/music.py), so she is not told it is playing.
-    base.update(where="catalog", opened=am.open_in_music(pick["url"]))
+            # Her copy would not start: the same song's catalog page is the other way in.
+            twin = next((r for r in found or [] if am.same_song(r, own)), None)
+            if not twin:
+                return "not_started", am.line("not_started", lang, **said), base
+            pick = {**pick, "url": twin["url"], "track_id": twin["track_id"]}
+    # Only in the catalog, or her copy would not start: Music is put on the song, and
+    # the song's own play button on that page is pressed through Accessibility (see
+    # actions/music.py). Only a song Music then reports playing is called playing;
+    # otherwise she presses play, as before.
+    opened = am.open_in_music(pick["url"])
+    base.update(where="catalog", opened=opened)
+    if opened and pick.get("track_id"):
+        started, press = am.press_song_play(pick["track_id"], pick["title"])
+        base["press"] = press
+        if started:
+            MEM.played(query, "song_or_music", False, {**pick, "player": app}, lang)
+            return "playing", am.line("playing", lang, **said), base
     MEM.played(query, "song_or_music", False,
                {**pick, "player": app, "open_only": True}, lang)
     return "opened_in_app", am.line("press_play", lang, **said), base
+
+
+# A song she describes instead of naming ("our latest World Cup song", "the song from
+# Titanic"). Measured on real Jev calls: see brain.SONG_DESC_QUESTIONS.
+DESCRIBES_SONG_GATE = 0.5
+_DESC_FILLER = set("""change switch now our her his their its your latest newest new recent
+last one that this which those they from with s ok okay""".split())
+
+# She points at the screen instead of naming a song. See brain.SCREEN_SONG_QUESTIONS.
+SCREEN_SONG_GATE = 0.5
+
+# A year on its own ("the one from 2026") refines the described-song search MicMic
+# just did (see MEM.desc_search and _identify_song), rather than starting a blind
+# new one.
+_YEAR = re.compile(r"\b(19|20)\d{2}\b")
+DESC_CACHE_TTL = 300.0
+
+
+_DESCRIBED_PICK = (
+    "She described one song instead of saying its title: {said}. {singer}Which of "
+    "these real songs is the one she means? The dates are the songs' release dates.")
+_DESCRIBED_FITS = ("{label}: this song matches what she describes, leaving aside "
+                   "whether it is the newest{singer_part}")
+
+
+def _described_label(r: dict) -> str:
+    s = f"{r['title']}, by {r.get('artist') or 'unknown'}"
+    albums = [a for a in r.get("albums") or [] if a and a != r["title"]][:2]
+    if albums:
+        s += ", on " + " and ".join(albums)
+    if r.get("date"):
+        s += f" (released {r['date']})"
+    if r.get("about"):
+        s += f". {r['about'][:140]}"
+    return s
+
+
+def _search_described(j: Jev, utterance: str, singer: str, words: str,
+                      term: str) -> tuple[dict | None, dict]:
+    """The song a description means, from real sources: Wikipedia's song articles and
+    Apple's catalog, searched at once, with their release dates. Jev picks among what
+    they found; for "the latest"/"the newest" code takes the most recent of the songs
+    Jev says fit, by the sources' dates, not by anyone's memory. (None, detail) when
+    the sources give nothing usable."""
+    # An explicit year ("the one from 2026") means the same as "the newest" for this
+    # purpose: it should fetch the artist's own dated songs rather than rank purely
+    # on word overlap, so the year filter in _identify_song has real dates to use.
+    recent = bool(am.RECENT.search(utterance)) or bool(_YEAR.search(utterance))
+    queries = am._uniq([f"{singer} {words}".strip() if singer and words else "",
+                        words, singer if recent and not words else ""])
+    later = [_in_parallel(am.catalog, q, None, 25) for q in queries]
+    wiki_later = _in_parallel(am.wiki_songs, term) if term else None
+    rows: list[dict] = []
+    for got in later:
+        rows += got() or []
+    if recent:
+        # The newest songs of the singer she means, straight from Apple's dates: a
+        # search ranks by popularity and can miss a song out last week.
+        who = [am._plain(x) for x in (singer, words) if x]
+        ids = [r["artist_id"] for r in rows if r.get("artist_id") and any(
+            am._plain(am.main_artist(r["artist"])) and am._plain(am.main_artist(r["artist"]))
+            in w for w in who)]
+        if ids:
+            top = max(set(ids), key=ids.count)
+            rows += [r for r in am.recent_by(top) if r.get("artist_id") == top]
+    wiki = wiki_later() if wiki_later else []
+    cands = am.merge_songs(rows + wiki)
+    det = {"searched": queries, "wiki_term": term, "catalog_rows": len(rows),
+           "wiki_songs": len(wiki), "candidates": len(cands), "latest": recent}
+    if not cands:
+        return None, det
+    # Most promising first, then capped: the question has to stay small.
+    words_k = set(am._plain(words).split())
+    sing_k = am._plain(singer)
+
+    def rank(r):
+        text = am._plain(" ".join([r["title"], *(r.get("albums") or []), r.get("about") or ""]))
+        return (-(len(words_k & set(text.split()))),
+                -(bool(sing_k) and sing_k in am._plain(r.get("artist") or r.get("about") or "")),
+                r["where"] != "catalog")
+    cands = sorted(cands, key=rank)
+    if recent:
+        # For "the newest" the newest must make the cut: a stable sort, dates first.
+        cands = sorted(sorted(cands, key=lambda r: r.get("date") or "", reverse=True),
+                       key=lambda r: rank(r)[0])
+    cands = cands[:20]
+    # Kept for a follow-up year ("the one from 2026"): the real, dated songs this
+    # search found, so a bare year right after can pick among them with no new
+    # search and no model call at all (see _identify_song's cache lookup).
+    det["_cands"] = cands
+    opts = {str(i): _described_label(r) for i, r in enumerate(cands)}
+    opts["__none__"] = "None of these is the song she means."
+    singer_line = (f"The singer she was just listening to is {singer}; her, his, our or "
+                   f"their means that singer. " if singer else "")
+    qs = {"pick": {"type": "choice", "criteria": opts,
+                   "instructions": _DESCRIBED_PICK.format(said=utterance, singer=singer_line)},
+          "any_good": {"type": "noul",
+                       "instructions": "At least one of these is the song she describes"}}
+    if recent:
+        for i, r in enumerate(cands):
+            qs[f"fits_{i}"] = {"type": "noul", "instructions": _DESCRIBED_FITS.format(
+                label=opts[str(i)], singer_part=f" ({singer_line.strip()})" if singer else "")}
+    a = j.ask({"she_said": utterance, "candidates": opts,
+               **({"singer_she_was_listening_to": singer} if singer else {})}, qs)
+    from .jev import choice as _choice, noul as _noul
+    sel, conf, _ = _choice(a, "pick")
+    good = _noul(a, "any_good")
+    det.update(pick_conf=round(conf, 2), any_good=round(good, 2))
+    chosen = None
+    if recent:
+        fits = [(r, _noul(a, f"fits_{i}")) for i, r in enumerate(cands)]
+        fitting = [r for r, f in fits if f >= 0.5 and r.get("date")]
+        det["fitting"] = [f"{r['title']} ({r.get('date')})" for r in fitting][:8]
+        if fitting:
+            chosen = max(fitting, key=lambda r: r["date"][:4] + r["date"][4:].ljust(6, "0"))
+    if chosen is None and sel not in (None, "__none__") and good >= 0.3:
+        try:
+            chosen = cands[int(sel)]
+        except (ValueError, IndexError):
+            chosen = None
+    return chosen, det
+
+
+def _identify_song(j: Jev, utterance: str, lang: str, player: str) -> tuple[str, dict]:
+    """Which song a description means, checked against the real search where it will
+    play. Returns (how, detail): "found" with title/artist/subject/intro, "missing"
+    (named, but the search does not have it), or "unknown".
+
+    Search first (_search_described: Wikipedia and Apple's catalog, Jev picks, dates
+    decide "the latest"). Only when that finds nothing usable, ONE Gemini call
+    (llm.identify_song), grounded in a Wikipedia passage. Nothing is played on a
+    model's word alone: its title must then be found by the real search."""
+    last = MEM.last_played or {}
+    singer = (last.get("artist") or MEM.play_query or "") if last else ""
+    singer = am.main_artist(singer)
+    det: dict = {"described": utterance, "singer_on": singer or None}
+    # The search is for what the song is known by: "Shakira world cup", not "Shakira
+    # change our latest world cup" (measured: that found her biography).
+    words = " ".join(w for w in re.findall(r"[\w&.-]+", am.without_player(utterance))
+                     if w.lower() not in am._ASKING and w.lower() not in _DESC_FILLER)
+    if singer and am._plain(singer) in am._plain(words):
+        singer = ""                   # she named the singer herself
+    # A year on its own refines the search MicMic just did for her, rather than
+    # starting over blind: the owner's session asked "the one from 2026" right after
+    # Waka Waka (2010), and a fresh search for "Shakira 2026" found 47 unrelated
+    # things and a model call that guessed wrong. The real songs, with their real
+    # dates, were already fetched a moment ago; a year just points at one of them.
+    year_m = _YEAR.search(utterance)
+    cached = MEM.desc_search
+    # Either side may have resolved no singer at all (the first ask named her in
+    # words rather than context, or nothing was playing yet): only a clash between
+    # two DIFFERENT known singers rules the cache out.
+    same_singer = (not singer or not (cached or {}).get("singer")
+                  or am._plain(singer) == am._plain(cached.get("singer") or ""))
+    if (year_m and cached and same_singer
+            and time.time() - cached.get("at", 0) < DESC_CACHE_TTL):
+        year = year_m.group(0)
+        by_year = [r for r in cached["candidates"] if (r.get("date") or "").startswith(year)]
+        if by_year:
+            chosen = by_year[0]
+            title = am.search_title(chosen["title"])
+            artist = chosen.get("artist") or cached.get("singer") or ""
+            det.update(source="cache", search={"from_cache": True, "singer": cached.get("singer"),
+                                               "candidates": len(cached["candidates"])},
+                      identified={"title": title, "artist": artist, "date": chosen.get("date")})
+            hit = chosen if chosen["where"] == "catalog" else _found_where_it_plays(
+                title, artist, player)
+            if not hit:
+                return "missing", det
+            return "found", {**det, "title": title, "artist": artist,
+                             "subject": f"{title} {am.main_artist(artist)}".strip(),
+                             "intro": am.line("identified_year", lang, title=title, year=year),
+                             **({"preset": hit} if player in IN_APP
+                                and hit.get("where") == "catalog" else {})}
+    term = f"{singer} {words}".strip()
+    term = f"{term} song" if term else ""
+    chosen, det_s = _search_described(j, utterance, singer, words, term)
+    cache_cands = det_s.pop("_cands", [])
+    det["search"] = det_s
+    if cache_cands:
+        MEM.desc_search = {"singer": singer, "candidates": cache_cands, "at": time.time()}
+    if chosen is not None:
+        title = am.search_title(chosen["title"])
+        artist = chosen.get("artist") or ""
+        det.update(source="search", identified={"title": title, "artist": artist,
+                                                "date": chosen.get("date")})
+        # A song from Apple's catalog is a real, released song: YouTube has it too, and
+        # searching again only costs her time (measured 5.1 s for "the song from
+        # Titanic" with a second search). A Wikipedia-only song is checked first.
+        hit = chosen if chosen["where"] == "catalog" else _found_where_it_plays(
+            title, artist, player)
+        if not hit:
+            return "missing", det
+        year = chosen.get("year") or ""
+        intro = (am.line("identified_year", lang, title=title, year=year) if year
+                 else am.line("identified", lang, title=title, artist=artist or "?"))
+        return "found", {**det, "title": title, "artist": artist,
+                         "subject": f"{title} {am.main_artist(artist)}".strip(),
+                         "intro": intro,
+                         **({"preset": hit} if player in IN_APP
+                            and hit.get("where") == "catalog" else {})}
+    if not LLM_CLIENT.available:
+        det["why"] = "the sources found nothing usable, and no model"
+        return "unknown", det
+    ctx = (_within(WIKI_BUDGET_S, facts.wiki, term, lang[:2] if lang != "english" else "en")
+           or "") if term else ""
+    got = LLM_CLIENT.identify_song(utterance, lang, ctx[:700], singer,
+                                   gender=prof.load().get("gender", ""))
+    det.update(source="model", wiki=bool(ctx), llm_ms=round(LLM_CLIENT.last_ms))
+    if not got:
+        det["why"] = "the model did not name one song"
+        return "unknown", det
+    title, artist = got["title"], got["artist"]
+    det.update(identified={"title": title, "artist": artist})
+    hit = _found_where_it_plays(title, artist, player)
+    if not hit:
+        return "missing", det
+    intro = got["sentence"] or am.line("identified", lang, title=title, artist=artist or "?")
+    return "found", {**det, "title": title, "artist": artist,
+                     "subject": f"{title} {artist}".strip(), "intro": intro}
+
+
+def _no_preset(d: dict) -> dict:
+    return {k: v for k, v in d.items() if k != "preset"}
+
+
+def _found_where_it_plays(title: str, artist: str, player: str) -> dict | None:
+    """The song in the search of the place it will play, or None."""
+    want = am.song_key(title, artist)
+    if player in IN_APP:
+        rows = am.catalog(f"{title} {am.main_artist(artist)}".strip()) or []
+        return next((r for r in rows if am.same_key(am.row_key(r), want)
+                     or am.row_key(r)[0].startswith(want[0] + " ")), None)
+    rows = yt.search(f"{title} {am.main_artist(artist)}".strip()) or []
+    return next((r for r in rows if want[0] and want[0] in am._plain(r.get("title", ""))),
+                None)
 
 
 def _in_app_control(act: str, lang: str) -> tuple[str, str, dict] | None:
@@ -732,6 +1207,359 @@ def _in_app_control(act: str, lang: str) -> tuple[str, str, dict] | None:
     return ("stopped" if act in ("pause", "stop") else act,
             am.line("stopped", lang) if act in ("pause", "stop") else _sp(lang, "ok"),
             {"player": app, "control": act, "done": ok})
+
+
+# ---------------------------------------------------------------- follow-ups
+# "Make it 10 minutes instead", "move it to Friday", "pause", "shorter": a change to
+# the last thing MicMic did, done to that same thing (savta/followup.py decides which
+# change; these do it). Every reply is (did, say, detail) plus what finish() needs.
+
+def _remember_event(ev: dict, added: str, lang: str) -> None:
+    """The event just added, by the uid Calendar gave it: the only event a follow-up
+    may ever change. mac.add_event answers "<calendar>\n<uid>"."""
+    cal, _, uid = added.partition("\n")
+    start, end = ev.get("start") or "", ev.get("end") or ""
+    if start and not end and not ev.get("all_day"):
+        h, m = (int(x) for x in start.split(":"))
+        end = f"{min(h + 1, 23):02d}:{m:02d}"
+    MEM.did("event", uid=uid.strip(), calendar=cal.strip(), title=ev.get("title", ""),
+            date=ev.get("date", ""), start=start, end=end, all_day=bool(ev.get("all_day")),
+            location=ev.get("location", ""), lang=lang)
+
+
+def _event_detail(ev: dict) -> dict:
+    return {k: ev.get(k) for k in ("title", "date", "start", "end", "all_day")}
+
+
+def _event_line(key: str, ev: dict, lang: str) -> str:
+    allday = bool(ev.get("all_day"))
+    return fu.line(key + ("_allday" if allday and key + "_allday" in fu.LINES else ""),
+                   lang, title=ev.get("title", ""), when=_when_words(ev.get("date", ""), lang),
+                   start=ev.get("start", ""), end=ev.get("end", ""))
+
+
+# Tabs: which site's shortcuts, and what in the address says it is MicMic's tab.
+def _tab_of(last: dict) -> tuple[str, str]:
+    app = last.get("player")
+    if app == "youtube":
+        return str(last.get("id") or ""), "youtube"
+    web_addr = (tg.SERVICES.get(app) or {}).get("web") or ""
+    host = urllib.parse.urlsplit(web_addr).hostname or ""
+    return host.removeprefix("www."), "other"
+
+
+# player_action's words for the same things.
+_PLAYER_SAME = {"forward": "forward_10", "back": "back_10"}
+
+
+def _control_player(act: str, lang: str) -> tuple[str, str, dict] | None:
+    """Do `act` to what MicMic put on, where it plays: Music or Spotify by AppleScript,
+    a video by its own browser tab. None when nothing MicMic put on is known.
+
+    Never touches a player that is not playing: Music and Spotify are asked for their
+    state first and never launched, and a tab is found by the address MicMic opened,
+    so when it is gone nothing anywhere is pressed."""
+    last = MEM.last_played or {}
+    app = last.get("player")
+    det = {"player": app, "control": act}
+    if app in IN_APP:
+        if act == "next_episode":
+            act = "next"
+        if act in ("full_screen", "exit_full_screen"):
+            return "cannot_control", fu.line("cannot_there", lang,
+                                             app=am.APP_NAME.get(app, app)), det
+        if last.get("open_only") and act not in ("pause", "stop"):
+            # Music is on the song but was never started (see _in_app_control).
+            return "opened_in_app", am.line("press_play", lang, title=last.get("title", ""),
+                                            artist=last.get("artist") or "?"), det
+        st = am.state(app)
+        det["state"] = st
+        if st in ("not_running", "stopped"):
+            return "nothing_playing", fu.line("not_playing", lang), det
+        if act in ("pause", "stop") and st == "paused":
+            return "stopped", fu.line("already_paused", lang), det
+        ok, _ = (am.control if app == "apple_music" else am.spotify_control)(act)
+        det["done"] = ok
+        if act in ("pause", "stop"):
+            return "stopped", am.line("stopped", lang), det
+        return act, _sp(lang, "ok"), det
+    if app == "youtube" or app in tg.VIDEO:
+        act = _PLAYER_SAME.get(act, act)
+        frag, site = _tab_of(last)
+        if act == "pause" and last.get("paused"):
+            return "stopped", fu.line("already_paused", lang), {**det, "tab": frag}
+        res = mac.tab_player(frag, act, site)
+        det.update(tab=frag, result=res)
+        if res == "missing":
+            return "nothing_playing", fu.line("tab_gone", lang), det
+        if res in ("unsupported", "failed"):
+            return "cannot_control", fu.line("cannot_there", lang,
+                                             app=tg.label(app, lang) if app in tg.SERVICES
+                                             else "YouTube"), det
+        if act in ("pause", "resume"):
+            MEM.last_played = {**last, "paused": act == "pause"}
+        if res == "already" and act == "pause":
+            return "stopped", fu.line("already_paused", lang), det
+        return ("stopped" if act == "pause" else act), _sp(lang, "ok"), det
+    return None
+
+
+def _self_started_player() -> str:
+    """Music or Spotify, playing or paused, when MicMic put nothing on: she started it
+    herself, and "pause" means that. "" when neither is. Asked only on the branch that
+    would otherwise say nothing is playing."""
+    for app in IN_APP:
+        if am.state(app) in ("playing", "paused"):
+            return app
+    return ""
+
+
+def _follow_up(j: Jev, u: dict, ch: dict, lang: str, utterance: str = "") -> dict | None:
+    """Carry out the change followup.read() found. Returns {"did", "say", "kw", "lang"?},
+    or None when the change is one another branch already does (louder, next): u is
+    then pointed at that branch and the turn goes on."""
+    global AWAITING
+    kind, field, value, item = ch["kind"], ch["field"], ch["value"], ch["item"] or {}
+    det = {"follow_up": ch["option"], "follow_conf": ch["conf"], "kind": kind}
+
+    if kind == "message":
+        return _message_follow_up(j, u, field, value, item, lang, utterance, det)
+
+    if kind == "timer":
+        alive = mac.timer_row(item.get("id", "")) is not None
+        text = item.get("text", "")
+        if field == "recall":
+            left = max(1, round((item.get("due", 0) - time.time()) / 60))
+            key = "timer_recall" if alive and not item.get("cancelled") else "timer_recall_gone"
+            return {"did": "timer_recall", "say": fu.line(key, lang, text=text, n=left),
+                    "kw": {"detail": {**det, "text": text, "pending": alive}}}
+        if field == "cancel":
+            if not alive:
+                return {"did": "timer_gone", "say": fu.line("timer_gone", lang),
+                        "kw": {"detail": det}}
+            mac.cancel_timer(item["id"])
+            MEM.last_action = {**item, "cancelled": True, "at": time.time()}
+            return {"did": "timer_cancelled", "say": fu.line("timer_cancelled", lang),
+                    "kw": {"detail": {**det, "text": text}}}
+        if field in ("later", "earlier") and not alive:
+            return {"did": "timer_gone", "say": fu.line("timer_gone", lang),
+                    "kw": {"detail": det}}
+        mins = fu.timer_minutes(item, field, value)
+        if mins is None:
+            return None
+        if alive:
+            mac.cancel_timer(item["id"])
+        row = mac.set_timer(mins, text, item.get("lang") or lang)
+        MEM.last_action = {**item, "id": row["id"], "due": row["at"], "minutes": mins,
+                           "cancelled": False, "at": time.time()}
+        say = (fu.line("timer_at", lang, t=value) if field == "at"
+               else fu.line("timer_in", lang, n=max(1, round(mins))))
+        rid = row["id"]
+        return {"did": "timer_set", "say": say,
+                "kw": {"detail": {**det, "minutes": max(1, round(mins)), "text": text,
+                                  "moved": True, "pending": mac.pending_timers()},
+                       "undo": _offer_undo("timer_set", lang, lambda: mac.cancel_timer(rid),
+                                           _DONE["timer"])}}
+
+    if kind == "event":
+        if not item.get("uid"):
+            # Added before uids were kept, or Calendar gave none: there is no way to be
+            # sure which event is hers, so none is touched.
+            return {"did": "event_missing", "say": fu.line("event_missing", lang),
+                    "kw": {"detail": det}}
+        if field == "recall":
+            key = "event_recall"
+            return {"did": "event_recall", "say": _event_line(key, item, lang),
+                    "kw": {"detail": {**det, "event": _event_detail(item)}}}
+        if field == "remove":
+            return {"did": "event_not_removed",
+                    "say": fu.line("event_remove", lang, title=item.get("title", "")),
+                    "kw": {"detail": det}}
+        if field == "invite":
+            say = fu.line("event_no_invite", lang)
+            who = (u["contact"] if u.get("contact", "nobody") != "nobody"
+                   and u.get("contact_named", 0) >= 0.5 else None)
+            if not who:
+                return {"did": "event_no_invite", "say": say, "kw": {"detail": det}}
+            body = _event_line("event_invite_body", item, lang)
+            if item.get("all_day"):
+                body = _event_line("event_recall", item, lang)
+            chan = prefs.channel_for(who, None)[0]
+            ask = _ask_to_send(who, body, lang, chan, "not_said_this_turn")
+            return {"did": "confirm_send", "say": f"{say} {ask}",
+                    "kw": {"asked_back": True, "detail": {**det, "to": who, "text": body}}}
+        new = fu.event_change(item, field, value)
+        if new is None:
+            return {"did": "event_same", "say": fu.line("event_same", lang),
+                    "kw": {"detail": det}}
+        ev = {**item, **new}
+        # The same "shall I?" adding it asked: an event has no undo here.
+        AWAITING = {"at": time.time(), "need": "confirm_event_change",
+                    "question": "shall I change this event in your calendar like this",
+                    "lang": lang, "event": ev, "body": None, "contact": None}
+        return {"did": "confirm_event_change", "say": _event_line("event_ask", ev, lang),
+                "kw": {"asked_back": True, "detail": {**det, "event": _event_detail(ev),
+                                                      "was": _event_detail(item)}}}
+
+    if kind == "player":
+        if field == "recall":
+            title = (MEM.last_played or {}).get("title") or item.get("title") or ""
+            return {"did": "player_recall", "say": fu.line("player_recall", lang, title=title),
+                    "kw": {"detail": {**det, "title": title}}}
+        if field in ("louder", "quieter"):
+            u.update(intent="control", control_action=field,
+                     intent_confidence=max(u["intent_confidence"], ACT_ON_INTENT))
+            return None
+        if field == "next" and MEM.play_query:
+            # "Next" over something MicMic chose is "another one": the next of her own
+            # search, in the same player, never the refused ones. What she says she
+            # wants instead still wins: "שיר יותר שמח" read as next here, and forcing
+            # the replay over her description played the same search again (test_micmic,
+            # live, 2026-09-27), so describes_instead is left as Jev read it.
+            u.update(intent="music" if MEM.play_kind == "song_or_music" else "watch",
+                     rejects_last=max(u.get("rejects_last", 0.0), 0.95),
+                     control_action="not_applicable",
+                     intent_confidence=max(u["intent_confidence"], ACT_ON_INTENT))
+            return None
+        got = _control_player(field, lang)
+        if got is None:
+            return {"did": "nothing_playing", "say": fu.line("not_playing", lang),
+                    "kw": {"detail": det}}
+        did, say, d = got
+        return {"did": did, "say": say, "kw": {"detail": {**det, **d}}}
+
+    if kind == "answer":
+        text = item.get("text") or ""
+        if field == "repeat":
+            return {"did": "again", "say": text, "lang": item.get("lang") or lang,
+                    "kw": {"detail": {**det, "repeated": True}}}
+        if field == "send":
+            who = (u["contact"] if u.get("contact", "nobody") != "nobody"
+                   and u.get("contact_named", 0) >= 0.5 else None)
+            body = text[:SEND_SCREEN_MAX]
+            if HIDDEN in body:
+                return {"did": "screen_secret", "say": _ss("send_secret", lang),
+                        "kw": {"detail": det}}
+            if not who:
+                AWAITING = {"at": time.time(), "need": "who", "question": "who should I send it to",
+                            "contact": None, "body": body, "channel": "imessage",
+                            "chan_said": False, "lang": lang, "intent": "message"}
+                return {"did": "need_who", "say": _sp(lang, "who"),
+                        "kw": {"asked_back": True, "detail": det}}
+            chan = prefs.channel_for(who, None)[0]
+            return {"did": "confirm_send",
+                    "say": _ask_to_send(who, body, lang, chan, "not_said_this_turn"),
+                    "kw": {"asked_back": True, "detail": {**det, "to": who}}}
+        # "Shorter", "in Hebrew": a sentence has to be written. One model call.
+        target = value if field == "language" else (item.get("lang") or lang)
+        language = _LANG_NAME.get(target, "English")
+        if not LLM_CLIENT.available:
+            return {"did": "screen_no_llm", "say": fu.line("no_rewrite", lang),
+                    "kw": {"detail": det}}
+        said = _screen_llm(fu.REWRITE[field].format(language=language) + "\n\n" + text,
+                           _SCREEN_SYSTEM.format(language=language), max_tokens=300)
+        if not said:
+            limit = _llm_limit(lang)
+            return {"did": "daily_limit" if limit else "screen_no_llm",
+                    "say": limit or fu.line("no_rewrite", lang), "kw": {"detail": det}}
+        MEM.last_action = {**item, "text": said, "lang": target, "at": time.time()}
+        return {"did": "rewrote_answer", "say": said, "lang": target,
+                "kw": {"detail": {**det, "llm_ms": round(LLM_CLIENT.last_ms)}}}
+    return None
+
+
+def _message_follow_up(j: Jev, u: dict, field: str, value, item: dict, lang: str,
+                       utterance: str, det: dict) -> dict:
+    """A change to the message just sent or counting down (followup.py): the same thing
+    by another app, to another person too or instead, read back, or an app MicMic cannot
+    send by. It went, and nothing here claims to take it back."""
+    global AWAITING
+    to = item.get("to") or ""
+    if field == "recall":
+        shown = display_name(to, lang)
+        fs = item.get("from_screen")
+        what = fu.line(fu.SENT_WHAT[fs], lang) if fs in fu.SENT_WHAT else (item.get("text") or "")
+        return {"did": "message_recall",
+                "say": fu.line("msg_recall_going" if _pending_is(item) else "msg_recall", lang,
+                               who=shown, at_he=with_prefix("ל", shown, "hebrew"),
+                               at_ar=with_prefix("لـ", shown, "arabic"), what=what,
+                               on_app=_on_app(item.get("channel") or "imessage", lang)),
+                "kw": {"detail": {**det, "to": to, "channel": item.get("channel")}}}
+    if field == "unsupported":
+        return {"did": "cannot_send_there", "say": fu.line("msg_apps", lang),
+                "kw": {"detail": det}}
+    if field == "channel":
+        note = _standing_app(u, value, to, lang)
+        out = _send_again(item, to, value, lang, det, replace=True)
+        if note:
+            out["say"] = f"{note} {out['say']}"
+            out["kw"]["detail"] = {**out["kw"].get("detail", {}), "preference_set": value}
+        return out
+    # Another person, as well ("too") or instead. The name she said is checked like
+    # any other: Jev picks the nearest row even for a name that is not in her book.
+    who = (u["contact"] if u.get("contact", "nobody") not in ("nobody", to)
+           and u.get("contact_named", 0) >= 0.5 else None)
+    if who and _same_person(j, utterance, who) < SAME_PERSON_GATE:
+        who = None
+    app = fu.app_named(utterance)
+    if not who and field == "to" and _pending_is(item):
+        _cancel_pending()          # "not to her": it must not go while she is asked who
+    if not who:
+        AWAITING = {"at": time.time(), "need": "who", "question": "who should I send it to",
+                    "contact": None, "body": item.get("text") or None,
+                    "channel": app or item.get("channel") or "imessage", "chan_said": bool(app),
+                    "lang": lang, "intent": "message", "from_screen": item.get("from_screen"),
+                    "attachment": item.get("attachment"), "shot_what": item.get("shot_what")}
+        return {"did": "need_who", "say": _sp(lang, "who"),
+                "kw": {"asked_back": True, "detail": det}}
+    return _send_again(item, who, app or prefs.channel_for(who, None)[0], lang, det,
+                       replace=field == "to")
+
+
+def _send_again(item: dict, to: str, chan: str, lang: str, det: dict,
+                replace: bool) -> dict:
+    """The message in `item` again, to `to` by `chan`, through the same safeguards as
+    the first time. `replace`: it is instead of the one still counting down (another
+    app, "I meant Gal"), which is then never sent as well; "too" leaves that one to go,
+    since it was read back to her."""
+    body, fs = item.get("text") or "", item.get("from_screen")
+    att, shot = item.get("attachment"), item.get("shot_what")
+    who = display_name(to, lang)
+    detail = {**det, "to": to, "display": who, "channel": chan, "from_screen": fs,
+              "attachment": att, "again": True}
+    replaced = (_cancel_pending() if replace and _pending_is(item) else None) or (
+        item.get("stopped") if replace else None)
+    if chan in tg.OPEN_ONLY:
+        MEM.contact, MEM.channel = to, chan
+        did_c, say_c, det_c = _open_chat(chan, to, body, lang, picture=bool(att),
+                                         from_screen=fs, attachment=att)
+        return {"did": did_c, "say": say_c, "kw": {"detail": {**detail, **det_c}}}
+    if not mac.SEND_FOR_REAL:
+        return {"did": "send_disabled", "say": _sp(lang, "send_off"),
+                "kw": {"detail": {**detail, "fix": "start the server with MICMIC_ALLOW_SEND=1"}}}
+    # Her own words, not said this turn, need a yes like any such message; content from
+    # the screen goes on the countdown, unless she asked to be asked first.
+    why = (("she_asked_to_be_asked" if prefs.always_confirm() else None) if (fs or att)
+           else "not_said_this_turn")
+    if why:
+        return {"did": "confirm_send",
+                "say": _ask_to_send(to, body, lang, chan, why, item.get("in_lang"),
+                                    from_screen=fs, shot_what=shot, attachment=att),
+                "kw": {"asked_back": True, "detail": {**detail, "why": why}}}
+    MEM.contact, MEM.channel = to, chan
+    replaced = _arm_send(to, body, lang, channel=chan, window=CANCEL_WINDOW, attachment=att,
+                         from_screen=fs, shot_what=shot, also=not replace) or replaced
+    # Still counting down, it never went: it is moved, not sent "again".
+    say = _stopped_line(replaced, to, chan, lang) + fu.line(
+        "msg_instead" if replaced else "msg_again", lang,
+        what=fu.line(fu.SAME_WHAT.get(fs, "same_words"), lang),
+        who=who, at_he=with_prefix("ל", who, "hebrew"),
+        at_ar=with_prefix("لـ", who, "arabic"), on_app=_on_app(chan, lang))
+    return {"did": "sending", "say": say,
+            "kw": {"detail": {**detail, "countdown": CANCEL_WINDOW,
+                              **({"replaced": {"to": replaced.get("to"),
+                                               "channel": replaced.get("channel")}}
+                                 if replaced else {})}}}
 
 
 # ---------------------------------------------------------------- undo
@@ -919,6 +1747,10 @@ _SCREEN_SAY = {
                      "arabic": "بأي ساعة؟ أو فيني ضيفها ليوم كامل.",
                      "russian": "В какое время? Или я могу добавить на весь день.",
                      "english": "What time? Or I can add it for the whole day."},
+    "no_song": {"hebrew": "אני לא רואה שם שיר על המסך.",
+               "arabic": "ما شايفة اسم أغنية عالشاشة.",
+               "russian": "Я не вижу название песни на экране.",
+               "english": "I do not see a song on your screen."},
 }
 _SCREEN_SYSTEM = (
     "You are helping someone who is using a Mac. You are given what is on their screen "
@@ -1106,6 +1938,73 @@ def _recent_screenshot() -> dict | None:
     if not os.path.exists(_LAST_SHOT["path"]):
         return None      # she may have moved or renamed it herself since
     return dict(_LAST_SHOT)
+
+
+def _screen_content(lang: str) -> dict:
+    """What "this" is when she sends it: what she selected, else the page she has open,
+    else a screenshot she took a moment ago. {"why": ...} when the screen cannot be
+    read, {} when there is nothing to send, else {"body", "kind", "attachment",
+    "shot_what"}; kind is send_screen, send_link or send_screenshot."""
+    ctx = _screen_context(max_chars=2000)
+    why = _screen_readable(ctx)
+    if why:
+        return {"why": why}
+    recent_shot = _recent_screenshot()
+    if (ctx.get("selected") or "").strip():
+        return {"body": ctx["selected"].strip(), "kind": "send_screen", "attachment": None,
+                "shot_what": None}
+    if (ctx.get("page") or {}).get("url"):
+        return {"body": ctx["page"]["url"], "kind": "send_link", "attachment": None,
+                "shot_what": None}
+    if recent_shot:
+        # "send it to Dana" a few seconds after "take a screenshot", with no fresh word
+        # for screenshot in THIS sentence: the last one still counts.
+        return {"body": None, "kind": "send_screenshot", "attachment": recent_shot["path"],
+                "shot_what": (recent_shot["app"] if (recent_shot["window"] and recent_shot["app"])
+                              else _ss("this_screen", lang))}
+    return {}
+
+
+# A tab's title carries the site's own name past the song ("Dai Dai (Official Video)
+# - YouTube", "Dai Dai - song by Shakira | Spotify"); stripped so what is left is
+# just the song, the way she would say it.
+_TAB_SUFFIX = re.compile(
+    r"\s*[-|–]\s*(?:YouTube|Spotify|Apple Music|Google\s+Search|Genius(?:\s+Lyrics)?)\s*$",
+    re.I)
+# "(Official Video)", "[Lyrics]" and the like: the same upload-decoration words
+# actions/music.py already strips out of a YouTube title (_VIDEO_WORDS), here on a
+# tab title instead.
+_TAB_TAG = re.compile(
+    r"\s*[\(\[][^()\[\]]*\b(?:official|video|audio|lyrics?|clip|hd|4k|mv|visualizer|"
+    r"live|remaster(?:ed)?)\b[^()\[\]]*[\)\]]\s*$", re.I)
+
+
+def _screen_song_hint() -> tuple[str, str]:
+    """A song's title (and artist, if the source gives one) from whatever is in
+    front of her right now, for a "this one"/"the song I see on my screen" request
+    (music.mentions_screen_song). Music's own current or last-selected track when
+    Music itself is the frontmost app (the same read _now_playing already does for
+    "playing"); else a browser tab's title, which YouTube, Spotify's web player and
+    most lyrics sites put the song's own name into; else what she has selected.
+    Returns (hint, why) - hint is "" when nothing looked like a song, and why is a
+    _SCREEN_SAY key for that case (empty string when hint is not empty)."""
+    ctx = _screen_context(max_chars=800)
+    why = _screen_readable(ctx)
+    if why:
+        return "", why
+    fm = ctx.get("frontmost") or {}
+    if fm.get("app") in ("Music", "iTunes"):
+        _, now = am._now_playing()
+        if now:
+            return now, ""
+    title = _TAB_SUFFIX.sub("", ((ctx.get("page") or {}).get("title") or ""))
+    title = _TAB_TAG.sub("", title).strip()
+    if title:
+        return title, ""
+    sel = (ctx.get("selected") or "").strip()
+    if sel and len(sel) < 120:            # a whole paragraph is not a song title
+        return sel, ""
+    return "", "empty"
 
 
 def _front_is_me(ctx: dict) -> bool:
@@ -1674,6 +2573,8 @@ def _fire_pending():
     if not pend:
         return
     lang = pend.get("lang", "english")
+    if _twice(pend):
+        return
     attachment = pend.get("attachment")
     if attachment and pend.get("channel") == "whatsapp":
         # WhatsApp desktop has no attach-a-file hook this project can drive (see
@@ -1699,13 +2600,50 @@ def _fire_pending():
                 else _sp(lang, "send_failed"))
     mac.say(said, lang)
     pend["result"] = msg
-    _HISTORY.append({"did": "sent" if ok else "send_failed", **pend})
+    _HISTORY.append({"did": "sent" if ok else "send_failed", **pend, "sent_at": time.time()})
     # So a cancel that arrives a moment too late can tell her the truth instead of
     # claiming it stopped something that has already gone out.
     with _PLOCK:
         _JUST_SENT.clear()
         _JUST_SENT.update(at=time.time(), to=pend["to"], ok=bool(ok),
                           lang=pend.get("lang", "english"))
+
+
+# The last safety net under a send: the same thing never goes to two people within
+# this many seconds unless she asked for both. Longer than a countdown, so a correction
+# that armed the second one while the first went out is still caught.
+SAME_CONTENT_WINDOW = 15.0
+
+
+def _twice(pend: dict) -> bool:
+    """The same thing just went to someone else and she never asked for both: hold
+    this one and ask, rather than send it. True when it was held."""
+    if pend.get("also"):
+        return False
+    now = time.time()
+    other = next((h for h in reversed(_HISTORY)
+                  if h.get("did") == "sent" and now - h.get("sent_at", 0) < SAME_CONTENT_WINDOW
+                  and h.get("to") != pend.get("to") and _same_content(h, pend)), None)
+    if other is None:
+        return False
+    lang = pend.get("lang", "english")
+    _ask_to_send(pend["to"], pend.get("text") or "", lang, pend.get("channel", "imessage"),
+                 "same_thing_twice", pend.get("in_lang"), risky=bool(pend.get("risky")),
+                 from_screen=pend.get("from_screen"), shot_what=pend.get("shot_what"),
+                 attachment=pend.get("attachment"))
+    if AWAITING is not None:
+        AWAITING["also"] = True        # her yes is her asking for both
+    who, was = display_name(pend["to"], lang), display_name(other["to"], lang)
+    said = degender(fu.line("msg_twice", lang, who=who, other=was,
+                            at_he=with_prefix("ל", who, "hebrew"),
+                            at_ar=with_prefix("لـ", who, "arabic"),
+                            at_he_other=with_prefix("ל", was, "hebrew"),
+                            at_ar_other=with_prefix("لـ", was, "arabic")),
+                    prof.load().get("gender", ""))
+    mac.say(said, lang)
+    _LAST_SPOKEN["say"] = said
+    _HISTORY.append({"did": "held_twice", **pend, "same_as": other.get("to")})
+    return True
 
 
 # The message that went out most recently, and when.
@@ -1972,11 +2910,46 @@ def turn_closed(speak: bool = True, turn_ts: float | None = None, sent: bool = F
             "detail": {"to": held.get("to"), "why": "held"}}
 
 
+def _same_content(a: dict | None, b: dict | None) -> bool:
+    """Two sends carry the same thing: the same words, or the same kind of thing from
+    her screen. Two screenshots taken seconds apart are one picture of her screen as
+    far as she is concerned (the owner's session took one per half of a split)."""
+    if not a or not b:
+        return False
+    sa = a.get("from_screen") or ("send_screenshot" if a.get("attachment") else None)
+    sb = b.get("from_screen") or ("send_screenshot" if b.get("attachment") else None)
+    if sa or sb:
+        return sa == sb and (sa == "send_screenshot"
+                             or (a.get("text") or "") == (b.get("text") or ""))
+    norm = lambda t: re.sub(r"\W+", " ", (t or "").lower()).strip()  # noqa: E731
+    return bool(norm(a.get("text"))) and norm(a.get("text")) == norm(b.get("text"))
+
+
+# "Send it to Dana and Gal", "to Gal too": she asked for more than one send of the same
+# thing. Set for the length of a compound request (see _handle) and passed by the
+# "too" follow-up; without it the same thing never goes to two people seconds apart.
+_BOTH = threading.local()
+
+
+def _asked_for_both() -> bool:
+    return bool(getattr(_BOTH, "on", False))
+
+
 def _arm_send(to: str, text: str, lang: str, channel: str = "imessage",
               window: float | None = None, in_lang: str | None = None,
-              risky: bool = False, attachment: str | None = None):
+              risky: bool = False, attachment: str | None = None,
+              from_screen: str | None = None, shot_what: str | None = None,
+              also: bool = False) -> dict | None:
+    """Read back already, now start the clock. `from_screen` says the words are the
+    screen's (send_link, send_screen, send_screenshot), not hers. `also`: she asked
+    for this one as well as the one counting down ("to Gal too").
+
+    Returns the message this one replaced, if any: the caller says so."""
     global PENDING, _TIMER
     window = CANCEL_WINDOW if window is None else window
+    also = also or _asked_for_both()
+    new = {"to": to, "text": text, "channel": channel, "attachment": attachment,
+           "from_screen": from_screen}
 
     # A message that was read back to her is a promise. "Message David I am fine and
     # tell Ruti the same" armed David's, then armed Ruti's over the top of it: the
@@ -1985,11 +2958,18 @@ def _arm_send(to: str, text: str, lang: str, channel: str = "imessage",
     # instead — she heard it, she did not object, and its countdown had begun.
     # _fire_pending cancels the old timer as it goes, so the new message below starts
     # from a clean slate and gets its own full window.
+    # Except the same thing to another person or by another app, which she did not ask
+    # for as well: that is a correction, and it REPLACES the one counting down. The
+    # owner's session (1.2.0, 2026-09-28): "to Dana not Dina" armed Dana's screenshot,
+    # this fired Dina's on the spot, and the wrong person got it.
+    replaced = None
     with _PLOCK:
         displaced = PENDING is not None
         held = displaced and bool(PENDING.get("paused"))
-    if held:
-        _cancel_pending()        # she stopped its clock; it goes only on a yes
+        correction = (displaced and not also and _same_content(PENDING, new)
+                      and (PENDING.get("to"), PENDING.get("channel")) != (to, channel))
+    if held or correction:
+        replaced = _cancel_pending()   # stopped by her, or replaced: it goes only on a yes
     elif displaced:
         _fire_pending()
 
@@ -1999,10 +2979,74 @@ def _arm_send(to: str, text: str, lang: str, channel: str = "imessage",
             _TIMER = None
         PENDING = {"kind": "send", "to": to, "text": text, "lang": lang,
                    "channel": channel, "fires_at": time.time() + window,
-                   "in_lang": in_lang, "risky": risky, "attachment": attachment}
+                   "in_lang": in_lang, "risky": risky, "attachment": attachment,
+                   **({"from_screen": from_screen, "shot_what": shot_what}
+                      if from_screen else {}),
+                   **({"also": True} if also else {})}
         _TIMER = threading.Timer(window, _fire_pending)
         _TIMER.daemon = True
         _TIMER.start()
+    _remember_message(to, text, lang, channel, in_lang, attachment, from_screen, shot_what)
+    return None if held else replaced
+
+
+def _stopped_line(replaced: dict | None, to: str, channel: str, lang: str) -> str:
+    """What she hears first when a send replaced the one counting down: that the other
+    one will not go, by name ("I stopped the one to Dina.") or by app ("It will not go
+    as a text message."). Empty when nothing was replaced. Ends with a space."""
+    if not replaced:
+        return ""
+    if replaced.get("to") != to:
+        was = display_name(replaced.get("to") or "", lang)
+        return fu.line("stopped_to", lang, who=was, at_he=with_prefix("ל", was, "hebrew"),
+                       at_ar=with_prefix("لـ", was, "arabic")) + " "
+    if replaced.get("channel") != channel:
+        return fu.line("stopped_on", lang,
+                       on_app=_on_app(replaced.get("channel") or "imessage", lang)) + " "
+    return ""
+
+
+def _remember_message(to: str, text: str, lang: str, channel: str, in_lang: str | None,
+                      attachment: str | None, from_screen: str | None,
+                      shot_what: str | None) -> None:
+    """A message that is going (or was opened for her in Telegram or Signal) is the
+    last action: "oh I meant on WhatsApp", "to Gal too", "what did I send?"
+    (savta/followup.py). Content from the screen also ends the draft: the draft is the
+    message of HER words, and "on WhatsApp" must never re-send an older one of those."""
+    screen = bool(from_screen or attachment)
+    if screen:
+        MEM.draft = None
+    MEM.did("message", to=to, channel=channel, text=text, lang=lang, in_lang=in_lang,
+            attachment=attachment, from_screen=from_screen, shot_what=shot_what,
+            own_words=not screen)
+
+
+def _last_message() -> dict | None:
+    """The message just sent or counting down, while it can still be pointed at."""
+    last = MEM.last_action
+    if (last and last.get("kind") == "message"
+            and time.time() - last.get("at", 0) <= fu.FOLLOW_TTL):
+        return last
+    return None
+
+
+def _pending_is(item: dict) -> bool:
+    """That message is the one still counting down."""
+    with _PLOCK:
+        p = PENDING
+    return _is_send(item, p)
+
+
+def _is_send(item: dict, p: dict | None) -> bool:
+    return bool(p and p.get("to") == item.get("to") and p.get("text") == item.get("text")
+                and p.get("attachment") == item.get("attachment"))
+
+
+def _on_app(chan: str, lang: str) -> str:
+    """"on WhatsApp", as each language says it before an app's name."""
+    name = tg.label(chan, lang)
+    return {"hebrew": with_prefix("ב", name, "hebrew"), "arabic": f"على {name}",
+            "russian": f"в {name}", "english": f"on {name}"}.get(lang, f"on {name}")
 
 
 # Which conversation this is. Talking about music and then about flights should not
@@ -2084,6 +3128,7 @@ NEED_KINDS = {
     "confirm_send":      "yesno",     # "send 'yes' to Dana?" (see _why_confirm)
     "who_to_call":       "contact",   # urgent: her answer names who to call NOW
     "event_time":        "event_time",  # "what time, or the whole day?"
+    "confirm_event_change": "yesno",  # "change Dentist to Friday at 10?" (followup.py)
 }
 
 
@@ -2113,7 +3158,14 @@ def _resume(j: Jev, utterance: str, contacts: list[str]) -> dict | None:
             "criteria": {"yes": "Yes: send it, go ahead, sure. כן, תשלחי. Да, отправь. نعم، ابعتي.",
                          "no": "No: do not send it, leave it, cancel. לא. Нет. لأ.",
                          "neither": "Neither a yes nor a no: something else, or unclear."}}
+    # "What should it say?" answered with "this page", "the link", "on WhatsApp", "tell
+    # her I'm coming": an instruction about the content, not the content (the owner's
+    # session, 1.2.0, where "just a link to this page on whatsapp" was queued as the
+    # message). Asked only when her words may point (followup.points_at_content), so
+    # every other answer goes out exactly as before.
+    fold = fu.answer_question(utterance, slot.get("last_sent")) if need == "what" else None
     a = j.ask({"the_machine_asked": slot["question"],
+               **(fold["state"] if fold else {}),
                "her_answer": utterance,
                "her_contacts": contacts[:60]}, {**extra,
         "is_answer": {"type": "noul",
@@ -2131,9 +3183,14 @@ def _resume(j: Jev, utterance: str, contacts: list[str]) -> dict | None:
             "instructions": "Her words only repeat the instruction to write or send a message to someone, instead of saying what the message should say",
             "criteria": {"true": "Write to Nir. Send a message to Nir. תכתבי לניר. תשלחי לו הודעה. Напиши Ниру.",
                          "false": "The words of the message itself: I am running late. Happy birthday. תגיד לו שאני מאחרת. כן, מחר בשמונה. A message that asks the other person to write or call is still the message: write back when you can, call me when you land, תכתוב לי כשתגיע."}},
+        **(fold["questions"] if fold else {}),
     })
     from .jev import choice as _c, noul as _n
-    if _n(a, "is_answer") < 0.4:
+    got = fu.read_answer(a, fold)
+    # Pointing at the page, the same again or an app IS an answer to "what should it
+    # say?", however much it sounds like a new request ("send her this page").
+    pointed = bool(got) and got["is"] != "words"
+    if _n(a, "is_answer") < 0.4 and not pointed:
         AWAITING = None
         return None                      # she changed the subject; handle it fresh
     who, wconf, _ = _c(a, "contact")
@@ -2142,10 +3199,30 @@ def _resume(j: Jev, utterance: str, contacts: list[str]) -> dict | None:
             return {"unresolved": True}
         slot["contact"] = who
     elif kind == "body":
-        if _n(a, "restates_request") > RESTATES_GATE:
-            AWAITING = {**slot, "at": time.time()}   # still waiting for the words
-            return {"re_ask": True, "lang": slot.get("lang", "english")}
-        slot["body"] = utterance.strip()
+        # An app she names switches to it, unless it is inside the words themselves
+        # ("I'm on WhatsApp now, call me there" is a message).
+        app = fu.app_named(utterance) if got else None
+        words = fu.as_said(got["words"], utterance) if got and got["is"] == "words" else None
+        if app and (pointed or (words and not fu.app_named(words))):
+            slot["channel"], slot["chan_said"] = app, True
+        if pointed and got["is"] == "app_only":
+            AWAITING = {**slot, "at": time.time()}   # the app is set; still no words
+            return {"re_ask": True, "lang": slot.get("lang", "english"),
+                    "app": slot.get("channel") if app else None}
+        last = slot.get("last_sent")
+        if pointed and got["is"] == "same" and last:
+            slot.update(body=last.get("text") or None, from_screen=last.get("from_screen"),
+                        attachment=last.get("attachment"), shot_what=last.get("shot_what"),
+                        reused=True)
+        elif pointed:
+            slot["screen_ref"] = True            # resolved by the caller, like "send this"
+            slot["body"] = None
+        else:
+            if _n(a, "restates_request") > RESTATES_GATE:
+                AWAITING = {**slot, "at": time.time()}   # still waiting for the words
+                return {"re_ask": True, "lang": slot.get("lang", "english")}
+            # "Tell her I'm coming": the words are "I'm coming".
+            slot["body"] = words or utterance.strip()
     elif need == "confirm_send":
         yes, yconf, _ = _c(a, "yes_no")
         slot["agreed"] = yes == "yes" and yconf >= CONFIRM_YES_GATE
@@ -2570,6 +3647,10 @@ class Memory:
         # rejects it in. The search hint has to match the query, not the complaint.
         self.play_lang: str = "english"
         self.rejected: list[str] = []      # video ids she turned down
+        # Every song put on in this session, as actions/music.song_key: "another one"
+        # never brings back one of these, in any version (the owner's session had
+        # "MIA (feat. Drake)" and then "MÍA (feat. Drake)").
+        self.played_keys: list[tuple[str, str]] = []
         self.last_played: dict | None = None
         self.last_file: str | None = None
         self.last_app: str | None = None
@@ -2578,6 +3659,22 @@ class Memory:
         # What she last had searched for in an app or on a site she named. Not in the
         # snapshot: that goes out with every request, and this is only for "on eBay too".
         self.app_query: str | None = None
+        # The last thing MicMic did that she can change by pointing at it: a reminder, a
+        # calendar event, an answer about her screen (savta/followup.py). What is
+        # playing is last_played. Not in the snapshot either: it is told to Jev only
+        # when her words could be a change to it, so every other request is unchanged.
+        self.last_action: dict | None = None
+        # The real, dated candidates the last described-song search found
+        # (_search_described): {"singer", "candidates", "at"}. A year said on its own
+        # right after ("the one from 2026") refines THIS, rather than a blind new
+        # search for words with no song name in them (the owner's session: "Shakira
+        # ok 2026" found 47 unrelated things and a model call that guessed wrong,
+        # when the real dated candidates - including the real answer - had already
+        # been fetched a moment before, for "Shakira's latest World Cup song").
+        self.desc_search: dict | None = None
+
+    def did(self, kind: str, **params) -> None:
+        self.last_action = {"kind": kind, "at": time.time(), **params}
 
     def remember_draft(self, to: str | None, text: str | None, channel: str,
                        lang: str, in_lang: str | None = None) -> None:
@@ -2596,7 +3693,16 @@ class Memory:
             self.rejected = []             # new subject, forget the old refusals
         self.play_query, self.play_kind, self.play_full = query, kind, full
         self.play_lang = lang
-        self.last_played = pick
+        # "at": since when it may be playing, so "pause" an hour into a film still
+        # finds it and one from yesterday does not (followup.PLAYER_TTL).
+        self.last_played = {**pick, "at": time.time()} if pick else pick
+        # A search opened for her (Spotify on her words, Netflix on a title) is not
+        # a song that was played.
+        if ((pick or {}).get("title") and not pick.get("words_only")
+                and pick.get("player") not in tg.VIDEO):
+            k = am.row_key(pick)
+            if not any(am.same_key(k, o) for o in self.played_keys):
+                self.played_keys = (self.played_keys + [k])[-40:]
 
     def reject_current(self):
         if self.last_played and self.last_played.get("id"):
@@ -3391,8 +4497,16 @@ def handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
 
     If this turn neither stopped nor changed it, it is not sent: she is asked."""
     held = _held() if depth == 0 and not speculative else None
-    out = _handle(j, utterance, recent, speak, depth, inherited_risk, client,
-                  activation, reason, speculative, asr_conf)
+    if depth == 0:
+        # "The same to Gal", "to Gal too": this turn may send what is counting down to
+        # another person as well (see _arm_send). Every other turn replaces it.
+        _BOTH.on = fu.asks_for_both(utterance)
+    try:
+        out = _handle(j, utterance, recent, speak, depth, inherited_risk, client,
+                      activation, reason, speculative, asr_conf)
+    finally:
+        if depth == 0:
+            _BOTH.on = False
     if held is not None:
         ask = _resolve_held(held)
         if ask:
@@ -3422,6 +4536,9 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
     # them a slow turn in the field cannot be told from a turn that made many calls.
     jev0 = (j.calls, getattr(j, "busy_ms", 0.0))
     llm0 = (LLM_CLIENT.calls, LLM_CLIENT.busy_ms)
+    # The last action as this turn found it. A turn that neither changes it nor sets a
+    # new one is a new request, and finish() forgets it (savta/followup.py).
+    last_before = MEM.last_action
 
     def timing() -> dict:
         return {"jev_n": j.calls - jev0[0],
@@ -3448,6 +4565,10 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                      client=client, activation=activation, chose=did)
         return out_r
     contacts = get_contacts(utterance)
+    # Speculative or not: idempotent and harmless, so the earliest possible call wins
+    # (see _warm_apple_music) - a speculative guess while she is still speaking gives
+    # Music the most possible head start on its cold launch.
+    _warm_apple_music(utterance)
 
     # A call has just gone out. Before anything else: is she calling it off? Without
     # this, "stop" reads as a fresh cry for help and dials the same person again.
@@ -3482,6 +4603,7 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
     # Closing the video window is not a word she said, so it must never be read as
     # her objecting to a message that happens to be counting down. That collision
     # silently cancelled her message and told her nothing.
+    stopped_now = None             # stopped by this turn, which also says how instead
     if PENDING is not None and not speculative:
         stop, sconf, instead = _cancel_check(j, utterance)
         if stop:
@@ -3504,6 +4626,8 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         # "No, send it on WhatsApp": stopped, and the rest of the sentence says how it
         # should be instead. That is handled below as a change to the message (the
         # draft is still there), rather than ending on "stopped" and losing it.
+        if stop and pend is not None and instead > INSTEAD_GATE:
+            stopped_now = pend
         if stop and not (pend is not None and instead > INSTEAD_GATE):
             plang = (pend or {}).get("lang", "english")
             if speak:
@@ -3606,7 +4730,7 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                               lang2, to=slot["to"]), "asked_back": True}
         MEM.contact, MEM.channel = slot["to"], slot.get("channel", "imessage")
         _arm_send(slot["to"], sel, lang2, channel=slot.get("channel", "imessage"),
-                  window=CANCEL_WINDOW)
+                  window=CANCEL_WINDOW, from_screen="send_screen")
         said2 = ((_ss("send_long", lang2) + " ") if cut_long else "") + _ss("send_screen", lang2).format(
             who=who, at_he=with_prefix("ל", who, "hebrew"), at_ar=with_prefix("لـ", who, "arabic"))
         return respond("sending", said2, lang2, to=slot["to"], display=who,
@@ -3664,10 +4788,30 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                                         ev.get("start", ""), ev.get("end", ""),
                                         ev.get("location", ""), all_day=bool(ev.get("all_day")))
                 if ok:
+                    _remember_event(ev, str(msg), lang)
                     return respond("calendar_added",
                                    _ss("cal_done", lang).format(title=ev.get("title", "")),
                                    lang, event=ev)
                 return respond("calendar_failed", _ss("cal_fail", lang), lang,
+                               result=str(msg)[:160])
+
+            # "Change Dentist to Friday at 10?" answered (a follow-up, followup.py). Only
+            # the event MicMic created, found by its uid; anything else is refused.
+            if slot["need"] == "confirm_event_change":
+                ev = slot.get("event") or {}
+                if not slot.get("agreed"):
+                    return respond("event_kept", fu.line("event_kept", lang), lang)
+                ok, msg = mac.change_event(ev.get("uid", ""), ev.get("calendar", ""),
+                                           ev.get("date", ""), ev.get("start", ""),
+                                           ev.get("end", ""), all_day=bool(ev.get("all_day")))
+                if ok:
+                    MEM.last_action = {**ev, "kind": "event", "at": time.time()}
+                    return respond("event_changed", _event_line("event_done", ev, lang),
+                                   lang, event=_event_detail(ev))
+                if msg == "missing":
+                    MEM.last_action = None
+                    return respond("event_missing", fu.line("event_missing", lang), lang)
+                return respond("event_failed", fu.line("event_failed", lang), lang,
                                result=str(msg)[:160])
 
             # An urgent "who should I call?" — dial as soon as she names someone.
@@ -3682,6 +4826,26 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                 out = attempt_call(lang, slot.get("contact"))
                 MEM.contact = slot.get("contact") or MEM.contact
                 return respond(out["did"], out["say"], lang, **out["detail"])
+
+            # "What should it say?" answered by pointing at the screen ("send her this
+            # page", "just a link to this page"): what she has open, taken exactly as
+            # "send this to Dana" takes it, never her words.
+            if slot.pop("screen_ref", False):
+                got_s = _screen_content(lang)
+                if got_s.get("why"):
+                    return respond("screen_unavailable", _ss(got_s["why"], lang), lang,
+                                   why=got_s["why"])
+                if not got_s:
+                    AWAITING = {**slot, "at": time.time()}   # select it, then say so again
+                    return {**respond("screen_select", _ss("select", lang), lang),
+                            "asked_back": True}
+                if HIDDEN in (got_s["body"] or ""):
+                    return respond("screen_secret", _ss("send_secret", lang), lang,
+                                   why="the selection held a code or card number")
+                sbody = got_s["body"] or ""
+                slot.update(body=sbody[:SEND_SCREEN_MAX] or None, from_screen=got_s["kind"],
+                            cut_long=len(sbody) > SEND_SCREEN_MAX,
+                            attachment=got_s["attachment"], shot_what=got_s["shot_what"])
 
             if slot["need"] == "who" and not slot.get("body") and not slot.get("attachment"):
                 AWAITING = {**slot, "at": time.time(), "need": "what",
@@ -3713,7 +4877,9 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                 MEM.remember_draft(slot["contact"], body, slot["channel"], lang,
                                    slot.get("in_lang"))
                 did_c, say_c, det_c = _open_chat(slot["channel"], slot["contact"], body or "",
-                                                 lang, picture=bool(slot.get("attachment")))
+                                                 lang, picture=bool(slot.get("attachment")),
+                                                 from_screen=slot.get("from_screen"),
+                                                 attachment=slot.get("attachment"))
                 return respond(did_c, say_c, lang, **det_c, resumed=True)
             if not mac.SEND_FOR_REAL:
                 # NOTE: `finish` is defined further down inside handle(), so it does not
@@ -3732,7 +4898,10 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             elif slot.get("from_screen"):
                 why = "she_asked_to_be_asked" if prefs.always_confirm() else None
             else:
-                why = _why_confirm(body, slot["need"] in ("what", "when"), asr_conf)
+                # "The same" re-sends words she said before, not this turn.
+                why = _why_confirm(body, (slot["need"] in ("what", "when")
+                                          or bool(slot.get("words_said")))
+                                   and not slot.get("reused"), asr_conf)
             if why:
                 return {**respond("confirm_send",
                                   _ask_to_send(slot["contact"], body, lang,
@@ -3748,10 +4917,15 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             # used to remember nothing, and the next follow-up started from scratch.
             MEM.contact, MEM.channel = slot["contact"], slot.get("channel", "imessage")
             MEM.remember_draft(slot["contact"], body, MEM.channel, lang, slot.get("in_lang"))
-            _arm_send(slot["contact"], body or "", lang, channel=slot.get("channel", "imessage"),
-                      window=SCAM_WINDOW if slot.get("risky") else CANCEL_WINDOW,
-                      in_lang=slot.get("in_lang"), risky=bool(slot.get("risky")),
-                      attachment=slot.get("attachment"))
+            replaced = _arm_send(slot["contact"], body or "", lang,
+                                 channel=slot.get("channel", "imessage"),
+                                 window=SCAM_WINDOW if slot.get("risky") else CANCEL_WINDOW,
+                                 in_lang=slot.get("in_lang"), risky=bool(slot.get("risky")),
+                                 attachment=slot.get("attachment"),
+                                 from_screen=slot.get("from_screen"),
+                                 shot_what=slot.get("shot_what"), also=bool(slot.get("also")))
+            narration = _stopped_line(replaced, slot["contact"], slot.get("channel", "imessage"),
+                                      lang) + narration
             if slot.get("risky"):
                 narration += " " + _MONEY_LINE.get(lang, _MONEY_LINE["english"])
             return respond("sending", narration, lang,
@@ -3763,6 +4937,12 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                            confirmed=slot["need"] == "confirm_send")
         if slot and slot.get("re_ask"):
             lang = slot.get("lang", "english")
+            if slot.get("app"):
+                # "On WhatsApp": the app changed, and there are still no words.
+                return {**respond("need_what", fu.line("what_on", lang,
+                                                       on_app=_on_app(slot["app"], lang)),
+                                  lang, why="she named the app, not the message",
+                                  channel=slot["app"]), "asked_back": True}
             return {**respond("need_what", _sp(lang, "what"), lang,
                               why="she repeated the instruction, not the message"),
                     "asked_back": True}
@@ -3805,6 +4985,16 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
     places = tg.mentions(utterance)
     if places:
         folded_spans["app_query"] = (tg.QUERY_SPAN, tg.QUERY_EXISTS)
+    # "Make it 10 minutes instead", "move it to Friday", "pause", "shorter": which
+    # change to what MicMic just did, if any. Asked only when something is in play AND
+    # her words hold a modifier word (savta/followup.py); otherwise nothing is added.
+    # The message still counting down is marked, so a bare correction ("to Dana not
+    # Dina") is asked about it too (followup.corrects_message).
+    # (Or was, until this turn stopped it to say how it should be instead.)
+    follow = fu.question([{**it, "counting": True, "stopped": stopped_now}
+                          if it.get("kind") == "message" and (
+                              _pending_is(it) or _is_send(it, stopped_now)) else it
+                          for it in fu.in_play(MEM.last_action, MEM.last_played)], utterance)
     u = understand(j, utterance, contacts,
                    recent or json.dumps(MEM.snapshot(), ensure_ascii=False),
                    playing=now_playing, likes=longterm.summary(),
@@ -3814,7 +5004,20 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                    **({"guide": GUIDE.context()} if depth == 0 and GUIDE.active() else {}),
                    # Passed only when there is one: a request naming no app goes out as
                    # it always did, and stand-ins for understand() need not know of it.
-                   **({"named": tg.question(places)} if places else {}))
+                   **({"named": tg.question(places)} if places else {}),
+                   # Words that may describe a song instead of naming it (see
+                   # _identify_song); otherwise not asked, and the request is unchanged.
+                   **({"song_desc": True} if am.describes_a_song(
+                       utterance, bool(MEM.last_played) and (
+                           MEM.last_played.get("player") in IN_APP
+                           or MEM.play_kind == "song_or_music")) else {}),
+                   # Her words may be pointing at the screen instead of naming a song
+                   # (see _screen_song_hint); otherwise not asked, request unchanged.
+                   **({"screen_song": True} if am.mentions_screen_song(
+                       utterance, bool(MEM.last_played) and (
+                           MEM.last_played.get("player") in IN_APP
+                           or MEM.play_kind == "song_or_music")) else {}),
+                   **({"follow": follow} if follow else {}))
     # A guess from a half-finished sentence. Everything expensive has now been done —
     # the address book is warm, the connection is open, the understanding is cached —
     # which is the entire point of asking early. Nothing may be DONE with it: she has
@@ -3829,6 +5032,7 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
 
     # The script she was transcribed in decides this, not the model. See language_of.
     lang = language_of(utterance, u["language"])
+    change = fu.read(u, follow)
 
     # Whenever her own words reveal how she should be addressed, remember it. Costs
     # nothing: the question rode along in the request that was already sent.
@@ -3852,8 +5056,26 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
 
     # Several requests in one breath. Jev spots that reliably; only the splitting needs
     # an LLM, and only once, off the routing path.
-    if depth == 0 and u["is_compound"] > 0.55 and LLM_CLIENT.available:
+    # "Take a screenshot and send to Dana" is ONE action (the message branch takes it
+    # and sends it, one read-back, one countdown). Split, the owner's (1.2.0) became
+    # "take a screenshot", which asked who to send it to, and "send the screenshot to
+    # <the misheard name>", which sent it: both in one reply.
+    shot_send = (_says_any(utterance, _SCREENSHOT_WORDS)
+                 and _says_any(utterance, _SEND_WORDS))
+    if (depth == 0 and u["is_compound"] > 0.55 and LLM_CLIENT.available and not change
+            and not _one_shot_send(utterance)):
         steps = LLM_CLIENT.split_steps(utterance, lang)
+        # A step that only takes the screenshot another step sends is part of that
+        # step: "take a screenshot" alone asks who to send it to.
+        if steps and any(_says_any(st, _SCREENSHOT_WORDS) and _says_any(st, _SEND_WORDS)
+                         for st in steps):
+            kept = [st for st in steps if not (_says_any(st, _SCREENSHOT_WORDS)
+                                               and not _says_any(st, _SEND_WORDS))]
+            if len(kept) == 1 < len(steps):
+                # What is left is one request, in words that name the screenshot.
+                return handle(j, kept[0], recent, speak, depth + 1, inherited_risk, client,
+                              activation, reason, speculative, asr_conf)
+            steps = kept
         if steps and len(steps) > 1:
             # Judge the scam signals on the WHOLE sentence before splitting it. Splitting
             # "transfer money urgently AND tell nobody" puts money in one half and
@@ -3861,10 +5083,35 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             # step inherits the verdict of the sentence she actually said.
             whole_risk = (u["money_involved"] > 0.5 and u["sounds_coached"] > 0.45)
             done = []
-            for step in steps:
-                done.append(handle(j, step, recent, speak=False, depth=depth + 1,
-                                   inherited_risk=whole_risk, client=client,
-                                   activation=activation))
+            asked_before = AWAITING
+            # Every step is something she asked for, so two of them may send the same
+            # thing to two people ("send it to Dana and Gal"). Not when the sentence
+            # corrects itself ("to Dana, no, to Dina"): then the later one replaces.
+            both_before = _asked_for_both()
+            _BOTH.on = not fu.corrects_message(utterance)
+            try:
+                for step in steps:
+                    done.append(handle(j, step, recent, speak=False, depth=depth + 1,
+                                       inherited_risk=whole_risk, client=client,
+                                       activation=activation))
+            finally:
+                _BOTH.on = both_before
+            # One step asked who (or what) a thing from her screen should go to, and a
+            # later one already armed that thing for someone: the question is answered.
+            # Left open, it asked "who should I send it to?" in the same reply that said
+            # it was sending, and her correction a moment later was taken as the answer.
+            with _PLOCK:
+                armed = dict(PENDING) if PENDING is not None else None
+            if (AWAITING is not None and AWAITING is not asked_before
+                    and AWAITING.get("intent") == "message" and not AWAITING.get("contact")
+                    and AWAITING.get("need") in ("who", "what")
+                    and _same_content({"text": AWAITING.get("body"),
+                                       "attachment": AWAITING.get("attachment"),
+                                       "from_screen": AWAITING.get("from_screen")}, armed)):
+                AWAITING = None
+                for d in done:
+                    if d.get("did") in ("need_who", "need_what"):
+                        d["say"], d["did"] = "", "answered_by_a_later_step"
             # A step that produced no spoken line still has to be accounted for, or a
             # two-part request quietly does one thing and she never learns which. If
             # every step came back silent the whole answer was an empty string.
@@ -3873,7 +5120,7 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             for st, d in zip(steps, done):
                 if d.get("say"):
                     spoken.append(d["say"])
-                else:
+                elif d.get("did") != "answered_by_a_later_step":
                     silent.append(st)
             if silent:
                 spoken.append({
@@ -3900,6 +5147,7 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
     # One short line in front of the answer when a standing preference was set aside
     # for what she asked just now (see _standing_turn and the message and volume paths).
     pref_note = ""
+    keep_last = False              # a follow-up keeps what it changed (see last_before)
 
     def finish(did, say_text, **kw):  # noqa: ANN001
         if day_open:
@@ -3938,6 +5186,9 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         elif not offer and not depth and not speculative and did not in ("ignored", "waiting"):
             GUIDE.clear_offer()          # a chip belongs to the answer it came with
         out.update(did=did, say=say_text, **kw)
+        if (not speculative and not keep_last and MEM.last_action is last_before
+                and did not in ("ignored", "waiting", "half_heard")):
+            MEM.last_action = None
         if not speculative and "undo" not in kw and did not in (
                 "ignored", "waiting", "half_heard"):
             _drop_undo()
@@ -3996,7 +5247,9 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                 return
             who = display_name(to, lang2)
             MEM.contact, MEM.channel = to, chan2
-            _arm_send(to, "", lang2, channel=chan2, window=CANCEL_WINDOW, attachment=res["path"])
+            _arm_send(to, "", lang2, channel=chan2, window=CANCEL_WINDOW, attachment=res["path"],
+                      from_screen="send_screenshot",
+                      shot_what=_ss("the_part_you_picked", lang2))
             said = _ss("send_screenshot", lang2).format(
                 who=who, what=_ss("the_part_you_picked", lang2),
                 at_he=with_prefix("ל", who, "hebrew"), at_ar=with_prefix("لـ", who, "arabic"))
@@ -4078,6 +5331,16 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             and u.get("guide_command_confidence", 0.0) >= GUIDE_COMMAND_GATE):
         return _guide_command(u["guide_command"], lang, finish,
                               round(u["guide_command_confidence"], 2))
+
+    # --- a change to what MicMic just did -----------------------------------
+    # Before "I only caught part of that": "at 7 instead" is short by nature, and
+    # complete given what was just done. Louder and next go on to their own branches.
+    if change:
+        keep_last = True
+        got = _follow_up(j, u, change, lang, utterance)
+        if got is not None:
+            lang = got.get("lang") or lang
+            return finish(got["did"], got["say"], lang=lang, **got.get("kw", {}))
     # Two things said over a playing video are not "another one", however much
     # rejects_last says they are. The owner's session (1.0.2): after a film by an actor,
     # "what was his most famous film" and "give me a list of his movies" scored
@@ -4126,6 +5389,59 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         }.get(lang, "I only caught part of that. Say it again?"),
             asked_back=True, detail={"is_complete": round(u["is_complete"], 2)})
 
+    # A song she points at with her eyes, not her words: "play this one" (nothing
+    # else names a song), "play the song I see on my screen", "look at my screen,
+    # you will see the song I want". The owner's session: the literal words "the
+    # song i see on my screen" were searched as "see screen" and played the wrong
+    # thing entirely. The question is only asked when her words may be pointing at
+    # the screen this way (music.mentions_screen_song), so every other request is
+    # unchanged; Jev still has to say yes, since "this one" also means "not this
+    # one" (a rejection, handled below) and "the next one" (another try).
+    screen_song = None
+    if (u.get("screen_song", 0.0) > SCREEN_SONG_GATE and u["intent"] in ("music", "watch")
+            and not asks_about_it and u["control_action"] == "not_applicable"):
+        hint, why = _screen_song_hint()
+        if hint:
+            if MEM.last_played:
+                MEM.reject_current()          # she is naming a different one now
+            u["spans"] = {**(u.get("spans") or {}), "subject": (hint, 1.0)}
+            u["intent"], u["names_title"] = "music", 1.0
+            u["intent_confidence"] = max(u["intent_confidence"], ACT_ON_INTENT)
+            screen_song = {"hint": hint}
+        else:
+            return finish("asked_back", _ss(why or "no_song", lang), asked_back=True,
+                          detail={"why": why or "no_song"})
+
+    # A song she describes instead of naming: identified first, then played like a
+    # song she named. The owner's session (1.1.0): "please change to our latest world
+    # cup song" over Shakira read as "another one" (rejects_last 0.90) and replayed the
+    # "shakira" search. The question is only asked when her words may describe a song
+    # (music.describes_a_song), so every other request is unchanged.
+    identified = None
+    if (u.get("describes_song", 0.0) > DESCRIBES_SONG_GATE
+            and u["intent"] in ("music", "watch") and not asks_about_it
+            and u["control_action"] == "not_applicable" and not screen_song):
+        correcting = bool(instead) or (bool(MEM.last_played) and (
+            u["rejects_last"] > REJECTS_GATE or u["refers_back"] > 0.5))
+        where = _media_player(u, "music", correcting)
+        how, det_i = _identify_song(j, utterance, lang, where)
+        det_i["describes_song"] = round(u["describes_song"], 2)
+        if how == "unknown":
+            return finish("asked_back", am.line("not_identified", lang), asked_back=True,
+                          detail=det_i)
+        idd = det_i.get("identified") or {}
+        if how == "missing":
+            return finish("not_found", am.line(
+                "identified_missing", lang, title=idd.get("title", ""),
+                artist=idd.get("artist") or "?",
+                app=am.APP_NAME.get(where, "YouTube")), detail=det_i)
+        identified = det_i
+        if MEM.last_played and correcting:
+            MEM.reject_current()
+        u["spans"] = {**(u.get("spans") or {}), "subject": (det_i["subject"], 1.0)}
+        u["intent"], u["media_kind"], u["names_title"] = "music", "song_or_music", 1.0
+        u["intent_confidence"] = max(u["intent_confidence"], ACT_ON_INTENT)
+
     # "no, not that one." Replay the last search with the refused answer removed,
     # rather than making her say the whole request again.
     # "it is too loud" is a complaint about what is playing, so it scores as a rejection
@@ -4135,15 +5451,37 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
     # what she wants instead, and replaying discarded that — the same children's song
     # came back. Those fall through to the music request below, which searches for it.
     if (u["rejects_last"] > REJECTS_GATE and MEM.play_query and MEM.last_played
-            and not asks_about_it and not instead
+            and not asks_about_it and not instead and not identified and not screen_song
             and u["describes_instead"] < DESCRIBES_GATE
             and u["control_action"] == "not_applicable"):
         in_app = (MEM.last_played or {}).get("player")
+        # A named app wins even here: "on YouTube" right after a song played in
+        # Apple Music means switch there with the same song, not yet another Apple
+        # Music pick (the same "named app wins" rule used everywhere else,
+        # actions/targets.py).
+        switched = _named_place(u)
+        if switched in tg.PLAYERS + tg.VIDEO and switched != in_app:
+            in_app = switched
         MEM.reject_current()
         if in_app in IN_APP:
+            # A garbled new title is tried, not a stale replay of the old search: the
+            # owner's session said "die die" (Dai Dai) right after a Shakira song and
+            # was told "could not find Waka Waka ... Shakira" - the PREVIOUS turn's
+            # words, never her new ones. Only tried when something is left of her
+            # words once a bare refusal is stripped ("no", "not this one" leave
+            # nothing, and fall straight through to the ordinary replay below).
+            said = _rejection_leftover(utterance)
+            sound = (_sound_match(j, utterance, said, (MEM.last_played or {}).get("artist") or "")
+                    if said else None)
+            if sound:
+                did_a, say_a, det_a = _play_in_app(
+                    j, in_app, sound["title"],
+                    f"{sound['title']} {sound.get('artist', '')}".strip(), lang, preset=sound)
+                return finish(did_a or "not_found", say_a,
+                              detail={**det_a, "after_rejection": True, "sound_match": said})
             # Another song from the same search, in the same app, never the refused ones.
             did_a, say_a, det_a = _play_in_app(j, in_app, MEM.play_query,
-                                               MEM.play_query, lang)
+                                               MEM.play_query, lang, fresh_only=True)
             return finish(did_a or "not_found", say_a,
                           detail={**det_a, "after_rejection": True,
                                   "already_refused": len(MEM.rejected)})
@@ -4156,8 +5494,12 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         if MEM.play_kind != "not_applicable":
             hints = HINTS.get(MEM.play_lang, HINTS["english"])
             again = f"{MEM.play_query} {hints.get(MEM.play_kind, '')}".strip()
+        # Never a song already put on, in any version: "Bad Bunny - MÍA (Official
+        # Video)" after "MIA (feat. Drake)" is the same song.
         results = yt.screen_results(
-            [r for r in yt.search(again) if r["id"] not in MEM.rejected])
+            [r for r in yt.search(again) if r["id"] not in MEM.rejected
+             and not (MEM.play_kind == "song_or_music"
+                      and am.played_before(r, MEM.played_keys))])
         if results:
             # The same judgement the first pick got: what it is, not only who.
             again_want = MEM.play_query
@@ -4268,7 +5610,8 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
     if pref:
         lang = pref.get("lang") or lang
         return finish(pref["did"], pref["say"], detail=pref["detail"], lang=lang,
-                      **({"undo": pref["undo"]} if pref.get("undo") else {}))
+                      **({"undo": pref["undo"]} if pref.get("undo") else {}),
+                      **({"asked_back": True} if pref.get("asked_back") else {}))
     # A saved rule this request goes against: the request wins, and she hears the
     # rule once, in front of the answer.
     near = (standing or {}).get("rules") or []
@@ -4290,7 +5633,7 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
     wants_shot = _says_any(utterance, _SCREENSHOT_WORDS) and u["intent"] in (
         "screen", "message", "unclear", "chitchat", "again")
     shot_send_shaped = u["intent"] == "message" or u.get("screen_task") == "send" or (
-        u["contact_named"] >= 0.5 and u["contact"] != "nobody")
+        u["contact_named"] >= 0.5 and u["contact"] != "nobody") or shot_send
     if wants_shot:
         if shot_send_shaped:
             intent, conf = "message", max(conf, ACT_ON_INTENT)
@@ -4545,6 +5888,8 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             if limit:
                 return finish("daily_limit", limit, detail={"llm": "quota"})
             return finish("screen_no_llm", _ss("no_llm", lang), detail=det)
+        # "Shorter", "in Hebrew", "send that to Dana" change this answer (followup.py).
+        MEM.did("answer", task=task, text=said, lang=lang)
         return finish({"describe": "described_screen", "summarize": "summarized_screen",
                        "translate": "translated_screen"}[task], said, detail=det)
 
@@ -4711,6 +6056,18 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             pass
         return finish("stopped", _sp(lang, "ok"), detail={"closed": None})
 
+    if intent == "player" and not MEM.last_played and u["player_action"] not in (
+            "not_applicable", "stop"):
+        # Nothing MicMic put on, but Music or Spotify is playing: she started it
+        # herself, and "pause" means that one.
+        own = _self_started_player()
+        if own:
+            act = u["player_action"]
+            ok, _ = (am.control if own == "apple_music" else am.spotify_control)(act)
+            return finish("stopped" if act == "pause" else act,
+                          am.line("stopped", lang) if act == "pause" else _sp(lang, "ok"),
+                          detail={"player": own, "control": act, "done": ok,
+                                  "started_by": "her"})
     if intent == "player" and not MEM.last_played:
         # It used to fall all the way through to "I did not understand", which is
         # wrong twice: it understood, and there is a useful thing to offer.
@@ -4731,8 +6088,10 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
 
     if intent == "player" and MEM.last_played:
         act = u["player_action"]
-        in_app = _in_app_control(act, lang) if act != "not_applicable" else None
-        if in_app:
+        in_app = (_control_player(act, lang)
+                  if act not in ("not_applicable", "stop")
+                  else _in_app_control(act, lang) if act == "stop" else None)
+        if in_app and in_app[0] != "cannot_control":
             return finish(in_app[0], in_app[1], detail=in_app[2])
         if act != "not_applicable":
             if act == "stop":
@@ -4848,13 +6207,37 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                      or (bool(MEM.last_played) and (u["rejects_last"] > REJECTS_GATE
                                                     or u["refers_back"] > 0.5)))
         player = _media_player(u, intent, follow_up)
+        # A described song, once identified, says which it is before the usual line:
+        # "Shakira's latest World Cup song is Dai Dai. Playing Dai Dai by Shakira in
+        # Apple Music." Its search is the title and artist, not her description.
+        intro = ((identified or {}).get("intro") or "").strip()
         if player in IN_APP:
-            did_a, say_a, det_a = _play_in_app(j, player, subject, utterance, lang,
-                                               named=bool(named or want_text))
+            # Who her words are about, for the sound-matching fallback when the
+            # exact search finds nothing (_sound_match): named in this sentence
+            # ("...by Bad Bunny"), else the artist she was already listening to -
+            # only consulted once the exact search has already failed, so this
+            # costs nothing on an ordinary request that names its own artist fine.
+            artist_hint = _artist_from_utterance(utterance) or (
+                (MEM.last_played or {}).get("artist") or "")
+            did_a, say_a, det_a = _play_in_app(
+                j, player, subject,
+                # A resolved subject (a description identified, or a screen
+                # reference read off it) is searched for itself, never her raw
+                # sentence: "play the song i see on my screen" must never fall
+                # back to searching "see screen" once the screen has already named
+                # the real song.
+                subject if (identified or screen_song) else utterance, lang,
+                named=bool(named or want_text),
+                fresh_only=follow_up and not identified and u["names_title"] < 0.5,
+                preset=(identified or {}).get("preset"), artist_hint=artist_hint)
             if named:
                 longterm.note("music", subject)
+            if intro and did_a in ("playing", "opened_in_app", "not_started"):
+                say_a = f"{intro} {say_a}"
             return finish(did_a, say_a, detail={**det_a, "subject": subject,
-                                                "subject_conf": round(sconf, 2)})
+                                                "subject_conf": round(sconf, 2),
+                                                **({"identified": _no_preset(identified)}
+                                                   if identified else {})})
         if player in tg.VIDEO:
             # Netflix, Disney+, Prime Video, Apple TV: no way in from outside to start a
             # title, so the service is opened on a search for it (or on its front page
@@ -4934,17 +6317,19 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         # it would feed our own guess back to us as her preference.
         if named:
             longterm.note("watch" if kind in ("film", "video") else "music", subject)
-        if instead:
+        if instead or (identified and follow_up):
             # Her correction replaces what is playing, as "something else" does.
             mac.close_front_window()
         mac.open_url(url)
         # Name it. "Here you go" tells someone who cannot see the screen nothing at all
         # about whether it found the right thing.
-        return finish("playing", _sp(lang, "playing_t",
-                                     title=yt.spoken_title(pick["title"], pick["channel"])),
+        said_yt = _sp(lang, "playing_t",
+                      title=yt.spoken_title(pick["title"], pick["channel"]))
+        return finish("playing", f"{intro} {said_yt}" if intro else said_yt,
                       url=url,
                       detail={"video_id": pick["id"],
                               "thumb": f"https://i.ytimg.com/vi/{pick['id']}/mqdefault.jpg",
+                              **({"identified": _no_preset(identified)} if identified else {}),
                               "query": query, "subject": subject, "subject_conf": round(sconf, 2),
                               "title": pick["title"], "length": pick["length"],
                               "channel": pick["channel"], "views": pick["views"],
@@ -4971,7 +6356,11 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
     # than not (contact_is_named 0.53-0.81 for "her", "לה", measured 2026-09-26).
     by_reference = (u["refers_back"] > 0.5 and u["contact"] != "nobody"
                     and u["contact"] in (MEM.contact, (draft or {}).get("to")))
-    if intent in ("message", "call") and not amending and not by_reference \
+    # Two people in her book sound like the name she said: she is asked which, before
+    # any read-back or countdown (and the recipient check is not needed for that).
+    pair = (_sound_alike(u) if intent == "message" and not amending and not by_reference
+            else None)
+    if intent in ("message", "call") and not amending and not by_reference and not pair \
             and u["contact_named"] >= 0.5 and u["contact"] != "nobody" \
             and _same_person(j, utterance, u["contact"]) < SAME_PERSON_GATE:
         u = {**u, "contact": "nobody"}          # a name not in her book: ask who
@@ -4992,6 +6381,12 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         else:
             chan, overrode = prefs.channel_for(
                 u["contact"] if u["contact"] != "nobody" else None, said_app)
+        # "Send her this page" right after a message to her went by the app she asked
+        # for: that app again, unless she names another (the owner's session, 1.2.0).
+        last_msg = _last_message()
+        if (not said_app and not amending and last_msg and u["refers_back"] > 0.5
+                and u["contact"] == last_msg.get("to")):
+            chan = last_msg.get("channel") or chan
         if overrode:
             by = prefs.BY.get(lang, prefs.BY["english"])
             pref_note = prefs.say(lang, "app_note", by_now=by[chan], by_pref=by[overrode])
@@ -5054,21 +6449,13 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             shot_what = shot["app"] if (shot["window"] and shot["app"]) else _ss("this_screen", lang)
             _remember_shot(attachment, shot["app"], shot["window"])
         elif not amending and u.get("refers_to_screen", 0) > SCREEN_SEND_GATE:
-            ctx = _screen_context(max_chars=2000)
-            why = _screen_readable(ctx)
-            if why:
-                return finish("screen_unavailable", _ss(why, lang), detail={"why": why})
-            recent_shot = _recent_screenshot()
-            if (ctx.get("selected") or "").strip():
-                screen_body, screen_kind = ctx["selected"].strip(), "send_screen"
-            elif (ctx.get("page") or {}).get("url"):
-                screen_body, screen_kind = ctx["page"]["url"], "send_link"
-            elif recent_shot:
-                # "send it to Dana" a few seconds after "take a screenshot", with no
-                # fresh word for screenshot in THIS sentence: the last one still counts.
-                attachment, screen_kind = recent_shot["path"], "send_screenshot"
-                shot_what = (recent_shot["app"] if (recent_shot["window"] and recent_shot["app"])
-                            else _ss("this_screen", lang))
+            got_s = _screen_content(lang)
+            if got_s.get("why"):
+                return finish("screen_unavailable", _ss(got_s["why"], lang),
+                              detail={"why": got_s["why"]})
+            if got_s:
+                screen_body, screen_kind = got_s["body"], got_s["kind"]
+                attachment, shot_what = got_s["attachment"], got_s["shot_what"]
             else:
                 if mac.screen_locked():
                     return finish("screen_locked", _ss("empty", lang),
@@ -5091,16 +6478,28 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         cut_long = bool(screen_body) and len(screen_body) > SEND_SCREEN_MAX
         if cut_long:
             screen_body = screen_body[:SEND_SCREEN_MAX]
-        if u["contact_named"] < 0.5 or u["contact"] == "nobody":
+        if u["contact_named"] < 0.5 or u["contact"] == "nobody" or pair:
             if replacing:
                 _cancel_pending()        # she is changing who it goes to: it must not go
-            AWAITING = {"at": time.time(), "need": "who", "question": "who should the message go to",
-                        "channel": chan, "lang": lang, "body": screen_body or kept_text,
+            words = None
+            if pair and not screen_body and not attachment and body_later is not None:
+                words = body_later()[0] or None      # asked already, in parallel
+            AWAITING = {"at": time.time(), "need": "who", "question": (
+                            f"which of these two people: {pair[0]} or {pair[1]}" if pair
+                            else "who should the message go to"),
+                        "channel": chan, "lang": lang, "body": screen_body or kept_text or words,
                         "cut_long": cut_long, "from_screen": screen_kind, "contact": None,
                         "intent": "message", "chan_said": bool(said_app) or amending,
-                        "attachment": attachment, "shot_what": shot_what}
+                        "attachment": attachment, "shot_what": shot_what,
+                        **({"words_said": True} if words else {})}
             if not screen_body and not attachment:
-                MEM.remember_draft(None, kept_text, chan, lang)
+                MEM.remember_draft(None, kept_text or words, chan, lang)
+            if pair:
+                a, b = (display_name(c, lang) for c in pair)
+                if a == b:
+                    a, b = pair
+                return finish("need_which", fu.line("which_one", lang, a=a, b=b),
+                              asked_back=True, detail={"between": list(pair)})
             return finish("need_who", _sp(lang, "who"), asked_back=True,
                           **({"detail": {"kept": {"text": kept_text, "channel": chan}}}
                              if amending else {}))
@@ -5109,7 +6508,8 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             if chan in tg.OPEN_ONLY:
                 MEM.contact, MEM.channel = u["contact"], chan
                 did_c, say_c, det_c = _open_chat(chan, u["contact"], screen_body or "", lang,
-                                                 picture=bool(attachment))
+                                                 picture=bool(attachment),
+                                                 from_screen=screen_kind, attachment=attachment)
                 return finish(did_c, say_c, detail={**det_c, "from_screen": screen_kind,
                                                     "attachment": attachment})
             if not mac.SEND_FOR_REAL:
@@ -5127,7 +6527,7 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                                       "attachment": attachment})
             MEM.contact, MEM.channel = u["contact"], chan
             _arm_send(u["contact"], screen_body or "", lang, channel=chan, window=CANCEL_WINDOW,
-                      attachment=attachment)
+                      attachment=attachment, from_screen=screen_kind, shot_what=shot_what)
             fmt_kw = dict(who=who, at_he=with_prefix("ל", who, "hebrew"),
                           at_ar=with_prefix("لـ", who, "arabic"))
             if screen_kind == "send_screenshot":
@@ -5140,9 +6540,11 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         if u["has_message_content"] < 0.5:
             if replacing:
                 _cancel_pending()
+            # What was just sent goes with the question: "the same" may be her answer.
             AWAITING = {"at": time.time(), "need": "what", "question": "what should the message say",
                         "channel": chan, "lang": lang, "body": None,
-                        "contact": u["contact"], "intent": "message"}
+                        "contact": u["contact"], "intent": "message",
+                        **({"last_sent": dict(last_msg)} if last_msg else {})}
             MEM.remember_draft(u["contact"], None, chan, lang)
             return finish("need_what", _sp(lang, "what"), asked_back=True)
         if amending:
@@ -5649,7 +7051,9 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             "Which words say what she wants to be reminded about? Only the thing itself, "
             "not the words asking for the reminder and not the amount of time.")
         what = what or utterance
-        mac.set_timer(float(mins), what, lang)
+        row = mac.set_timer(float(mins), what, lang)
+        MEM.did("timer", id=row.get("id", ""), text=what, due=row.get("at", 0),
+                minutes=float(mins), lang=lang)
         human = {"hebrew": f"אזכיר לך בעוד {mins} דקות.",
                  "arabic": f"بذكّرك بعد {mins} دقيقة.",
                  "russian": f"Напомню через {mins} минут.",

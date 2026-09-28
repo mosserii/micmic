@@ -14,7 +14,7 @@ from pathlib import Path
 from .config import PROXY_ROOT, Config
 
 WEB_ROOT = PROXY_ROOT / "web"
-UPDATED = "24 September 2026"
+UPDATED = "28 September 2026"
 
 # path -> template file
 PAGES = {

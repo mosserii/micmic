@@ -37,6 +37,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "native"))
 
+# The listener never downloads a model (the server does, savta/asr_models.py); these
+# walls are for any code path that might reach the downloader from here anyway.
+import os as _os  # noqa: E402
+import tempfile as _tempfile  # noqa: E402
+_os.environ["MICMIC_ASR_NO_DOWNLOAD"] = "1"
+_os.environ["MICMIC_ASR_DIR"] = _tempfile.mkdtemp(prefix="listener-test-asr-")
 import listener as listenermod  # noqa: E402
 from listener import Listener, L  # noqa: E402
 
@@ -401,9 +407,27 @@ class FakeRecognizer:
 LOGS: list[str] = []
 
 
-def turn_listener(alt=None):
-    """A running listener with a fake recogniser. `alt`, when given, is what the
-    second-language read of the kept audio returns: (text, confidence)."""
+class FakeLocal:
+    """native/local_asr.LocalASR's surface: what the local model reads from a turn."""
+    def __init__(self, result, delay=0.0):
+        self.result, self.delay, self.calls = result, delay, []
+        self.ready = True
+        self.usable = True
+        self.woken = 0
+        self.key = ("fake", "/nonexistent", "/nonexistent")
+
+    def wake(self):
+        self.woken += 1
+
+    def transcribe(self, samples, rate):
+        self.calls.append((len(samples), rate))
+        time.sleep(self.delay)
+        return self.result
+
+
+def turn_listener(local=None):
+    """A running listener with a fake recogniser. `local`, when given, is the local
+    model (FakeLocal): the turn's samples are kept for it and it reads the turn."""
     for name in ("play_sound", "server_duck"):
         setattr(listenermod, name, lambda *a, **k: None)
     listenermod.stop_speaking = lambda: None
@@ -418,15 +442,14 @@ def turn_listener(alt=None):
     lst.send = lambda text, activation="wake", released_at=0.0, turn=None, asr_confidence=None: \
         sent.append((text, activation))
     lst.schedule_restart = lambda delay=0.3: None
-    if alt is not None:
-        # "audio=kept, second language will read it", and the read comes back with this.
-        lst.recognizer_alt = object()
-        lst._open_turn_audio = lambda: setattr(lst, "turn_audio_path", "/nonexistent/turn.caf")
-        lst._close_turn_audio = lambda: "/nonexistent/turn.caf"
-        lst._drop_turn_audio = lambda: setattr(lst, "turn_audio_path", "")
-        lst._read_turn_audio_alt = lambda path: setattr(lst, "alt_final", alt)
-        lst.alt_task = None
+    lst.local = local
     return lst, bar, sent
+
+
+def hear(lst, seconds=1.0):
+    """What the audio tap does while a turn is open: her samples, kept in memory."""
+    if lst.turn_samples is not None:
+        lst.turn_samples.extend([0.01] * int(48000 * seconds))
 
 
 def partial(lst, text):
@@ -452,9 +475,9 @@ def settle_turn(lst, sent, timeout=2.0):
 
 def test_empty_final_after_shown_words_is_sent():
     """The exact log: tap turn, words on the bar, pressed again, empty final (0.00),
-    the second language finds nothing too."""
+    and no local model to read it."""
     LOGS.clear()
-    lst, bar, sent = turn_listener(alt=("", 0.0))
+    lst, bar, sent = turn_listener()
     lst.push_to_talk()                       # tap: stays open until pressed again
     for w in ("מה", "מה השעה", "מה השעה מיקמק"):
         partial(lst, w)
@@ -463,12 +486,140 @@ def test_empty_final_after_shown_words_is_sent():
     lst.push_to_talk()                       # "turn finishing: pressed again"
     final(lst, "", conf=0.0)                 # "turn: he-IL 0.00 (final)"
     settle_turn(lst, sent)
-    check("the second language was asked to read it, as in the log",
-          any("second language will read it" in m for m in LOGS), LOGS)
+    check("the log says Apple alone read it (no local model)",
+          any("local read none" in m for m in LOGS), LOGS)
     check("the turn is sent with what the bar showed, not thrown away",
           sent == [("מה השעה מיקמק", "push")], (sent, LOGS[-4:]))
     check("it never says nothing was said",
           "turn ended with nothing said" not in LOGS, LOGS[-4:])
+
+
+def test_one_language_no_this_stays_english():
+    """The owner's 2026-09-28 session: "no this" (en-US 0.24) went out as Hebrew
+    "נודס" because a second recogniser read the turn in Hebrew and scored 0.37. She
+    now chooses one language and MicMic listens in it alone: there is no second
+    recogniser to lose to, however low her own language scores."""
+    LOGS.clear()
+    lst, bar, sent = turn_listener()
+    lst.locale = "en-US"                     # she chose English
+    check("no second recogniser exists", not hasattr(lst, "recognizer_alt")
+          and not hasattr(listenermod, "ALT_LOCALE"), dir(lst))
+    lst.push_to_talk()
+    partial(lst, "no this")
+    lst.push_to_talk()
+    final(lst, "no this", conf=0.24)
+    settle_turn(lst, sent)
+    check("a low-confidence short English turn is sent as English",
+          sent == [("no this", "push")], (sent, LOGS[-4:]))
+    check("nothing was compared against another language",
+          not any(" vs " in m or "he-IL" in m for m in LOGS), LOGS[-4:])
+
+
+def test_local_reading_wins_and_does_not_wait_for_apple():
+    """With the local model loaded, its reading of the whole turn is what is sent
+    (it had half Apple's word errors on the owner's voice), with its own confidence,
+    and the turn does not wait for Apple's final to arrive."""
+    LOGS.clear()
+    local = FakeLocal(("To Dana, not Dina.", 0.83))
+    lst, bar, sent = turn_listener(local=local)
+    confs = []
+    lst.send = lambda text, activation="wake", released_at=0.0, turn=None, asr_confidence=None: \
+        (sent.append((text, activation)), confs.append(asr_confidence))
+    lst.push_to_talk()
+    check("the turn keeps her samples for the local model", lst.turn_samples == [],
+          lst.turn_samples)
+    hear(lst, 1.5)
+    partial(lst, "donna not dinah")
+    lst.push_to_talk()                       # finished; Apple's final never comes
+    started = time.time()
+    settle_turn(lst, sent)
+    check("the local reading is sent", sent == [("to dana not dina", "push")],
+          (sent, LOGS[-4:]))
+    check("with the local model's confidence", confs == [0.83], confs)
+    check("it read her samples at the tap's rate", local.calls == [(72000, 48000)], local.calls)
+    check("without waiting out FINAL_WAIT for Apple",
+          time.time() - started < listenermod.FINAL_WAIT, time.time() - started)
+    check("the samples are gone once the turn is sent", lst.turn_samples is None,
+          lst.turn_samples)
+
+
+def test_local_read_that_fails_falls_back_to_apple():
+    """A read that returns nothing (a failed or empty decode) leaves the turn to
+    Apple's final, exactly as before the local model existed."""
+    LOGS.clear()
+    lst, bar, sent = turn_listener(local=FakeLocal(None))
+    lst.push_to_talk()
+    hear(lst)
+    partial(lst, "what time is it")
+    lst.push_to_talk()
+    final(lst, "what time is it", conf=0.9)
+    settle_turn(lst, sent)
+    check("Apple's final is sent", sent == [("what time is it", "push")], (sent, LOGS[-4:]))
+    check("and the log says the local read failed",
+          any("local read failed" in m for m in LOGS), LOGS[-4:])
+
+
+def test_local_read_too_slow_is_not_waited_for():
+    """LOCAL_WAIT bounds the wait: a read that hangs never holds her turn hostage."""
+    LOGS.clear()
+    lst, bar, sent = turn_listener(local=FakeLocal(("late words", 0.9),
+                                                   delay=listenermod.LOCAL_WAIT + 1.0))
+    lst.push_to_talk()
+    hear(lst)
+    partial(lst, "what time is it")
+    lst.push_to_talk()
+    final(lst, "what time is it", conf=0.9)
+    settle_turn(lst, sent, timeout=listenermod.LOCAL_WAIT + 0.8)
+    check("Apple's words go out once LOCAL_WAIT has passed",
+          sent == [("what time is it", "push")], (sent, LOGS[-4:]))
+    check("logged as too slow", any("local read too slow" in m for m in LOGS), LOGS[-4:])
+
+
+def test_no_samples_kept_without_a_local_model():
+    """Her voice is kept only when something will read it: no model, no samples."""
+    lst, bar, sent = turn_listener()
+    lst.push_to_talk()
+    check("nothing is kept", lst.turn_samples is None, lst.turn_samples)
+    lst.push_to_talk()
+    final(lst, "")
+    settle_turn(lst, sent)
+
+
+def test_the_listener_never_downloads_a_model():
+    """The download lives in the server; the listener only loads what is already
+    there. A listener that could fetch 733 MB on its own is a test that can too."""
+    lst_src = (ROOT / "native" / "listener.py").read_text()
+    loc_src = (ROOT / "native" / "local_asr.py").read_text()
+    check("the listener never imports the downloader",
+          "import asr_models" not in lst_src and "asr_models import" not in lst_src)
+    check("local_asr has no network code at all",
+          "urllib" not in loc_src and "http" not in loc_src.replace("https://", ""), "")
+
+
+def test_apply_local_asr_follows_the_config():
+    """The config's "asr" field decides: loaded only when ready and for her language."""
+    import local_asr
+    loads = []
+    real = local_asr.LocalASR.load_async
+    local_asr.LocalASR.load_async = lambda self: loads.append(self.info["engine"])
+    try:
+        lst = fresh_listener()
+        lst.locale = "en-US"
+        ready = {"lang": "en", "state": "ready", "engine": "e1", "dir": "/d", "runtime": "/r",
+                 "kind": "nemo_transducer"}
+        lst.apply_local_asr({"asr": {**ready, "state": "downloading"}})
+        check("not while downloading", lst.local is None and loads == [], loads)
+        lst.apply_local_asr({"asr": ready})
+        check("loaded once ready", lst.local is not None and loads == ["e1"], loads)
+        lst.apply_local_asr({"asr": ready})
+        check("not reloaded by the next poll", loads == ["e1"], loads)
+        lst.locale = "he-IL"
+        lst.apply_local_asr({"asr": ready})
+        check("dropped when she speaks another language", lst.local is None)
+        lst.apply_local_asr({})
+        check("an older server without the field leaves Apple alone", lst.local is None)
+    finally:
+        local_asr.LocalASR.load_async = real
 
 
 def test_session_replaced_mid_turn_keeps_its_words():
@@ -556,24 +707,10 @@ def test_a_good_final_still_wins():
     check("the final is sent", sent == [("what time is it", "push")], (sent, LOGS[-4:]))
 
 
-def test_second_language_still_wins_when_surer():
-    """Unchanged: the shown text only stands in for the final; a second-language read
-    that is more confident still beats it."""
-    LOGS.clear()
-    lst, bar, sent = turn_listener(alt=("what time is it", 0.85))
-    lst.push_to_talk()
-    partial(lst, "ווט טיים איז איט")
-    lst.push_to_talk()
-    final(lst, "")
-    settle_turn(lst, sent)
-    check("the surer second-language read is sent", sent == [("what time is it", "push")],
-          (sent, LOGS[-4:]))
-
-
 def test_nothing_shown_is_still_nothing_said():
     """Unchanged: a turn in which nothing ever appeared still ends quietly."""
     LOGS.clear()
-    lst, bar, sent = turn_listener(alt=("", 0.0))
+    lst, bar, sent = turn_listener()
     lst.push_to_talk()
     lst.push_to_talk()
     final(lst, "")
@@ -1501,8 +1638,66 @@ def test_a_turn_without_a_web_run_is_not_followed():
     check("no web_run, no polling", lst.web_follow is None and not called, called)
 
 
+def test_a_new_turn_never_leaves_the_last_turns_voice_behind():
+    """A turn opened over one that never reached its pick used to leave that turn's
+    .caf in $TMPDIR (four were found on the owner's Mac, 2026-09-28). Nothing is
+    written to disk any more: the samples live in memory, and a new turn drops them."""
+    lst, bar, sent = turn_listener(local=FakeLocal(("x", 0.9)))
+    lst.push_to_talk()
+    hear(lst)
+    first = lst.turn_samples
+    lst.start_turn("followup")               # a turn opened over the open one
+    check("the older turn's samples are dropped", lst.turn_samples == [] and
+          lst.turn_samples is not first, len(lst.turn_samples or []))
+    check("no turn file machinery is left",
+          not any(hasattr(lst, n) for n in ("turn_audio", "turn_audio_path",
+                                           "_open_turn_audio")), dir(lst))
+
+
+def test_local_model_is_freed_when_idle_and_woken_by_the_next_turn():
+    """The owner's choice: free the ~1.2 GB model after 5 idle minutes, as Handy does.
+    The next turn brings it back while she talks; nothing is freed mid-read."""
+    import local_asr
+    logs = []
+    m = local_asr.LocalASR({"engine": "fake", "dir": "/x", "runtime": "/x"}, log=logs.append)
+    loads = []
+    m.load_async = lambda: (loads.append(1), setattr(m, "loading", True))
+    m.rec = object()
+    m.last_used = 1000.0
+    check("not freed before the idle time is up",
+          not m.free_if_idle(now=1000.0 + local_asr.IDLE_UNLOAD - 1) and m.rec is not None)
+    m.lock.acquire()
+    check("never freed while a turn is being read",
+          not m.free_if_idle(now=1000.0 + local_asr.IDLE_UNLOAD + 1) and m.rec is not None)
+    m.lock.release()
+    check("freed once idle long enough",
+          m.free_if_idle(now=1000.0 + local_asr.IDLE_UNLOAD + 1) and m.rec is None, logs)
+    check("a freed model is still worth keeping samples for? no, until woken", not m.usable)
+    m.wake()
+    check("the next turn reloads it", loads == [1] and m.usable, (loads, m.loading))
+    m.wake()
+    check("and only once while it loads", loads == [1], loads)
+
+
+def test_turn_open_wakes_the_local_model():
+    """Pressing the key is what brings a freed model back, so it reloads while she talks."""
+    LOGS.clear()
+    local = FakeLocal(("hello", 0.9))
+    lst, bar, sent = turn_listener(local=local)
+    lst.push_to_talk()
+    check("opening a turn wakes the local model", local.woken == 1, local.woken)
+    local.usable = False
+    lst.push_to_talk()
+    lst.push_to_talk()
+    check("a model that is gone (not loading) keeps no samples",
+          local.woken == 2 and lst.turn_samples is None, (local.woken, lst.turn_samples))
+
+
 def main():
-    for t in (test_follow_web_shows_progress_the_wait_and_the_end,
+    for t in (test_local_model_is_freed_when_idle_and_woken_by_the_next_turn,
+              test_turn_open_wakes_the_local_model,
+              test_a_new_turn_never_leaves_the_last_turns_voice_behind,
+              test_follow_web_shows_progress_the_wait_and_the_end,
               test_follow_web_never_paints_over_a_newer_answer,
               test_follow_web_stops_for_a_newer_task_and_a_silent_stop,
               test_a_turn_without_a_web_run_is_not_followed,
@@ -1519,12 +1714,18 @@ def main():
               test_view_heard_ignores_empty_text,
               test_armed_window_expiry_via_watchdog,
               test_empty_final_after_shown_words_is_sent,
+              test_one_language_no_this_stays_english,
+              test_local_reading_wins_and_does_not_wait_for_apple,
+              test_local_read_that_fails_falls_back_to_apple,
+              test_local_read_too_slow_is_not_waited_for,
+              test_no_samples_kept_without_a_local_model,
+              test_apply_local_asr_follows_the_config,
+              test_the_listener_never_downloads_a_model,
               test_session_replaced_mid_turn_keeps_its_words,
               test_empty_final_mid_turn_keeps_partial,
               test_short_final_does_not_beat_what_was_shown,
               test_hold_to_talk_release_with_empty_final,
               test_a_good_final_still_wins,
-              test_second_language_still_wins_when_surer,
               test_nothing_shown_is_still_nothing_said,
               test_tap_turn_ends_on_silence_after_speech,
               test_tap_turn_without_words_waits,
