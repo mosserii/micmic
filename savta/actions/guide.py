@@ -638,10 +638,11 @@ class Guide:
                        "history": [], "started": time.time(), "pending": "start",
                        "quiet": wait, "snap": None, "computed": 0, "why_shown": False}
             self._offer = None
-            # A client of its own per guide: credentials may have changed since the
-            # last one (savta.account swaps them), and a step never queues behind an
-            # answer she is waiting for on the router's connection.
-            self.llm = None
+            # A client of its own, so a step never queues behind an answer she is
+            # waiting for on the router's connection. Kept from the last guide (and
+            # warm, see warm()) unless the credentials changed since (savta.account
+            # swaps them): a new one paid a TLS handshake on every first step.
+            self.llm = self._client()
             self._cv.notify_all()
         threading.Thread(target=self._run, args=(sid,), daemon=True,
                          name="micmic-guide").start()
@@ -1002,9 +1003,29 @@ class Guide:
 
     def _gemini(self, req: dict) -> dict | None:
         if self.llm is None:
-            from ..llm import LLM
-            self.llm = LLM()
+            self.llm = self._client()
         return gemini_step(self.llm, req)
+
+    def _client(self):
+        """The guide's own Gemini client: the one it has while the credentials are
+        unchanged, else a new one."""
+        from ..llm import LLM
+        fresh = LLM()
+        old = self.llm
+        if old is not None and (old.key, old._proxy, old.model) == (
+                fresh.key, fresh._proxy, fresh.model):
+            return old
+        return fresh
+
+    def warm(self) -> None:
+        """Her words may start or move a guide: open its Gemini connection now, on its
+        own thread, while Jev reads them. Nothing else changes."""
+        if self.model is not None:
+            return
+        with self._lock:
+            self.llm = self._client()
+            llm = self.llm
+        threading.Thread(target=llm.refresh, daemon=True).start()
 
 
 def _as_ring(r):

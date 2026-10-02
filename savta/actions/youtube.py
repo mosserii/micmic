@@ -1,22 +1,98 @@
 """Search YouTube without an API key, then let Jev pick the right result."""
 from __future__ import annotations
-import json, re, subprocess, urllib.error, urllib.parse, urllib.request
+import gzip, json, queue, re, subprocess, threading, time, urllib.error, urllib.parse
+import urllib.request
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+# The consent cookie matters: without it a EU-resolved request can land on the
+# consent interstitial instead of results. (Lesson taken from macbrow.)
+HEADERS = {"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9",
+           "Cookie": "SOCS=CAI; CONSENT=YES+cb", "Accept-Encoding": "gzip"}
+
+# The results page is the slow step of putting something on. MicMic Bench v1
+# (2026-10-01): media p95 5.9 s and hard media up to 14.5 s with Jev under a second
+# of it; the rest was this page, ~1.3 MB, ~1 s on a good fetch and 10 s on a bad one,
+# and one identified song fetched it twice (the check that it is there, then the
+# search that plays it), the second time empty. So, measured 2026-10-02 on 10 queries:
+#   * gzip: 1.3-1.5 MB becomes ~280 KB on the wire (YouTube streams it, so the read
+#     is ~0.5 s instead of ~0.7 s);
+#   * a fetch with no page after YT_HEDGE_S sends one duplicate, first page wins, and
+#     the whole thing gives up after YT_TOTAL_S (it was a 20 s timeout);
+#   * the same address within YT_CACHE_S is the page already fetched.
+YT_HEDGE_S = 2.5
+YT_TOTAL_S = 10.0
+YT_CACHE_S = 30.0
+_PAGES: dict[str, tuple[float, str]] = {}
+_PLOCK = threading.Lock()
+
+
+def _fetch_page(url: str, headers: dict, timeout: float) -> str | None:
+    """One fetch of a results page, as text, or None."""
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(url, headers=headers),
+                                   timeout=timeout)
+        raw = r.read()
+        if (r.headers.get("Content-Encoding") or "").lower() == "gzip":
+            raw = gzip.decompress(raw)
+        return raw.decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _page(url: str) -> str | None:
+    """The page at url: from the last YT_CACHE_S, or fetched, hedged (see above)."""
+    with _PLOCK:
+        hit = _PAGES.get(url)
+    if hit and time.time() - hit[0] < YT_CACHE_S:
+        return hit[1]
+    box: queue.Queue = queue.Queue()
+
+    def run() -> None:
+        box.put(_fetch_page(url, dict(HEADERS), YT_TOTAL_S))
+
+    t0 = time.time()
+    threading.Thread(target=run, daemon=True).start()
+    started, got, html = 1, 0, None
+    while got < started:
+        left = t0 + YT_TOTAL_S - time.time()
+        wait = min(left, t0 + YT_HEDGE_S - time.time()) if started == 1 else left
+        try:
+            page = box.get(timeout=max(0.0, wait))
+        except queue.Empty:
+            if started == 1 and time.time() - t0 < YT_TOTAL_S:
+                started = 2
+                threading.Thread(target=run, daemon=True).start()
+                continue
+            break
+        got += 1
+        if page:
+            html = page
+            break
+    if html:
+        with _PLOCK:
+            _PAGES[url] = (time.time(), html)
+            for k in [k for k, (at, _) in _PAGES.items() if time.time() - at > YT_CACHE_S]:
+                _PAGES.pop(k, None)
+    return html
+
+
+def _forget(url: str) -> None:
+    """A page that held no results is not kept: the retry must fetch it again."""
+    with _PLOCK:
+        _PAGES.pop(url, None)
 
 
 def search(query: str, n: int = 18) -> list[dict]:
     url = "https://www.youtube.com/results?search_query=" + urllib.parse.quote(query)
-    # The consent cookie matters: without it a EU-resolved request can land on the
-    # consent interstitial instead of results. (Lesson taken from macbrow.)
-    req = urllib.request.Request(url, headers={
-        "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9",
-        "Cookie": "SOCS=CAI; CONSENT=YES+cb"})
-    try:
-        html = urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "replace")
-    except Exception:  # noqa: BLE001
-        return []
+    html = _page(url)
+    rows = _results(html, n) if html else []
+    if not rows:
+        _forget(url)
+    return rows
+
+
+def _results(html: str, n: int) -> list[dict]:
     m = re.search(r"var ytInitialData = (\{.*?\});</script>", html) or \
         re.search(r'ytInitialData"\]\s*=\s*(\{.*?\});', html)
     if not m:
@@ -56,13 +132,14 @@ def live(query: str, n: int = 12) -> list[dict]:
     """Search restricted to live broadcasts. sp=EgJAAQ%3D%3D is YouTube's live filter."""
     url = ("https://www.youtube.com/results?search_query="
            + urllib.parse.quote(query) + "&sp=EgJAAQ%253D%253D")
-    req = urllib.request.Request(url, headers={
-        "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9",
-        "Cookie": "SOCS=CAI; CONSENT=YES+cb"})
-    try:
-        html = urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "replace")
-    except Exception:  # noqa: BLE001
-        return []
+    html = _page(url)
+    rows = _live_results(html, n) if html else []
+    if not rows:
+        _forget(url)
+    return rows
+
+
+def _live_results(html: str, n: int) -> list[dict]:
     # Same two page shapes search() has to handle — without this fallback, live()
     # came back empty on any day YouTube served the alternate shape, even though
     # search() (asking for the same content) parsed fine.

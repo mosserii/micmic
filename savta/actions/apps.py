@@ -382,6 +382,22 @@ def decide(j, goal: str, snap: dict, history: list[str], dead: list[str] | None 
             "goal_met": noul(a, "goal_met"), "needs_her": noul(a, "needs_her")}
 
 
+def ensure_open(app_name: str, wait: float = 4.0) -> bool:
+    """The app she named is running, opening it first if it is not: "in the
+    calculator, press 5" with no Calculator open used to end in "it is not running"."""
+    if _pid_for(app_name) is not None:
+        return True
+    from . import mac
+    mac.open_app(app_name)
+    end = time.time() + wait
+    while time.time() < end:
+        time.sleep(0.25)
+        if _pid_for(app_name) is not None:
+            time.sleep(0.4)          # its window comes a moment after its process
+            return True
+    return False
+
+
 def run(j, llm, goal: str, app_name: str, on_step=None,
         max_steps: int = MAX_STEPS, time_budget: float = TIME_BUDGET) -> dict:
     """Drive one application toward the goal. Stops at anything only she should decide."""
@@ -392,6 +408,7 @@ def run(j, llm, goal: str, app_name: str, on_step=None,
     if not ok:
         result.update(did="needs_her", why=why, ended="accessibility not available")
         return result
+    ensure_open(app_name)
 
     dead: list[str] = []
     useless: set = set()
@@ -470,3 +487,187 @@ def run(j, llm, goal: str, app_name: str, on_step=None,
         if on_step:
             on_step(steps[-1])
     return result
+
+
+# ---------------------------------------------------------------- pressing keys
+# "In the calculator, press 5 times 3." A keypad sequence is exact: the demo check
+# (2026-10-01) saw the step loop above press 5, Multiply, 5, 3, Equals, Equals, All
+# Clear, 5, Multiply, 3, Equals (an operator press changes no value on screen, so it
+# counted as dead and the digit was pressed again) and then say only "Alright". Here
+# code reads the keys out of her words and presses exactly those, in order, then reads
+# the display back. No model chooses a key, so none can press a stray one.
+PRESS_WORDS = re.compile(
+    r"\b(?:press|push|hit|tap|click|type|enter|punch\s+in|key\s+in)\b|"
+    r"תלחצ[יו]|לחצ[יו]|תלחץ|\bלחץ\b|תקליד[יו]?|הקליד[יו]|תקיש[יו]|הקיש[יו]|"
+    r"اكبس[ي]?|كبس[ي]?|[اإ]ضغط[ي]?|دوس[ي]?|اكتب[ي]?|"
+    r"нажм[иы]т?е?|нажать|набер[иы]т?е?|введ[иы]т?е?|кликн[иы]", re.I)
+
+_OPS = {
+    "+": "+ plus add added ועוד פלוס زائد زايد плюс прибавить прибавь",
+    "-": "- − – minus subtract take פחות מינוס ناقص минус вычесть отними",
+    "×": "× * x times multiplied multiply כפול ضرب ضربي умножить умножь",
+    "÷": "÷ / divided divide over חלקי لحلق تقسيم قسمة разделить раздели",
+    "=": "= equals equal שווה يساوي равно",
+    ".": ". point dot decimal נקודה فاصلة точка",
+    "%": "% percent אחוז بالمية процент процентов",
+    "AC": "clear ac",
+}
+_KEY_OF = {w: k for k, ws in _OPS.items() for w in ws.split()}
+_UNITS = {"zero": 0, "oh": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+          "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+          "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+          "seventeen": 17, "eighteen": 18, "nineteen": 19,
+          "אפס": 0, "אחת": 1, "אחד": 1, "שתיים": 2, "שניים": 2, "שלוש": 3, "שלושה": 3,
+          "ארבע": 4, "ארבעה": 4, "חמש": 5, "חמישה": 5, "שש": 6, "שישה": 6, "שבע": 7,
+          "שבעה": 7, "שמונה": 8, "תשע": 9, "תשעה": 9, "עשר": 10, "עשרה": 10,
+          "صفر": 0, "واحد": 1, "اثنين": 2, "اتنين": 2, "ثلاثة": 3, "تلاتة": 3,
+          "أربعة": 4, "اربعة": 4, "خمسة": 5, "ستة": 6, "سبعة": 7, "ثمانية": 8,
+          "تمانية": 8, "تسعة": 9, "عشرة": 10,
+          "ноль": 0, "один": 1, "два": 2, "три": 3, "четыре": 4, "пять": 5, "шесть": 6,
+          "семь": 7, "восемь": 8, "девять": 9, "десять": 10}
+_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+         "seventy": 70, "eighty": 80, "ninety": 90}
+_FILLER = set("""
+the a an button buttons key keys number numbers digit digits then and by on in into it
+please now for me after that also away calculator calculators
+את על ב ה ו ואז אחר כך מספר כפתור המספר הכפתור את-ה במחשבון מחשבון
+على ب ال ثم و بعدين الرقم زر الزر الآلة الحاسبة
+на и потом затем кнопку кнопка цифру число в калькулятор калькуляторе
+""".split())
+
+
+def key_sequence(text: str, app_name: str = "") -> list[str] | None:
+    """The keys a keypad request names, in order, or None when her words are not just
+    keys ("press the blue button" is the step loop's job). "5 times 3" ends with
+    equals, as anyone pressing it would: ["5", "×", "3", "="]."""
+    t = text or ""
+    m = PRESS_WORDS.search(t)
+    if m:
+        t = t[m.end():]
+    skip = {w.lower() for w in re.findall(r"[^\W\d_]+", app_name or "")}
+    toks = re.findall(r"\d+(?:[.,]\d+)?|[+\-−–×*÷/=%.]|[^\W\d_]+", t)
+    keys: list[str] = []
+    i = 0
+    while i < len(toks):
+        w = toks[i].lower()
+        i += 1
+        if re.fullmatch(r"\d+(?:[.,]\d+)?", w):
+            keys.extend("." if c in ".," else c for c in w)
+            continue
+        if w in _TENS:
+            n = _TENS[w]
+            if i < len(toks) and toks[i].lower() in _UNITS and _UNITS[toks[i].lower()] < 10:
+                n += _UNITS[toks[i].lower()]
+                i += 1
+            keys.extend(str(n))
+            continue
+        for cand in (w, w[1:] if len(w) > 2 and w[0] in "וב" else None):
+            if cand is None:
+                continue
+            if cand in _UNITS:
+                keys.extend(str(_UNITS[cand]))
+                break
+            if cand in _KEY_OF:
+                keys.append(_KEY_OF[cand])
+                break
+            if cand in _FILLER or cand in skip:
+                break
+        else:
+            return None
+    if not any(k.isdigit() for k in keys):
+        return None
+    if any(k in "+-×÷" for k in keys) and keys[-1] not in ("=", "+", "-", "×", "÷"):
+        keys.append("=")
+    return keys
+
+
+# What a key may be called on a keypad's button: Calculator labels its buttons by
+# what they do ("Multiply", "Equals") on some versions and by their sign on others.
+_KEY_LABELS = {
+    "+": {"+", "add", "plus"}, "-": {"-", "−", "–", "subtract", "minus"},
+    "×": {"×", "*", "x", "multiply", "times", "multiplied by"},
+    "÷": {"÷", "/", "divide", "divided by"}, "=": {"=", "equals", "equal"},
+    ".": {".", ",", "decimal", "point", "decimal point"}, "%": {"%", "percent"},
+    "AC": {"ac", "all clear", "clear", "c"},
+}
+_DIGIT_NAMES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+                "nine"]
+
+
+def _key_control(snap: dict, key: str) -> dict | None:
+    names = ({key, _DIGIT_NAMES[int(key)]} if key.isdigit()
+             else _KEY_LABELS.get(key, {key.lower()}))
+    for el in snap.get("elements") or []:
+        if el.get("kind") != "click":
+            continue
+        for v in (el.get("label"), el.get("value")):
+            if (v or "").strip().lower() in names:
+                return el
+    return None
+
+
+_NUMBER = re.compile(r"^[−\-]?[\d\s,.]*\d[\d\s,.]*(?:e[+\-]?\d+)?$", re.I)
+
+
+def display_text(app_name: str) -> str:
+    """The number a keypad app shows, read from its window: the last static text that
+    is a number ("15"), else the last one with a digit in it ("5×3")."""
+    ax = _ax()
+    pid = _pid_for(app_name)
+    if ax is None or pid is None:
+        return ""
+    window = find_window(ax, ax["app"](pid))
+    if window is None:
+        return ""
+    seen: list[str] = []
+
+    def walk(el, depth: int):
+        if depth > 12 or len(seen) > 60:
+            return
+        for kid in (_attr(ax, el, "AXChildren") or []):
+            if str(_attr(ax, kid, "AXRole") or "") == "AXStaticText":
+                v = _attr(ax, kid, "AXValue")
+                if isinstance(v, (str, int, float)) and str(v).strip():
+                    seen.append(str(v).strip())
+            walk(kid, depth + 1)
+    walk(window, 0)
+    numbers = [v for v in seen if _NUMBER.match(v)]
+    if numbers:
+        return numbers[-1]
+    with_digit = [v for v in seen if re.search(r"\d", v)]
+    return with_digit[-1] if with_digit else ""
+
+
+def press_keys(app_name: str, keys: list[str]) -> dict:
+    """Press exactly these keys in the app, in order, and read its display after.
+    {"did": "done" | "needs_her" | "blocked", "pressed", "display", "why", "missing"}."""
+    out = {"app": app_name, "keys": list(keys), "pressed": [], "display": "",
+           "did": "blocked", "why": ""}
+    ok, why = available()
+    if not ok:
+        out.update(did="needs_her", why=why)
+        return out
+    if not ensure_open(app_name):
+        out.update(did="needs_her", why=f"{app_name} did not open")
+        return out
+    snap = snapshot(app_name)
+    for k in keys:
+        if snap.get("error"):
+            out.update(did="needs_her", why=snap["error"])
+            return out
+        el = _key_control(snap, k)
+        if el is None:
+            out.update(why=f"no {k} key in {app_name}", missing=k)
+            return out
+        done, msg = act(snap, el, "click")
+        if not done and msg == "stale":
+            snap = snapshot(app_name)           # the window was rebuilt: find it again
+            el = _key_control(snap, k)
+            done, msg = act(snap, el, "click") if el else (False, "gone")
+        if not done:
+            out.update(why=msg, missing=k)
+            return out
+        out["pressed"].append(k)
+        time.sleep(SETTLE_MS / 1000)
+    out.update(did="done", display=display_text(app_name))
+    return out

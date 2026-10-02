@@ -299,6 +299,31 @@ def _options(item: dict, today: _dt.date) -> dict[str, tuple]:
         o["say what the reminder is"] = ("timer", "recall", None,
                                          "What was it again, what did I ask you to remind "
                                          "me, when is it. מה זה היה. شو كان. что это было.")
+    elif kind == "reminder":
+        # A row in her Reminders list (no time was said). Its own day is not offered;
+        # the day after it is named, so "make it the day after" has an answer to point at.
+        try:
+            own = _dt.date.fromisoformat(item.get("date") or "")
+        except ValueError:
+            own = None
+        d = today
+        while d <= today + _dt.timedelta(days=13):
+            if d != own:
+                note = ("Today." if d == today
+                        else "Tomorrow." if d == today + _dt.timedelta(days=1) else None)
+                if own and d == own + _dt.timedelta(days=1):
+                    note = ((note or "") + " The day after the day it is for now.").strip()
+                o[f"reminder on {d.strftime('%A %-d %B')}"] = ("reminder", "day", d.isoformat(),
+                                                               note)
+            d += _dt.timedelta(days=1)
+        for t in _HALF_HOURS:
+            o[f"reminder at {t} on its day"] = ("reminder", "at", t, None)
+        o["say what the reminder is"] = ("reminder", "recall", None,
+                                         "What was it again, what did I ask you to remind "
+                                         "me, when is it. מה זה היה. شو كان. что это было.")
+        o["remove the reminder"] = ("reminder", "remove", None,
+                                    "Cancel it, remove it, delete it. תבטלי את זה. ألغيه. "
+                                    "удали его.")
     elif kind == "event":
         # What the event already is is never offered: that change would change nothing,
         # and measured, the option naming its own day drew the answer away from the one
@@ -416,9 +441,23 @@ def _describe(item: dict) -> dict:
     kind = item["kind"]
     if kind == "timer":
         left = max(0, round((item.get("due", 0) - time.time()) / 60))
-        return {"what": "set a spoken reminder", "reminder_about": item.get("text", ""),
-                "goes_off_at": time.strftime("%H:%M", time.localtime(item.get("due", 0))),
-                "minutes_from_now": left}
+        d = {"what": {"timer": "set a timer", "alarm": "set an alarm"}.get(
+                 item.get("tkind") or "", "set a spoken reminder"),
+             "reminder_about": item.get("text", ""),
+             "goes_off_at": time.strftime("%H:%M", time.localtime(item.get("due", 0))),
+             "minutes_from_now": left}
+        if time.strftime("%Y-%m-%d", time.localtime(item.get("due", 0))) != time.strftime("%Y-%m-%d"):
+            d["goes_off_on"] = time.strftime("%A", time.localtime(item.get("due", 0)))
+        return d
+    if kind == "reminder":
+        d = {"what": "added a reminder to her Reminders list",
+             "reminder_about": item.get("text", "")}
+        try:
+            day = _dt.date.fromisoformat(item.get("date") or "")
+            d["for_day"] = day.strftime("%A %-d %B")
+        except ValueError:
+            d["for_day"] = "no day"
+        return d
     if kind == "event":
         d = {"what": "added an event to her calendar", "title": item.get("title", ""),
              "date": item.get("date", "")}
@@ -455,7 +494,8 @@ _APP_LABEL = {"whatsapp": "WhatsApp", "imessage": "text message", "telegram": "T
 # What Jev is told a message from her screen was. Never the screen itself.
 _SENT_WHAT = {"send_link": "the link to the web page she had open",
               "send_screen": "text she had selected on her screen",
-              "send_screenshot": "a screenshot of her screen"}
+              "send_screenshot": "a screenshot of her screen",
+              "send_window": "the text of a document or an email she had open"}
 
 
 QUESTION = "follow_up"
@@ -496,10 +536,37 @@ def question(items: list[dict], utterance: str, today: _dt.date | None = None) -
     }
 
 
-def read(u: dict, fold: dict | None) -> dict | None:
+def _field(spec: tuple) -> tuple:
+    """The field an option is summed under. Later and earlier are one field, a shift:
+    live (2026-10-02) "move it ten minutes forward" split 0.45 later / 0.48 earlier, so
+    neither half reached the gate and a second alarm was set. The stronger direction
+    is still the value."""
+    kind, fld = spec[0], spec[1]
+    return (kind, "later" if fld == "earlier" else fld)
+
+
+# Owner decision 2026-10-02 (bench hard-multi-hard-011): moving a reminder, an alarm or a
+# timer "קדימה" (or "forward") is LATER, and "אחורה" is EARLIER, whichever way Jev split
+# it. Live, "תזיזי את זה עשר דקות קדימה" read earlier 0.97 and the 7:00 alarm went to
+# 6:50. Only these words, and only once a shift is already the change she asked for;
+# "push it back", "earlier", "תקדימי" and the rest go the way Jev read them.
+_FORWARD = re.compile(r"קדימה|\bforwards?\b", re.IGNORECASE)
+_BACKWARD = re.compile(r"אחורה")
+
+
+def said_direction(utterance: str) -> str | None:
+    """"later" or "earlier" when her words name the direction (see _FORWARD), else None."""
+    fwd, back = bool(_FORWARD.search(utterance or "")), bool(_BACKWARD.search(utterance or ""))
+    if fwd == back:
+        return None
+    return "later" if fwd else "earlier"
+
+
+def read(u: dict, fold: dict | None, utterance: str = "") -> dict | None:
     """The change she asked for, or None: {"kind", "field", "value", "conf", "item"}.
 
-    The field wins on the sum of its options' probabilities, the value on its own."""
+    The field wins on the sum of its options' probabilities, the value on its own.
+    A timer's shift goes the way her words name it, if they do (said_direction)."""
     if not fold:
         return None
     a = (u.get("raw") or {}).get(QUESTION)
@@ -512,15 +579,22 @@ def read(u: dict, fold: dict | None) -> dict | None:
     for k, p in probs.items():
         spec = fold["options"].get(k)
         if spec:
-            groups[spec[:2]] = groups.get(spec[:2], 0.0) + float(p or 0.0)
+            groups[_field(spec)] = groups.get(_field(spec), 0.0) + float(p or 0.0)
     if not groups:
         return None
     field, total = max(groups.items(), key=lambda kv: kv[1])
     if total < FOLLOW_GATE or total <= float(probs.get("none", 0.0) or 0.0):
         return None
-    key = max((k for k in probs if fold["options"].get(k, ())[:2] == field),
+    key = max((k for k in probs if fold["options"].get(k) and _field(fold["options"][k]) == field),
               key=lambda k: probs[k])
     kind, fld, value, _ = fold["options"][key]
+    want = said_direction(utterance) if kind == "timer" and fld in ("later", "earlier") else None
+    if want and want != fld:
+        flipped = next((k for k, v in fold["options"].items()
+                        if v[0] == kind and v[1] == want and abs(v[2]) == abs(value)), None)
+        if flipped:
+            key = flipped
+            kind, fld, value, _ = fold["options"][key]
     item = next((it for it in fold["items"] if it["kind"] == kind), None)
     return {"kind": kind, "field": fld, "value": value, "conf": round(total, 2),
             "option": key, "item": item}
@@ -785,6 +859,8 @@ LINES = {
                   "english": "link"},
     "same_selection": {"hebrew": "הטקסט שסימנת", "arabic": "النص المحدد",
                        "russian": "тот же выделенный текст", "english": "text you selected"},
+    "same_window": {"hebrew": "הטקסט", "arabic": "النص", "russian": "тот же текст",
+                    "english": "text"},
     "same_shot": {"hebrew": "צילום המסך", "arabic": "صورة الشاشة", "russian": "тот же скриншот",
                   "english": "screenshot"},
     "same_words": {"hebrew": "ההודעה", "arabic": "الرسالة", "russian": "то же сообщение",
@@ -802,6 +878,8 @@ LINES = {
                   "english": "the link to the page you had open"},
     "sent_selection": {"hebrew": "הטקסט שסימנת", "arabic": "النص اللي حدّدته",
                        "russian": "выделенный текст", "english": "the text you selected"},
+    "sent_window": {"hebrew": "הטקסט שהיה פתוח", "arabic": "النص اللي كان مفتوح",
+                    "russian": "открытый текст", "english": "the text you had open"},
     "sent_shot": {"hebrew": "צילום מסך", "arabic": "صورة شاشة", "russian": "скриншот",
                   "english": "a screenshot"},
     "msg_apps": {"hebrew": "אני יכולה לשלוח הודעות רק בהודעת טקסט או בוואטסאפ, או לפתוח אותן בטלגרם או בסיגנל.",
@@ -816,9 +894,9 @@ LINES = {
 
 # Which of the lines above names what a message from her screen was.
 SAME_WHAT = {"send_link": "same_link", "send_screen": "same_selection",
-             "send_screenshot": "same_shot"}
+             "send_screenshot": "same_shot", "send_window": "same_window"}
 SENT_WHAT = {"send_link": "sent_link", "send_screen": "sent_selection",
-             "send_screenshot": "sent_shot"}
+             "send_screenshot": "sent_shot", "send_window": "sent_window"}
 
 
 def line(key: str, lang: str, **fmt) -> str:
@@ -827,6 +905,11 @@ def line(key: str, lang: str, **fmt) -> str:
 
 
 # The rewrite of an answer she already heard: one Gemini call, the writing task.
+# The system prompt for rewriting an answer that was not about her screen (a fact, small
+# talk, the weather): the screen's own prompt told the model it was looking at a screen.
+ANSWER_SYSTEM = ("You are MicMic, a voice assistant on a Mac, rewording what you just said "
+                 "to someone. Answer in {language}, speaking directly to them, as a sentence "
+                 "said out loud: no lists, no markdown, no headings, no em dashes.")
 REWRITE = {
     "shorter": "Say this again much shorter, in one or two short sentences, in {language}. "
                "Only the new wording.",

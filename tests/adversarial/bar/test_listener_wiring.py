@@ -29,6 +29,7 @@ test that runs it for real (test_armed_window_expiry_via_watchdog).
 """
 from __future__ import annotations
 
+import re
 import sys
 import threading
 import time
@@ -79,6 +80,46 @@ listenermod.CONFIG_URL = _DEAD + "/api/config?contacts=1"
 listenermod.LOGIN_ITEM_URL = _DEAD + "/api/login_item_status"
 LOGIN_POSTS: list[str] = []
 listenermod.post_login_item_status = lambda status: LOGIN_POSTS.append(status)
+
+# No test may put a real macOS permission dialog on the screen, read this Mac's TCC
+# answers, or show an NSAlert (runModal would block the suite). Every permission call
+# the listener has goes through these fakes; TCC_ASKED records each ask, in order.
+TCC = {"mic": 3, "speech": 3, "ax": True}
+TCC_ASKED: list[str] = []
+TCC_ANSWER = {"mic": True, "speech": 3}      # what the next dialog answers; None = never
+ALERTS: list[tuple] = []
+
+
+def _fake_ask_mic(done):
+    TCC_ASKED.append("microphone")
+    if TCC_ANSWER["mic"] is not None:
+        TCC["mic"] = 3 if TCC_ANSWER["mic"] else 2
+        done(TCC_ANSWER["mic"])
+
+
+def _fake_ask_speech(done):
+    TCC_ASKED.append("speech")
+    if TCC_ANSWER["speech"] is not None:
+        TCC["speech"] = TCC_ANSWER["speech"]
+        done(TCC_ANSWER["speech"])
+
+
+def _fake_request_ax():
+    TCC_ASKED.append("accessibility")
+    return False
+
+
+listenermod.mic_status = lambda: TCC["mic"]
+listenermod.speech_status = lambda: TCC["speech"]
+listenermod.is_accessibility_trusted = lambda: TCC["ax"]
+listenermod.ask_microphone = _fake_ask_mic
+listenermod.ask_speech = _fake_ask_speech
+listenermod.request_accessibility = _fake_request_ax
+listenermod.open_settings_pane = lambda k: TCC_ASKED.append("pane:" + k)
+listenermod.ask_alert = lambda message, ok, cancel, on_ok: ALERTS.append((message, ok, cancel, on_ok))
+listenermod.fetch_permission_request = lambda: ""
+listenermod.RECOVERY_POLL = 0.05
+listenermod.PENDING_POLL = 0.05
 
 
 class FakeBar:
@@ -1693,6 +1734,256 @@ def test_turn_open_wakes_the_local_model():
           local.woken == 2 and lst.turn_samples is None, (local.woken, lst.turn_samples))
 
 
+
+# ---------------------------------------------------------------- permissions, one at a time
+def _tcc(mic=3, speech=3, ax=True, answer_mic=True, answer_speech=3):
+    TCC.update(mic=mic, speech=speech, ax=ax)
+    TCC_ANSWER.update(mic=answer_mic, speech=answer_speech)
+    TCC_ASKED.clear()
+    ALERTS.clear()
+
+
+def perm_listener():
+    """A listener that has not started listening, with begin() recorded instead of run:
+    the real one would open the microphone."""
+    lst = fresh_listener(bar=FakeBar(), panel=FakePanel())
+    began: list[float] = []
+    lst.begin = lambda: began.append(time.time())
+    lst.register_hotkey = lambda force=False: None
+    return lst, began
+
+
+def _wait(cond, timeout=2.0):
+    end = time.time() + timeout
+    while time.time() < end and not cond():
+        time.sleep(0.02)
+    return cond()
+
+
+def test_first_launch_asks_for_nothing():
+    """The first-run storm: speech, microphone and Accessibility dialogs all at launch.
+    A new Mac (nothing granted, not onboarded): launch asks macOS for nothing at all."""
+    _tcc(mic=0, speech=0, ax=False)
+    lst, began = perm_listener()
+    lst.cfg = {"first_run": True}
+    lst.start_quietly()
+    time.sleep(0.2)                          # a few recovery polls
+    check("first launch: no request* API is called", TCC_ASKED == [], TCC_ASKED)
+    check("first launch: no MicMic alert either", ALERTS == [], ALERTS)
+    check("first launch: not listening, and begin() is not run", not lst.running and not began)
+    check("first launch: the status says what is off, no dialog",
+          lst.status_text == L("wait_mic", "en-US"), lst.status_text)
+    src = Path(listenermod.__file__).read_text()
+    body = src[src.index("def applicationDidFinishLaunching_"):src.index("def showFromOtherLaunch_")]
+    check("applicationDidFinishLaunching_ calls start_quietly and no request API",
+          "start_quietly()" in body and not re.search(
+              r"start_auth|request_accessibility|ask_microphone|ask_speech|requestAuthorization|requestAccess", body),
+          body[:300])
+    check("start_auth (speech then microphone at launch) is gone", "def start_auth" not in src)
+    # Only the 3 ask functions and the Accessibility prompt touch TCC's request calls.
+    calls = [m.start() for m in re.finditer(r"requestAuthorization_|requestAccessForMediaType_|"
+                                            r"AXIsProcessTrustedWithOptions", src)]
+    owners = {src.rfind("\ndef ", 0, i) for i in calls}
+    names = sorted(src[o + 5:src.index("(", o)] for o in owners)
+    check("the only request APIs live in ask_microphone, ask_speech, request_accessibility",
+          names == ["ask_microphone", "ask_speech", "request_accessibility"], names)
+
+
+def test_onboarded_launch_just_works():
+    """Once granted, launch requests nothing new: it starts listening."""
+    _tcc(mic=3, speech=3, ax=True)
+    lst, began = perm_listener()
+    lst.cfg = {"first_run": False}
+    lst.start_quietly()
+    check("granted before: launch starts listening", len(began) == 1, began)
+    check("granted before: nothing is asked", TCC_ASKED == [] and ALERTS == [], (TCC_ASKED, ALERTS))
+
+
+def test_update_hotkey_status_never_prompts():
+    _tcc(ax=False)
+    lst, _ = perm_listener()
+    lst.hotkey_line = None
+    lst.update_hotkey_status()
+    lst.update_hotkey_status()
+    check("an untrusted first hotkey check does not fire the Accessibility dialog",
+          "accessibility" not in TCC_ASKED, TCC_ASKED)
+
+
+def test_request_microphone_asks_only_the_microphone():
+    _tcc(mic=0, speech=0, ax=False, answer_mic=True)
+    lst, began = perm_listener()
+    lst.request_permission("microphone")
+    check("request microphone: exactly one ask, the microphone",
+          TCC_ASKED == ["microphone"], TCC_ASKED)
+    check("microphone alone does not start listening (speech still missing)", not began, began)
+    lst.request_permission("speech")
+    check("request speech: then exactly the speech ask",
+          TCC_ASKED == ["microphone", "speech"], TCC_ASKED)
+    check("both answered yes: listening starts at once, no relaunch", _wait(lambda: len(began) >= 1), began)
+
+
+def test_a_denied_microphone_does_not_crash_and_a_later_grant_starts():
+    _tcc(mic=0, speech=3, ax=False, answer_mic=False)
+    lst, began = perm_listener()
+    try:
+        lst.request_permission("microphone")
+        ok = True
+    except Exception as e:  # noqa: BLE001
+        ok = repr(e)
+    check("a denied microphone does not raise", ok is True, ok)
+    check("denied: not listening, begin() not run", not lst.running and not began)
+    check("denied: the status line says the microphone is off",
+          lst.status_text == L("wait_mic", "en-US"), lst.status_text)
+    # She turns it on in System Settings, later. The poll (reads only) notices.
+    TCC["mic"] = 3
+    check("a later grant starts listening, with no relaunch", _wait(lambda: len(began) >= 1), began)
+    check("and nothing more was asked for it", TCC_ASKED == ["microphone"], TCC_ASKED)
+
+
+def test_real_begin_without_permission_is_quiet():
+    """begin() reached without a grant: no alert, no spoken complaint, it waits."""
+    _tcc(mic=2, speech=3)
+    lst = fresh_listener(bar=FakeBar(), panel=FakePanel())
+    said: list[str] = []
+    prev_speak, prev_alert = listenermod.speak_local, listenermod.alert
+    listenermod.speak_local = lambda key, locale, **kw: said.append(key)
+    alerts: list[str] = []
+    listenermod.alert = lambda title, msg: alerts.append(title)
+    try:
+        lst.speech_auth, lst.mic_auth = 3, False
+        lst.begin()
+    finally:
+        listenermod.speak_local, listenermod.alert = prev_speak, prev_alert
+    check("begin() without the microphone: no alert, nothing spoken", not said and not alerts,
+          (said, alerts))
+    check("begin() without the microphone: not running", not lst.running)
+    TCC["mic"] = 3                           # stop the poll it started from waiting forever
+    _wait(lambda: not lst._recovery_polling)
+
+
+def test_accessibility_prompts_once_then_opens_its_pane():
+    _tcc(ax=False)
+    lst, _ = perm_listener()
+    lst.request_permission("accessibility")
+    lst.request_permission("accessibility")
+    check("Accessibility: macOS's dialog the first time, its pane after",
+          TCC_ASKED == ["accessibility", "pane:accessibility"], TCC_ASKED)
+    TCC["ax"] = True
+    TCC_ASKED.clear()
+    lst.request_permission("accessibility")
+    check("Accessibility already on: nothing", TCC_ASKED == [], TCC_ASKED)
+
+
+def test_just_in_time_before_setup_shows_the_window():
+    """Not set up yet: the window's steps ask, so the talk key brings it forward and
+    no second explanation (and no macOS dialog) appears over it."""
+    _tcc(mic=0, speech=0)
+    panel = FakePanel()
+    lst, began = perm_listener()
+    lst.panel = panel
+    prev = listenermod.get_config
+    listenermod.get_config = lambda: {"first_run": True}
+    try:
+        lst.start_turn("ptt", "tap")
+    finally:
+        listenermod.get_config = prev
+    check("before setup: the talk key shows the window, asks nothing, no alert",
+          ("show", True) in panel.calls and ALERTS == [] and TCC_ASKED == [], (panel.calls, ALERTS, TCC_ASKED))
+    TCC.update(mic=3, speech=3)
+    _wait(lambda: not lst._recovery_polling)
+
+
+def test_just_in_time_explains_then_asks():
+    """Onboarded, microphone skipped, she presses Listen now: MicMic's own line first,
+    and the macOS dialog only if she says yes."""
+    _tcc(mic=0, speech=3)
+    lst, began = perm_listener()
+    lst.running = False
+    opened = lst.start_turn("ptt", "tap")
+    check("no turn opens without the microphone", opened is False)
+    check("MicMic's own line comes first, and nothing is asked yet",
+          len(ALERTS) == 1 and ALERTS[0][0] == L("jit_mic", "en-US") and TCC_ASKED == [],
+          (ALERTS, TCC_ASKED))
+    check("its button says Allow microphone, and Not now",
+          ALERTS and ALERTS[0][1:3] == (L("allow_mic", "en-US"), L("not_now", "en-US")), ALERTS[:1])
+    lst.start_turn("ptt", "tap")
+    check("pressed again at once: the line is not repeated", len(ALERTS) == 1, len(ALERTS))
+    ALERTS[0][3]()                           # she clicks Allow microphone
+    check("her yes asks macOS for the microphone, and only that", TCC_ASKED == ["microphone"], TCC_ASKED)
+    check("and listening starts", _wait(lambda: len(began) >= 1), began)
+    # Refused before: macOS will not ask again, so the line offers the pane.
+    _tcc(mic=2, speech=3)
+    lst2, _ = perm_listener()
+    lst2.ask_just_in_time()
+    check("refused before: the line says it is off and offers Settings",
+          ALERTS and ALERTS[-1][0] == L("jit_mic_off", "en-US")
+          and ALERTS[-1][1] == L("open_settings", "en-US"), ALERTS[-1:])
+    ALERTS[-1][3]()
+    check("and Settings opens the microphone pane, no dialog", TCC_ASKED == ["pane:microphone"], TCC_ASKED)
+    TCC["mic"] = 3
+    _wait(lambda: not lst2._recovery_polling)
+    # Speech missing, microphone fine: the speech line.
+    _tcc(mic=3, speech=0)
+    lst3, _ = perm_listener()
+    lst3.ask_just_in_time()
+    check("speech missing: the speech line and its own button",
+          ALERTS and ALERTS[-1][0] == L("jit_speech", "en-US")
+          and ALERTS[-1][1] == L("allow_speech", "en-US"), ALERTS[-1:])
+    TCC["speech"] = 3
+    _wait(lambda: not lst3._recovery_polling)
+
+
+def test_separate_process_listener_collects_the_click():
+    """A source build: the server runs apart and queues the page's click."""
+    _tcc(mic=0, speech=0)
+    lst, _ = perm_listener()
+    queue = ["speech"]
+    prev = listenermod.fetch_permission_request
+    listenermod.fetch_permission_request = lambda: queue.pop(0) if queue else ""
+    try:
+        lst.in_process = False
+        lst.serve_permission_requests()
+        got = _wait(lambda: TCC_ASKED == ["speech"])
+    finally:
+        listenermod.fetch_permission_request = prev
+    check("the queued click asks for that one permission", got, TCC_ASKED)
+    lst2, _ = perm_listener()
+    lst2.in_process = True
+    lst2.serve_permission_requests()
+    check("in the release bundle (one process) there is no HTTP poll", not lst2._serving_requests)
+
+
+def test_contacts_line_before_the_first_read():
+    """The server's first read of her contacts waits for MicMic's own line: her yes
+    lets it read, Not now does not, and the line is in her language."""
+    lst, _ = perm_listener()
+    prev = listenermod.ask_alert
+    for choice in (True, False):
+        shown: list[str] = []
+
+        def fake(message, ok, cancel, on_ok, after=None, choice=choice):
+            shown.append(message)
+            if choice:
+                on_ok()
+            if after:
+                after()
+        listenermod.ask_alert = fake
+        try:
+            got = lst.confirm_contacts()
+        finally:
+            listenermod.ask_alert = prev
+        check(f"contacts line: {'Continue' if choice else 'Not now'} answers {choice}",
+              got is choice and shown == [L("jit_contacts", "en-US")], (got, shown))
+
+
+def test_permission_strings_in_every_language():
+    keys = ("wait_mic", "wait_speech", "jit_mic", "jit_speech", "jit_mic_off", "jit_speech_off",
+            "allow_mic", "allow_speech", "open_settings", "not_now", "jit_contacts", "continue")
+    bad = [(lang, k) for lang in ("he", "en", "ar", "ru") for k in keys
+           if not listenermod.LANG[lang].get(k) or "—" in listenermod.LANG[lang][k]]
+    check("every permission line exists in he/en/ar/ru, with no em dash", not bad, bad)
+
+
 def main():
     for t in (test_local_model_is_freed_when_idle_and_woken_by_the_next_turn,
               test_turn_open_wakes_the_local_model,
@@ -1759,7 +2050,19 @@ def main():
               test_turn_closed_nothing_and_error,
               test_every_open_has_at_most_one_close,
               test_held_message_question_opens_the_followup,
-              test_asr_confidence_with_every_utterance):
+              test_asr_confidence_with_every_utterance,
+              test_first_launch_asks_for_nothing,
+              test_onboarded_launch_just_works,
+              test_update_hotkey_status_never_prompts,
+              test_request_microphone_asks_only_the_microphone,
+              test_a_denied_microphone_does_not_crash_and_a_later_grant_starts,
+              test_real_begin_without_permission_is_quiet,
+              test_accessibility_prompts_once_then_opens_its_pane,
+              test_just_in_time_before_setup_shows_the_window,
+              test_just_in_time_explains_then_asks,
+              test_separate_process_listener_collects_the_click,
+              test_contacts_line_before_the_first_read,
+              test_permission_strings_in_every_language):
         print(f"\n-- {t.__name__}")
         try:
             t()

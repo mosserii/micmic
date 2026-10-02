@@ -455,6 +455,20 @@ body.hasthread .thread{display:flex}
 .acct-btn:focus-visible{outline:3px solid var(--live);outline-offset:2px}
 .acct-btn:disabled{opacity:.55;cursor:default}
 @media (prefers-reduced-motion: reduce){ .acct-bar>i{transition:none} }
+/* Permissions: one line each, its state, and its own button while it is not on */
+.sperms{display:flex;flex-direction:column;gap:8px}
+.sperm{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;padding:10px 12px;border-radius:14px;
+  background:var(--glass);border:1px solid var(--glass-line)}
+.spname{flex:1 1 auto;min-width:0;font-size:15px;font-weight:500}
+.spstate{font-size:13px;color:var(--muted)}
+.sperm[data-s="granted"] .spstate{color:var(--live)}
+.sperm[data-s="denied"] .spstate{color:color-mix(in oklab,var(--warm) 80%,var(--muted))}
+.spbtn{flex:none;margin-inline-start:auto;cursor:pointer;font:500 13.5px/1.15 Rubik,-apple-system,system-ui,sans-serif;
+  color:var(--ink);padding:8px 13px;border-radius:999px;max-width:100%;
+  background:color-mix(in oklab,var(--live) 17%,transparent);
+  border:1px solid color-mix(in oklab,var(--live) 50%,transparent)}
+.spbtn:hover{background:color-mix(in oklab,var(--live) 27%,transparent)}
+.spbtn:focus-visible{outline:3px solid var(--live);outline-offset:2px}
 /* In the app panel the sheet IS the window, so it loses its inset and corners — and
    its translucency with them: at 380px the page behind showed through the controls
    instead of reading as glass over a backdrop. */
@@ -1035,6 +1049,21 @@ l-753 0 0 1115 c0 1114 0 1115 20 1115 106 0 558 60 793 106 1223 236 2275
       <button type="button" class="acct-btn" id="asrBtn" hidden></button>
     </div>
 
+    <!-- Permissions: each one MicMic can use, whether it is on, and its own button.
+         The same one request as the onboarding's steps (/api/permissions/request). -->
+    <div class="srow" id="rowPerms">
+      <div class="slabel" id="lPerms"></div>
+      <div class="sperms">
+        <div class="sperm" data-k="microphone"><span class="spname"></span><span class="spstate"></span>
+          <button type="button" class="spbtn" hidden></button></div>
+        <div class="sperm" data-k="speech"><span class="spname"></span><span class="spstate"></span>
+          <button type="button" class="spbtn" hidden></button></div>
+        <div class="sperm" data-k="accessibility"><span class="spname"></span><span class="spstate"></span>
+          <button type="button" class="spbtn" hidden></button></div>
+      </div>
+      <div class="shint" id="hPerms"></div>
+    </div>
+
     <div class="srow">
       <div class="slabel" id="lListen"></div>
       <div class="srange">
@@ -1073,17 +1102,18 @@ const COPY = {
       typehere:"או פשוט לכתוב כאן", newchat:"שיחה חדשה", fresh:"מתחילים מחדש", youSaid:"ביקשת",
       undo:"ביטול הפעולה", undoing:"מבטלת", undone:"בוטל", undoFailed:"לא הצלחתי לבטל את זה",
       undoNone:"אי אפשר לבטל את זה כרגע", undoNet:"לא הצלחתי להתחבר למחשב, שום דבר לא בוטל",
-      obDialog:"ברוכים הבאים ל-MicMic", obStep:"שלב {n} מתוך 3", obSkip:"דילוג", obNext:"המשך", obLater:"אחר כך", obDone:"סיום",
+      obDialog:"ברוכים הבאים ל-MicMic", obStep:"שלב {n} מתוך 3", obSkip:"דילוג", obNext:"המשך", obDone:"סיום",
       ob1Title:"מחזיקים ⌥ ומדברים.", ob1Sub:"ה-⌥ שבצד ימין. משחררים כדי לשלוח.", ob1Tap:"או הקשה אחת כדי להתחיל ועוד אחת כדי לשלוח.",
       obDemoSay:"תשימי קצת מוזיקה", obDemoDone:"מנגנת מוזיקה",
-      ob2Title:"מאפשרים ל-MicMic לעבוד על ה-Mac.", ob2Sub:"מאשרים פעם אחת, וזהו.",
-      obMic:"מיקרופון", obMicWhy:"כדי לשמוע אותך", obSpeech:"זיהוי דיבור", obSpeechWhy:"כדי להבין את המילים",
-      obAx:"נגישות", obAxWhy:"בשביל ⌥ בכל אפליקציה", obTurnOn:"הפעלה", obAsked:'לוחצים "אפשר" כש-macOS שואל',
-      obUnknown:"אי אפשר לבדוק את זה מכאן", obOn:"מופעל", obOff:"עוד לא",
+     
+      obMic:"מיקרופון", obMicWhy:"כדי ש-MicMic תשמע אותך.", obSpeech:"זיהוי דיבור", obSpeechWhy:"כדי להפוך את הקול שלך לטקסט, על ה-Mac.",
+      obAx:"נגישות", obAxWhy:"בשביל מקש הקיצור, וכדי ללחוץ על כפתורים בשבילך.", obTurnOn:"הפעלה", obAsked:"לוחצים \"אפשר\" כש-macOS שואל.",
+      obUnknown:"אי אפשר לבדוק את זה מכאן",
+      obNotNow:"לא עכשיו", obAllowMic:"לאפשר מיקרופון", obAllowSpeech:"לאפשר זיהוי דיבור", obAllowAx:"להפעיל נגישות", obAxAsked:"מפעילים את MicMic ברשימה, וחוזרים לכאן.", obPermOn:"מופעל. תודה.", obPermDenied:"אפשר להפעיל את זה אחר כך בהגדרות.", obOpenSettings:"פתיחת ההגדרות", obPermOf:"{n} מתוך 3", obTypeTitle:"בינתיים אפשר לכתוב.", obNoMic:"בלי מיקרופון MicMic לא שומעת, אבל אפשר לכתוב לה בחלון. את המיקרופון מפעילים בהגדרות.", obNoSpeech:"בלי זיהוי דיבור MicMic לא מבינה את הקול, אבל אפשר לכתוב לה בחלון. מפעילים אותו בהגדרות.", sPerms:"הרשאות", hPerms:"MicMic מבקשת כל הרשאה רק כשלוחצים עליה.", sPermOff:"כבוי", obOn:"מופעל", obOff:"עוד לא",
       ob3Title:"בואו ננסה.", ob3Sub:"מחזיקים ⌥ ואומרים", ob3Phrase:"מה השעה?", obWaiting:"מחכה לך",
       obNoKey:"⌥ עוד לא עובד? לוחצים על העיגול.", obSetTitle:"הכל מוכן.", obSetSub:"MicMic שמעה אותך.", obListen:"להתחיל להקשיב",
       axNote:"כדי ש-{key} יפעיל את MicMic, צריך להפעיל נגישות.", axOpen:"פתיחת הגדרות נגישות", send:"שליחה", language:"שפה", secShort:"{n} שנ׳",
-      ob1TitleFn:"לוחצים פעמיים על Fn ומדברים.", ob1SubFn:"לחיצה נוספת על Fn שולחת.", ob3SubFn:"לוחצים פעמיים על Fn ואומרים", ob1TitlePress:"לוחצים ⌥ ומדברים.", ob1SubPress:"לחיצה נוספת שולחת.", ob3SubPress:"לוחצים ⌥ ואומרים", obLangPick:"בחירת שפת הדיבור.", obAsrDownloading:"זיהוי משופר: מורידה {pct}%", obAsrReady:"זיהוי משופר פעיל", obAsrFailed:"לא הצלחתי להוריד. MicMic משתמשת בזיהוי המובנה.", sAsr:"זיהוי משופר", sAsrDownload:"הורדה ({size})", sAsrProgress:"מורידה {pct}%", sAsrBuiltIn:"מובנה עבור השפה הזו", sAsrRetry:"ניסיון נוסף", guideMe:"תדריכי אותי", gStep:"שלב {n}", gDone:"עשיתי", gDoIt:"תעשי בשבילי", gStop:"הפסקה", gWhy:"למה?", gLooking:"מסתכלת על המסך", gFinished:"סיימנו", gClose:"סגירה", gSecret:"את זה מקלידים לבד. MicMic לא קוראת את זה.", gStopped:"ההדרכה הופסקה"},
+      ob1TitleFn:"לוחצים פעמיים על Fn ומדברים.", ob1SubFn:"לחיצה נוספת על Fn שולחת.", ob3SubFn:"לוחצים פעמיים על Fn ואומרים", ob1TitlePress:"לוחצים ⌥ ומדברים.", ob1SubPress:"לחיצה נוספת שולחת.", ob3SubPress:"לוחצים ⌥ ואומרים", obMoveTitle:"מעבירים את MicMic לתיקיית היישומים", obMoveSub:"MicMic פועלת כרגע מתוך קובץ ההתקנה. מתיקיית היישומים היא תמשיך לעבוד גם אחרי שמוציאים אותו.", obMoveSubT:"MicMic פועלת כרגע מעותק זמני. מתיקיית היישומים היא תזכור את ההרשאות שלה.", obMoveGo:"להעביר ולפתוח מחדש", obMoving:"מעבירה את MicMic…", obMoved:"נפתחת מחדש מתיקיית היישומים…", obMoveFail:"לא הצלחתי להעביר. גוררים את MicMic לתיקיית היישומים בחלון ההתקנה, ופותחים משם.", ob3SubClick:"לוחצים על העיגול ואומרים", obClickTalk:"לוחצים כדי לדבר", obKeyNeedsAx:"מקש הקיצור צריך הרשאת נגישות.", obClash:"{app} כבר משתמשת ב-{key}. להשתמש ב-{new} בשביל MicMic?", obClashNone:"{app} כבר משתמשת ב-{key}. כדאי לבחור מקש אחר בשביל MicMic.", obClashUse:"להשתמש ב-{new}", obClashOther:"מקש אחר", obLangPick:"בחירת שפת הדיבור.", obAsrDownloading:"זיהוי משופר: מורידה {pct}%", obAsrReady:"זיהוי משופר פעיל", obAsrFailed:"לא הצלחתי להוריד. MicMic משתמשת בזיהוי המובנה.", sAsr:"זיהוי משופר", sAsrDownload:"הורדה ({size})", sAsrProgress:"מורידה {pct}%", sAsrBuiltIn:"מובנה עבור השפה הזו", sAsrRetry:"ניסיון נוסף", guideMe:"תדריכי אותי", gStep:"שלב {n}", gDone:"עשיתי", gDoIt:"תעשי בשבילי", gStop:"הפסקה", gWhy:"למה?", gLooking:"מסתכלת על המסך", gFinished:"סיימנו", gClose:"סגירה", gSecret:"את זה מקלידים לבד. MicMic לא קוראת את זה.", gStopped:"ההדרכה הופסקה"},
   he_m:{off:"גע כדי לדבר", idle:"גע כדי לדבר", wake:"אמור מיקמיק",
       foot:"גע בעיגול או לחץ על מקש הרווח", footWake:"אמור מיקמיק כדי להתחיל",
       footAlways:"פשוט תדבר", mic:"תן הרשאה למיקרופון ואז רענן",
@@ -1101,17 +1131,18 @@ const COPY = {
       typehere:"or just type here", newchat:"new conversation", fresh:"starting fresh", youSaid:"you asked",
       undo:"Undo", undoing:"undoing", undone:"Undone", undoFailed:"I couldn't undo that",
       undoNone:"Undo isn't available right now", undoNet:"I couldn't reach the computer, so nothing was undone",
-      obDialog:"Welcome to MicMic", obStep:"Step {n} of 3", obSkip:"Skip", obNext:"Continue", obLater:"Later", obDone:"Done",
+      obDialog:"Welcome to MicMic", obStep:"Step {n} of 3", obSkip:"Skip", obNext:"Continue", obDone:"Done",
       ob1Title:"Hold ⌥ and talk.", ob1Sub:"The ⌥ on the right. Let go to send.", ob1Tap:"Or tap it once to start, and again to send.",
       obDemoSay:"Play some music", obDemoDone:"Playing music",
-      ob2Title:"Let MicMic use your Mac.", ob2Sub:"Allow these once, and that's it.",
-      obMic:"Microphone", obMicWhy:"To hear you", obSpeech:"Speech Recognition", obSpeechWhy:"To understand your words",
-      obAx:"Accessibility", obAxWhy:"For ⌥ in every app", obTurnOn:"Turn on", obAsked:"Click Allow when macOS asks",
-      obUnknown:"Can't check this from here", obOn:"On", obOff:"Not yet",
+     
+      obMic:"Microphone", obMicWhy:"So MicMic can hear you.", obSpeech:"Speech Recognition", obSpeechWhy:"To turn your voice into text on your Mac.",
+      obAx:"Accessibility", obAxWhy:"For the hotkey, and to press buttons for you.", obTurnOn:"Turn on", obAsked:"Click Allow when macOS asks.",
+      obUnknown:"Can't check this from here",
+      obNotNow:"Not now", obAllowMic:"Allow microphone", obAllowSpeech:"Allow speech recognition", obAllowAx:"Turn on Accessibility", obAxAsked:"Turn MicMic on in the list, then come back here.", obPermOn:"It's on. Thank you.", obPermDenied:"You can turn it on later in Settings.", obOpenSettings:"Open Settings", obPermOf:"{n} of 3", obTypeTitle:"You can type for now.", obNoMic:"Without the microphone MicMic can't hear you, but you can type to it in this window. Turn the microphone on in Settings.", obNoSpeech:"Without speech recognition MicMic can't read your voice, but you can type to it in this window. Turn it on in Settings.", sPerms:"Permissions", hPerms:"MicMic asks for each one only when you click it.", sPermOff:"Off", obOn:"On", obOff:"Not yet",
       ob3Title:"Try it.", ob3Sub:"Hold ⌥ and say", ob3Phrase:"What time is it?", obWaiting:"Waiting for you",
       obNoKey:"No ⌥ yet? Click the circle.", obSetTitle:"You're set.", obSetSub:"MicMic heard you.", obListen:"Start listening",
       axNote:"{key} needs Accessibility before it can start MicMic.", axOpen:"Open Accessibility settings", send:"Send", language:"Language", secShort:"{n}s",
-      ob1TitleFn:"Double-tap Fn and talk.", ob1SubFn:"Press Fn once more to send.", ob3SubFn:"Double-tap Fn and say", ob1TitlePress:"Press ⌥ and talk.", ob1SubPress:"Press it again to send.", ob3SubPress:"Press ⌥ and say", obLangPick:"Choose the language you'll speak.", obAsrDownloading:"Better recognition: downloading {pct}%", obAsrReady:"Better recognition is on", obAsrFailed:"Couldn't download it. MicMic uses the built-in recognition.", sAsr:"Better recognition", sAsrDownload:"Download ({size})", sAsrProgress:"Downloading {pct}%", sAsrBuiltIn:"Built in for this language", sAsrRetry:"Try again", guideMe:"Guide me", gStep:"Step {n}", gDone:"Done", gDoIt:"Do it for me", gStop:"Stop", gWhy:"Why?", gLooking:"Looking at your screen", gFinished:"All done", gClose:"Close", gSecret:"Only you type this. MicMic does not read it.", gStopped:"Guide stopped"},
+      ob1TitleFn:"Double-tap Fn and talk.", ob1SubFn:"Press Fn once more to send.", ob3SubFn:"Double-tap Fn and say", ob1TitlePress:"Press ⌥ and talk.", ob1SubPress:"Press it again to send.", ob3SubPress:"Press ⌥ and say", obMoveTitle:"Move MicMic to Applications", obMoveSub:"MicMic is running from the disk image. In Applications it keeps working after you eject it.", obMoveSubT:"MicMic is running from a temporary copy. In Applications it keeps its permissions.", obMoveGo:"Move and reopen", obMoving:"Moving MicMic…", obMoved:"Reopening from Applications…", obMoveFail:"Couldn't move it. Drag MicMic to Applications in the disk image window, then open it from there.", ob3SubClick:"Click the circle and say", obClickTalk:"Click to talk", obKeyNeedsAx:"The keyboard shortcut needs Accessibility.", obClash:"{key} is used by {app}. Use {new} for MicMic?", obClashNone:"{key} is used by {app}. Pick another key for MicMic.", obClashUse:"Use {new}", obClashOther:"Another key", obLangPick:"Choose the language you'll speak.", obAsrDownloading:"Better recognition: downloading {pct}%", obAsrReady:"Better recognition is on", obAsrFailed:"Couldn't download it. MicMic uses the built-in recognition.", sAsr:"Better recognition", sAsrDownload:"Download ({size})", sAsrProgress:"Downloading {pct}%", sAsrBuiltIn:"Built in for this language", sAsrRetry:"Try again", guideMe:"Guide me", gStep:"Step {n}", gDone:"Done", gDoIt:"Do it for me", gStop:"Stop", gWhy:"Why?", gLooking:"Looking at your screen", gFinished:"All done", gClose:"Close", gSecret:"Only you type this. MicMic does not read it.", gStopped:"Guide stopped"},
   ar:{
       settings:"الإعدادات", sHotkey:"اختصار لوحة المفاتيح", sHotkeyHint:"اضغط مطولاً واحكِ، واترك المفتاح للإرسال. أو نقرة للبدء ونقرة ثانية للإرسال. للتغيير: اضغط الزر ثم تركيبة مفاتيح أو مفتاح يمين واحد. Esc للإلغاء.", sRightCmd:"⌘ اليمين", sRightOpt:"⌥ اليمين", sRightCtrl:"⌃ اليمين", sRightShift:"⇧ اليمين", sNotSaved:"ما قدرت احفظ هاد", sFnTwice:"Fn مرتين", sTap:"نقرة", sFn:"نقرة مزدوجة على Fn", sPressNow:"بانتظار تركيبة مفاتيح…", sStart:"كيف يبدأ", sPush:"ضغطة", sWake:"كلمة تنبيه", sAlways:"يستمع دائماً", sDisplay:"شو بيظهر لما تحكي", sSend:"ابعت رسائل عني", sOn:"نعم", sOff:"لا", hSend:"كل رسالة بتنقرا قبل ما تنبعت، وإذا قلت لأ بتوقف.", sDispPanel:"نافذة كاملة", sDispBar:"شريط صغير", sDispNone:"ولا شي", hDisplay:"بدون شي عالشاشة، MicMic بيعمل الشغلة وبيقول بصوت عالي شو عمل.", sLogin:"الفتح عند تسجيل الدخول", hLogin:"بيفتح تلقائياً لما تسجل دخول عالماك.", sWords:"كلمات التنبيه", sLang:"لغة الكلام", sListen:"مدة الاستماع", sSeconds:"ثانية", sSaved:"تم الحفظ", sDone:"تم", sAccount:"الحساب", aFree:"مجاني", aPro:"Pro", aUsage:"{n} من {m} طلب اليوم", aUsageTotal:"{n} من {m} طلب مجاني للتجربة", aUpgrade:"الترقية إلى Pro", aManage:"إدارة الاشتراك", aOwnKey:"تستخدم مفتاحك الخاص", aOffline:"لا يوجد اتصال الآن، سأحاول مرة أخرى قريباً", aSetup:"جارٍ إعداد الحساب…", aTooMany:"هذا الحساب فيه أجهزة كثيرة أصلاً", aPayOff:"الدفع غير متاح الآن، حاول لاحقاً", aOpenFail:"لم أتمكن من فتح الصفحة، حاول مرة أخرى",
      typehere:"أو اكتب هنا", newchat:"محادثة جديدة", fresh:"منبدأ من جديد", youSaid:"طلبت", ready:"أستمع", think:"لحظة", working:"عم أشتغل عليها", acting:"حالاً", off:"المس للتحدث",
@@ -1123,17 +1154,18 @@ const COPY = {
       timerPrefix:"سأذكرك خلال ", timerSuffix:" دقيقة", allDone:"تم كل شيء",
       undo:"تراجع", undoing:"جارٍ التراجع", undone:"تم التراجع", undoFailed:"لم أتمكن من التراجع عن ذلك",
       undoNone:"التراجع غير متاح الآن", undoNet:"لم أتمكن من الوصول إلى الكمبيوتر، لم يتم التراجع عن أي شيء",
-      obDialog:"أهلاً بك في MicMic", obStep:"الخطوة {n} من 3", obSkip:"تخطٍّ", obNext:"متابعة", obLater:"لاحقاً", obDone:"تم",
+      obDialog:"أهلاً بك في MicMic", obStep:"الخطوة {n} من 3", obSkip:"تخطٍّ", obNext:"متابعة", obDone:"تم",
       ob1Title:"اضغط ⌥ مطولاً واحكِ.", ob1Sub:"مفتاح ⌥ اللي على اليمين. اتركه للإرسال.", ob1Tap:"أو نقرة للبدء ونقرة ثانية للإرسال.",
       obDemoSay:"بدي أسمع موسيقى", obDemoDone:"عم شغّل موسيقى",
-      ob2Title:"اسمح لـ MicMic باستخدام جهازك.", ob2Sub:"وافق مرة وحدة بس.",
-      obMic:"الميكروفون", obMicWhy:"حتى يسمعك", obSpeech:"التعرّف على الكلام", obSpeechWhy:"حتى يفهم كلامك",
-      obAx:"إمكانية الوصول", obAxWhy:"لمفتاح ⌥ في كل التطبيقات", obTurnOn:"تشغيل", obAsked:'اضغط "السماح" لما يسألك macOS',
-      obUnknown:"ما منقدر نتحقق من هون", obOn:"مفعّل", obOff:"مش بعد",
+     
+      obMic:"الميكروفون", obMicWhy:"حتى يسمعك MicMic.", obSpeech:"التعرّف على الكلام", obSpeechWhy:"ليحوّل صوتك إلى نص على جهاز Mac.",
+      obAx:"إمكانية الوصول", obAxWhy:"لمفتاح الاختصار، وليضغط الأزرار عنك.", obTurnOn:"تشغيل", obAsked:"اضغط \"السماح\" لما يسألك macOS.",
+      obUnknown:"ما منقدر نتحقق من هون",
+      obNotNow:"ليس الآن", obAllowMic:"السماح بالميكروفون", obAllowSpeech:"السماح بالتعرّف على الكلام", obAllowAx:"تشغيل إمكانية الوصول", obAxAsked:"شغّل MicMic في القائمة، ثم ارجع إلى هنا.", obPermOn:"تم التشغيل. شكراً.", obPermDenied:"يمكنك تشغيله لاحقاً من الإعدادات.", obOpenSettings:"فتح الإعدادات", obPermOf:"{n} من 3", obTypeTitle:"يمكنك الكتابة الآن.", obNoMic:"بدون الميكروفون لا يسمعك MicMic، لكن يمكنك الكتابة له في هذه النافذة. شغّل الميكروفون من الإعدادات.", obNoSpeech:"بدون التعرّف على الكلام لا يفهم MicMic صوتك، لكن يمكنك الكتابة له في هذه النافذة. شغّله من الإعدادات.", sPerms:"الأذونات", hPerms:"يطلب MicMic كل إذن فقط عندما تضغط عليه.", sPermOff:"مغلق", obOn:"مفعّل", obOff:"مش بعد",
       ob3Title:"جرّبه.", ob3Sub:"اضغط ⌥ مطولاً وقل", ob3Phrase:"كم الساعة؟", obWaiting:"بانتظارك",
       obNoKey:"⌥ لسا ما اشتغل؟ اضغط على الدائرة.", obSetTitle:"كل شي جاهز.", obSetSub:"MicMic سمعك.", obListen:"ابدأ الاستماع",
       axNote:"لازم تفعّل إمكانية الوصول حتى يشغّل {key} MicMic.", axOpen:"فتح إعدادات إمكانية الوصول", send:"إرسال", language:"اللغة", secShort:"{n} ث",
-      ob1TitleFn:"اضغط Fn مرتين واحكِ.", ob1SubFn:"ضغطة كمان على Fn للإرسال.", ob3SubFn:"اضغط Fn مرتين وقل", ob1TitlePress:"اضغط ⌥ واحكِ.", ob1SubPress:"اضغط مرة ثانية للإرسال.", ob3SubPress:"اضغط ⌥ وقل", obLangPick:"اختيار لغة الحديث.", obAsrDownloading:"التعرف المحسّن: جارٍ التنزيل {pct}%", obAsrReady:"التعرف المحسّن مفعّل", obAsrFailed:"ما قدرت أنزّله. MicMic بتستخدم التعرف المدمج.", sAsr:"التعرف المحسّن", sAsrDownload:"تنزيل ({size})", sAsrProgress:"جارٍ التنزيل {pct}%", sAsrBuiltIn:"مدمج لهذه اللغة", sAsrRetry:"إعادة المحاولة", guideMe:"أرشدني خطوة بخطوة", gStep:"الخطوة {n}", gDone:"تمّ", gDoIt:"نفّذها عني", gStop:"إيقاف", gWhy:"لماذا؟", gLooking:"أنظر إلى الشاشة", gFinished:"انتهينا", gClose:"إغلاق", gSecret:"هذا تكتبه بنفسك. MicMic لا يقرؤه.", gStopped:"توقّف الإرشاد"},
+      ob1TitleFn:"اضغط Fn مرتين واحكِ.", ob1SubFn:"ضغطة كمان على Fn للإرسال.", ob3SubFn:"اضغط Fn مرتين وقل", ob1TitlePress:"اضغط ⌥ واحكِ.", ob1SubPress:"اضغط مرة ثانية للإرسال.", ob3SubPress:"اضغط ⌥ وقل", obMoveTitle:"انقل MicMic إلى التطبيقات", obMoveSub:"MicMic شغّال الآن من صورة القرص. من مجلد التطبيقات بيضل شغّال حتى بعد ما تخرج الصورة.", obMoveSubT:"MicMic شغّال الآن من نسخة مؤقتة. من مجلد التطبيقات بيحتفظ بأذوناته.", obMoveGo:"انقل وأعد الفتح", obMoving:"عم انقل MicMic…", obMoved:"عم يفتح من جديد من التطبيقات…", obMoveFail:"ما قدرت انقله. اسحب MicMic إلى التطبيقات في نافذة صورة القرص، وافتحه من هناك.", ob3SubClick:"اضغط على الدائرة وقل", obClickTalk:"اضغط لتحكي", obKeyNeedsAx:"مفتاح الاختصار يحتاج إذن إمكانية الوصول.", obClash:"{app} بيستخدم {key}. تستخدم {new} لـ MicMic؟", obClashNone:"{app} بيستخدم {key}. اختر مفتاحاً آخر لـ MicMic.", obClashUse:"استخدم {new}", obClashOther:"مفتاح آخر", obLangPick:"اختيار لغة الحديث.", obAsrDownloading:"التعرف المحسّن: جارٍ التنزيل {pct}%", obAsrReady:"التعرف المحسّن مفعّل", obAsrFailed:"ما قدرت أنزّله. MicMic بتستخدم التعرف المدمج.", sAsr:"التعرف المحسّن", sAsrDownload:"تنزيل ({size})", sAsrProgress:"جارٍ التنزيل {pct}%", sAsrBuiltIn:"مدمج لهذه اللغة", sAsrRetry:"إعادة المحاولة", guideMe:"أرشدني خطوة بخطوة", gStep:"الخطوة {n}", gDone:"تمّ", gDoIt:"نفّذها عني", gStop:"إيقاف", gWhy:"لماذا؟", gLooking:"أنظر إلى الشاشة", gFinished:"انتهينا", gClose:"إغلاق", gSecret:"هذا تكتبه بنفسك. MicMic لا يقرؤه.", gStopped:"توقّف الإرشاد"},
   ru:{
       settings:"Настройки", sHotkey:"Сочетание клавиш", sHotkeyHint:"Удерживайте клавишу и говорите, отпустите, чтобы отправить. Или нажмите один раз, чтобы начать, и ещё раз, чтобы отправить. Чтобы сменить: нажмите кнопку, затем сочетание или правую клавишу. Esc отменяет.", sRightCmd:"Правый ⌘", sRightOpt:"Правый ⌥", sRightCtrl:"Правый ⌃", sRightShift:"Правый ⇧", sNotSaved:"Не удалось сохранить", sFnTwice:"Fn дважды", sTap:"нажатие", sFn:"двойное нажатие Fn / Globe", sPressNow:"ждём сочетание клавиш…", sStart:"Как начинать", sPush:"нажатие", sWake:"слово-активатор", sAlways:"всегда слушает", sDisplay:"Что показывать, когда вы говорите", sSend:"Отправлять сообщения за меня", sOn:"да", sOff:"нет", hSend:"Каждое сообщение зачитывается перед отправкой, и «нет» его останавливает.", sDispPanel:"всё окно", sDispBar:"узкая полоса", sDispNone:"ничего", hDisplay:"Без окна MicMic просто делает и вслух говорит, что сделал.", sLogin:"Запуск при входе в систему", hLogin:"Запускается автоматически при входе в Mac.", sWords:"Слова-активаторы", sLang:"Язык речи", sListen:"Сколько слушать", sSeconds:"секунд", sSaved:"сохранено", sDone:"Готово", sAccount:"Аккаунт", aFree:"Бесплатно", aPro:"Pro", aUsage:"{n} из {m} запросов сегодня", aUsageTotal:"{n} из {m} бесплатных запросов", aUpgrade:"Перейти на Pro", aManage:"Управлять подпиской", aOwnKey:"Используется ваш собственный ключ", aOffline:"Нет связи, попробую ещё раз чуть позже", aSetup:"Настраиваю аккаунт…", aTooMany:"На этом аккаунте уже слишком много устройств", aPayOff:"Оплата сейчас недоступна, попробуйте позже", aOpenFail:"Не удалось открыть страницу, попробуйте ещё раз",
      typehere:"или просто напишите здесь", newchat:"новый разговор", fresh:"начинаем заново", youSaid:"вы просили", ready:"слушаю", think:"секунду", working:"Работаю над этим", acting:"сейчас", off:"нажмите, чтобы говорить",
@@ -1145,17 +1177,18 @@ const COPY = {
       timerPrefix:"Напомню через ", timerSuffix:" минут", allDone:"Всё сделано",
       undo:"Отменить", undoing:"отменяю", undone:"Отменено", undoFailed:"Не получилось отменить",
       undoNone:"Отмена сейчас недоступна", undoNet:"Не удалось связаться с компьютером, ничего не отменено",
-      obDialog:"Добро пожаловать в MicMic", obStep:"Шаг {n} из 3", obSkip:"Пропустить", obNext:"Далее", obLater:"Позже", obDone:"Готово",
+      obDialog:"Добро пожаловать в MicMic", obStep:"Шаг {n} из 3", obSkip:"Пропустить", obNext:"Далее", obDone:"Готово",
       ob1Title:"Удерживайте ⌥ и говорите.", ob1Sub:"Та ⌥, что справа. Отпустите, чтобы отправить.", ob1Tap:"Или нажмите раз, чтобы начать, и ещё раз, чтобы отправить.",
       obDemoSay:"Включи немного музыки", obDemoDone:"Включаю музыку",
-      ob2Title:"Разрешите MicMic работать с Mac.", ob2Sub:"Это нужно сделать один раз.",
-      obMic:"Микрофон", obMicWhy:"Чтобы слышать вас", obSpeech:"Распознавание речи", obSpeechWhy:"Чтобы понимать слова",
-      obAx:"Универсальный доступ", obAxWhy:"Для ⌥ во всех приложениях", obTurnOn:"Включить", obAsked:"Нажмите «Разрешить» в окне macOS",
-      obUnknown:"Отсюда это не проверить", obOn:"Включено", obOff:"Ещё нет",
+     
+      obMic:"Микрофон", obMicWhy:"Чтобы MicMic вас слышал.", obSpeech:"Распознавание речи", obSpeechWhy:"Чтобы превращать ваш голос в текст на Mac.",
+      obAx:"Универсальный доступ", obAxWhy:"Для сочетания клавиш и чтобы нажимать кнопки за вас.", obTurnOn:"Включить", obAsked:"Нажмите «Разрешить», когда macOS спросит.",
+      obUnknown:"Отсюда это не проверить",
+      obNotNow:"Не сейчас", obAllowMic:"Разрешить микрофон", obAllowSpeech:"Разрешить распознавание речи", obAllowAx:"Включить универсальный доступ", obAxAsked:"Включите MicMic в списке и вернитесь сюда.", obPermOn:"Включено. Спасибо.", obPermDenied:"Это можно включить позже в Настройках.", obOpenSettings:"Открыть настройки", obPermOf:"{n} из 3", obTypeTitle:"Пока можно писать.", obNoMic:"Без микрофона MicMic вас не слышит, но в этом окне ему можно писать. Микрофон включается в Настройках.", obNoSpeech:"Без распознавания речи MicMic не понимает голос, но в этом окне ему можно писать. Включите его в Настройках.", sPerms:"Разрешения", hPerms:"MicMic просит каждое разрешение, только когда вы нажмёте на него.", sPermOff:"Выключено", obOn:"Включено", obOff:"Ещё нет",
       ob3Title:"Попробуйте.", ob3Sub:"Удерживайте ⌥ и скажите", ob3Phrase:"Который час?", obWaiting:"Жду вас",
       obNoKey:"⌥ пока не работает? Нажмите на круг.", obSetTitle:"Всё готово.", obSetSub:"Получилось.", obListen:"Начать слушать",
       axNote:"Чтобы {key} запускал MicMic, включите универсальный доступ.", axOpen:"Открыть универсальный доступ", send:"Отправить", language:"Язык", secShort:"{n} с",
-      ob1TitleFn:"Дважды нажмите Fn и говорите.", ob1SubFn:"Нажмите Fn ещё раз, чтобы отправить.", ob3SubFn:"Дважды нажмите Fn и скажите", ob1TitlePress:"Нажмите ⌥ и говорите.", ob1SubPress:"Нажмите ещё раз, чтобы отправить.", ob3SubPress:"Нажмите ⌥ и скажите", obLangPick:"Выберите язык общения.", obAsrDownloading:"Улучшенное распознавание: загрузка {pct}%", obAsrReady:"Улучшенное распознавание включено", obAsrFailed:"Не удалось загрузить. MicMic использует встроенное распознавание.", sAsr:"Улучшенное распознавание", sAsrDownload:"Скачать ({size})", sAsrProgress:"Загрузка {pct}%", sAsrBuiltIn:"Встроено для этого языка", sAsrRetry:"Повторить попытку", guideMe:"Покажи по шагам", gStep:"Шаг {n}", gDone:"Готово", gDoIt:"Сделай за меня", gStop:"Стоп", gWhy:"Зачем?", gLooking:"Смотрю на экран", gFinished:"Всё готово", gClose:"Закрыть", gSecret:"Это вводите только вы. MicMic это не читает.", gStopped:"Подсказки остановлены"},
+      ob1TitleFn:"Дважды нажмите Fn и говорите.", ob1SubFn:"Нажмите Fn ещё раз, чтобы отправить.", ob3SubFn:"Дважды нажмите Fn и скажите", ob1TitlePress:"Нажмите ⌥ и говорите.", ob1SubPress:"Нажмите ещё раз, чтобы отправить.", ob3SubPress:"Нажмите ⌥ и скажите", obMoveTitle:"Переместите MicMic в «Программы»", obMoveSub:"MicMic сейчас запущен с образа диска. Из «Программ» он будет работать и после извлечения образа.", obMoveSubT:"MicMic сейчас запущен из временной копии. В «Программах» он сохранит свои разрешения.", obMoveGo:"Переместить и открыть", obMoving:"Перемещаю MicMic…", obMoved:"Открываю из «Программ»…", obMoveFail:"Не получилось. Перетащите MicMic в «Программы» в окне образа диска и откройте оттуда.", ob3SubClick:"Нажмите на круг и скажите", obClickTalk:"Нажмите, чтобы говорить", obKeyNeedsAx:"Сочетанию клавиш нужен универсальный доступ.", obClash:"{app} уже использует {key}. Использовать для MicMic {new}?", obClashNone:"{app} уже использует {key}. Выберите для MicMic другую клавишу.", obClashUse:"Использовать {new}", obClashOther:"Другая клавиша", obLangPick:"Выберите язык общения.", obAsrDownloading:"Улучшенное распознавание: загрузка {pct}%", obAsrReady:"Улучшенное распознавание включено", obAsrFailed:"Не удалось загрузить. MicMic использует встроенное распознавание.", sAsr:"Улучшенное распознавание", sAsrDownload:"Скачать ({size})", sAsrProgress:"Загрузка {pct}%", sAsrBuiltIn:"Встроено для этого языка", sAsrRetry:"Повторить попытку", guideMe:"Покажи по шагам", gStep:"Шаг {n}", gDone:"Готово", gDoIt:"Сделай за меня", gStop:"Стоп", gWhy:"Зачем?", gLooking:"Смотрю на экран", gFinished:"Всё готово", gClose:"Закрыть", gSecret:"Это вводите только вы. MicMic это не читает.", gStopped:"Подсказки остановлены"},
 };
 // language_hint is one of four codes everywhere else in this system (router.py's own
 // taxonomy); collapsing ar/ru to "en" here was why an Arabic or Russian speaker saw
@@ -1217,6 +1250,15 @@ function hotkeyGlyph(spec){
 }
 window.hotkeyGlyph = hotkeyGlyph;
 window.hotkeySpec = () => HOTKEY;
+window.hotkeyName = hotkeyName;
+// The onboarding's "Use Right ⌘" (a key another dictation app does not use): the new
+// key is named everywhere at once, before the save's echo comes back.
+window.setHotkeySpec = spec => {
+  if(!spec || spec === HOTKEY) return;
+  HOTKEY = spec;
+  if(typeof SETTINGS === "object") SETTINGS.hotkey = spec;
+  repaintKeyCopy();
+};
 // The browser's only voice when the server can't be reached at all (bug: total
 // silence on a fetch failure) or when a client-only correction has to be truthful
 // about something the server already announced as done (video never actually played,
@@ -2122,6 +2164,7 @@ function paintSettingsCopy(){
   $("wFnTwice").textContent  = t("sFnTwice");
   paintAccount();
   paintAsrRow();
+  paintPermsRow();
   if(!recordingHotkey) paintHotkey(SETTINGS.hotkey || "right-option");
 }
 
@@ -2180,6 +2223,54 @@ $("asrBtn").addEventListener("click", async ()=>{
   }catch(_){}
   btn.disabled = false;
   pollAsrSettings();
+});
+
+/* ---------------------------------------------------------------- permissions
+   Settings > Permissions: the three the onboarding asks for, each with its state and,
+   while it is not on, its own button. The button is the same one request as the
+   onboarding's (one macOS dialog, or the pane once macOS will not ask again), and the
+   row follows the answer. Screen Recording and Automation are not here: MicMic asks
+   for those just in time, the first time she asks for something that needs them. */
+// var, not let: paintSettingsCopy() can run before this line has, on the first paint.
+var PERMS_NOW = null, permsSettingsTimer = null;
+
+function paintPermsRow(){
+  if(!$("lPerms")) return;
+  const PERM_ROWS = {microphone:["obMic", "obAllowMic"], speech:["obSpeech", "obAllowSpeech"],
+                     accessibility:["obAx", "obAllowAx"]};
+  $("lPerms").textContent = t("sPerms");
+  $("hPerms").textContent = t("hPerms");
+  for(const row of document.querySelectorAll(".sperm")){
+    const k = row.dataset.k, [name, allow] = PERM_ROWS[k];
+    const s = PERMS_NOW ? (PERMS_NOW[k] || "unknown") : "unknown";
+    // Accessibility's "denied" is just "off": its button still asks (or opens its pane).
+    const refused = s === "denied" && k !== "accessibility";
+    row.dataset.s = s;
+    row.querySelector(".spname").textContent = t(name);
+    row.querySelector(".spstate").textContent = t(s === "granted" ? "obOn" : s === "unknown" ? "obUnknown"
+      : s === "denied" ? "sPermOff" : "obOff");
+    const b = row.querySelector(".spbtn");
+    b.hidden = s === "granted" || s === "unknown";
+    b.textContent = t(refused ? "obOpenSettings" : allow);
+  }
+}
+
+async function pollPermsSettings(){
+  try{
+    const r = await fetch("/api/permissions", {cache:"no-store"});
+    if(r.ok) PERMS_NOW = await r.json();
+  }catch(_){}
+  paintPermsRow();
+  clearTimeout(permsSettingsTimer); permsSettingsTimer = null;
+  if(PERMS_NOW && !PERMS_NOW.ready && $("settings").classList.contains("on"))
+    permsSettingsTimer = setTimeout(pollPermsSettings, 1500);
+}
+
+document.querySelector(".sperms").addEventListener("click", e => {
+  const b = e.target.closest(".spbtn"); if(!b) return;
+  e.stopPropagation();
+  fetch("/api/permissions/request", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({k: b.closest(".sperm").dataset.k})}).catch(()=>{}).then(pollPermsSettings);
 });
 
 /* ---------------------------------------------------------------- account
@@ -2343,8 +2434,10 @@ async function openSettings(){
   $("settings").classList.add("on");
   loadAccount(false);
   pollAsrSettings();
+  pollPermsSettings();
 }
 function closeSettings(){
+  clearTimeout(permsSettingsTimer); permsSettingsTimer = null;
   recordingHotkey = false;
   $("hotkeybtn").classList.remove("recording");
   $("settings").classList.remove("on");
@@ -2771,8 +2864,10 @@ if(PANEL){
   checkAx();
   $("axbtn").addEventListener("click", e => {
     e.stopPropagation();
-    fetch("/api/permissions/open", {method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({pane:"accessibility"})}).catch(()=>{});
+    // The same one request as the onboarding's step: macOS's own dialog the first
+    // time (it is what puts MicMic in the list), its pane after that.
+    fetch("/api/permissions/request", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({k:"accessibility"})}).catch(()=>{});
     setTimeout(checkAx, 1500);
   });
   // The release at the end of a drag is not a click on the page: it must not arm the

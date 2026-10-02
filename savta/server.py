@@ -323,6 +323,8 @@ class H(BaseHTTPRequestHandler):
                 # hands them to the recogniser as contextual strings. The page never
                 # read them, and got sixty names with every config fetch. Whatever is
                 # cached, never a wait: the first read copies WhatsApp's data (2.5 s).
+                # Never the first read: that is a macOS prompt, and this is fetched at
+                # launch (router.get_contacts reads only once a read has worked).
                 **({"contacts": get_contacts(wait=0.0)}
                    if "contacts=1" in (self.path or "") else {}),
                 # Better recognition for her language (savta/asr_models.py): the
@@ -525,7 +527,7 @@ class H(BaseHTTPRequestHandler):
                 asr_models.cancel()
                 return self._send(200, json.dumps(asr_models.status(speech_language())).encode())
             return self._send(200, json.dumps(asr_models.install(speech_language())).encode())
-        if self.path.startswith(("/api/onboarding", "/api/permissions")):
+        if self.path.startswith(("/api/onboarding", "/api/permissions", "/api/install/move")):
             return onboarding_api.post(self, self._drain())
         if self.path.startswith("/api/upgrade"):
             return self._account_link("upgrade")
@@ -772,10 +774,22 @@ def main():
     # A Mac whose onboarding window was finished but whose spoken setup never was
     # (onboarded true, setup_complete false) is set up: say so before anything reads it.
     onboarding_api.setup_done()
+    # A first run whose default talk key another dictation app already uses (Handy on
+    # right Option): the listener registers a free one from the start.
+    onboarding_api.ensure_free_default()
     fresh = _bundled() and not _prof.load().get("setup_complete")
-    if not fresh:
+    # And never the first read of it either, set up or not: only once a read of
+    # WhatsApp's data has worked here, so a launch never asks macOS for anything new.
+    if not fresh and _book.read_before("whatsapp"):
         threading.Thread(target=_book.recent_chats, daemon=True,
                          name="micmic-recent-warm").start()
+    # Reminders, timers and alarms from the last run: the future ones go back on, the
+    # ones that came due while MicMic was off are said once (router.restore_timers).
+    try:
+        from .router import restore_timers as _restore_timers
+        _restore_timers()
+    except Exception:  # noqa: BLE001  (a bad state file must never stop the launch)
+        traceback.print_exc()
     srv = Server(("127.0.0.1", PORT), H)
     print(f"\n  MicMic listening on http://127.0.0.1:{PORT}")
     if not _bundled():

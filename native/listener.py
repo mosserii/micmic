@@ -227,6 +227,18 @@ LANG = {
         "menu_help": "עזרה ותמיכה",
         "menu_quit": "יציאה ממיקמיק",
         "hotkey_ax": "⚠ קיצור המקלדת צריך הרשאת נגישות",
+        "wait_mic": "עוד לא מקשיבה: המיקרופון כבוי",
+        "wait_speech": "עוד לא מקשיבה: זיהוי הדיבור כבוי",
+        "jit_mic": "MicMic צריכה את המיקרופון כדי לשמוע אותך.",
+        "jit_speech": "MicMic צריכה זיהוי דיבור כדי להפוך את הקול שלך לטקסט ב-Mac.",
+        "jit_mic_off": "המיקרופון כבוי עבור MicMic. אפשר להפעיל אותו בהגדרות המערכת, ו-MicMic תתחיל להקשיב לבד.",
+        "jit_speech_off": "זיהוי הדיבור כבוי עבור MicMic. אפשר להפעיל אותו בהגדרות המערכת, ו-MicMic תתחיל להקשיב לבד.",
+        "allow_mic": "לאפשר מיקרופון",
+        "allow_speech": "לאפשר זיהוי דיבור",
+        "open_settings": "פתיחת ההגדרות",
+        "not_now": "לא עכשיו",
+        "jit_contacts": "כדי למצוא את מי שביקשת, MicMic צריכה להסתכל באנשי הקשר שלך. מיד אחר כך macOS ישאל.",
+        "continue": "המשך",
     },
     "ar": {
         "speech_denied": "لا أملك إذن التعرف على الصوت. يجب الموافقة في إعدادات النظام.",
@@ -255,6 +267,18 @@ LANG = {
         "menu_help": "المساعدة والدعم",
         "menu_quit": "إنهاء ميك ميك",
         "hotkey_ax": "⚠ الاختصار يحتاج إذن تسهيلات الاستخدام",
+        "wait_mic": "لا أستمع بعد: الميكروفون مغلق",
+        "wait_speech": "لا أستمع بعد: التعرّف على الكلام مغلق",
+        "jit_mic": "يحتاج MicMic إلى الميكروفون حتى يسمعك.",
+        "jit_speech": "يحتاج MicMic إلى التعرّف على الكلام ليحوّل صوتك إلى نص على جهاز Mac.",
+        "jit_mic_off": "الميكروفون مغلق لـ MicMic. يمكنك تشغيله في إعدادات النظام، وسيبدأ MicMic بالاستماع وحده.",
+        "jit_speech_off": "التعرّف على الكلام مغلق لـ MicMic. يمكنك تشغيله في إعدادات النظام، وسيبدأ MicMic بالاستماع وحده.",
+        "allow_mic": "السماح بالميكروفون",
+        "allow_speech": "السماح بالتعرّف على الكلام",
+        "open_settings": "فتح الإعدادات",
+        "not_now": "ليس الآن",
+        "jit_contacts": "لإيجاد الشخص الذي ذكرته، يحتاج MicMic إلى النظر في جهات الاتصال. بعدها سيسألك macOS.",
+        "continue": "متابعة",
     },
     "ru": {
         "speech_denied": "Нет разрешения на распознавание речи. Разрешите его в настройках системы.",
@@ -283,6 +307,18 @@ LANG = {
         "menu_help": "Помощь и поддержка",
         "menu_quit": "Выйти из МикМик",
         "hotkey_ax": "⚠ Сочетанию клавиш нужен универсальный доступ",
+        "wait_mic": "пока не слушаю: микрофон выключен",
+        "wait_speech": "пока не слушаю: распознавание речи выключено",
+        "jit_mic": "MicMic нужен микрофон, чтобы слышать вас.",
+        "jit_speech": "MicMic нужно распознавание речи, чтобы превращать ваш голос в текст на Mac.",
+        "jit_mic_off": "Микрофон для MicMic выключен. Включите его в Системных настройках, и MicMic начнёт слушать сам.",
+        "jit_speech_off": "Распознавание речи для MicMic выключено. Включите его в Системных настройках, и MicMic начнёт слушать сам.",
+        "allow_mic": "Разрешить микрофон",
+        "allow_speech": "Разрешить распознавание речи",
+        "open_settings": "Открыть настройки",
+        "not_now": "Не сейчас",
+        "jit_contacts": "Чтобы найти человека, которого вы назвали, MicMic нужно посмотреть ваши контакты. Затем macOS спросит вас.",
+        "continue": "Продолжить",
     },
     "en": {
         "speech_denied": "Speech recognition is not allowed. Please approve it in System Settings.",
@@ -311,6 +347,18 @@ LANG = {
         "menu_help": "Help and support",
         "menu_quit": "Quit MicMic",
         "hotkey_ax": "⚠ Hotkey needs Accessibility permission",
+        "wait_mic": "not listening yet: the microphone is off",
+        "wait_speech": "not listening yet: speech recognition is off",
+        "jit_mic": "MicMic needs the microphone so it can hear you.",
+        "jit_speech": "MicMic needs Speech Recognition to turn your voice into text on your Mac.",
+        "jit_mic_off": "The microphone is off for MicMic. Turn it on in System Settings, and MicMic starts listening by itself.",
+        "jit_speech_off": "Speech Recognition is off for MicMic. Turn it on in System Settings, and MicMic starts listening by itself.",
+        "allow_mic": "Allow microphone",
+        "allow_speech": "Allow speech recognition",
+        "open_settings": "Open Settings",
+        "not_now": "Not now",
+        "jit_contacts": "To find the person you named, MicMic needs to look at your contacts. macOS will ask you next.",
+        "continue": "Continue",
     },
 }
 
@@ -617,6 +665,87 @@ def request_accessibility() -> bool:
 
 ACCESSIBILITY_PANE = ("x-apple.systempreferences:"
                       "com.apple.preference.security?Privacy_Accessibility")
+SETTINGS_PANES = {
+    "microphone": "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+    "speech": "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition",
+    "accessibility": ACCESSIBILITY_PANE,
+}
+
+
+# --------------------------------------------------------------------------- TCC
+# Every place the listener touches a permission. The two *_status calls only read and
+# never prompt. ask_microphone, ask_speech and request_accessibility each put exactly
+# one macOS dialog on the screen, and are called only because she clicked for that one
+# permission (Listener.request_permission): never at launch. The first-run "permission
+# storm" (speech, microphone and Accessibility dialogs all at once over the onboarding
+# window) came from asking all three the moment the app opened. Tests replace these.
+def mic_status() -> int:
+    """0 not asked, 1 restricted, 2 denied, 3 granted. Never prompts."""
+    return int(AVFoundation.AVCaptureDevice.authorizationStatusForMediaType_(
+        AVFoundation.AVMediaTypeAudio))
+
+
+def speech_status() -> int:
+    """0 not asked, 1 denied, 2 restricted, 3 granted. Never prompts."""
+    return int(Speech.SFSpeechRecognizer.authorizationStatus())
+
+
+def ask_microphone(done) -> None:
+    """The microphone dialog. done(granted: bool) comes back on some other thread."""
+    AVFoundation.AVCaptureDevice.requestAccessForMediaType_completionHandler_(
+        AVFoundation.AVMediaTypeAudio, done)
+
+
+def ask_speech(done) -> None:
+    """The speech recognition dialog. done(status: int) comes back on another thread.
+    Only a bundle with NSSpeechRecognitionUsageDescription may call it: a bare python
+    dies with SIGABRT, which is one more reason it runs only on her click."""
+    Speech.SFSpeechRecognizer.requestAuthorization_(done)
+
+
+def open_settings_pane(k: str) -> None:
+    url = SETTINGS_PANES.get(k)
+    if url:
+        AppKit.NSWorkspace.sharedWorkspace().openURL_(Foundation.NSURL.URLWithString_(url))
+
+
+def ask_alert(message: str, ok: str, cancel: str, on_ok, after=None) -> None:
+    """MicMic's own one line before a macOS prompt, with a yes and a "Not now". Runs on
+    the main thread; on_ok runs only if she chose the first button, `after` either way."""
+    def show():
+        try:
+            a = AppKit.NSAlert.alloc().init()
+            a.setMessageText_("MicMic")
+            a.setInformativeText_(message)
+            a.addButtonWithTitle_(ok)
+            a.addButtonWithTitle_(cancel)
+            AppKit.NSApp().activateIgnoringOtherApps_(True)
+            if a.runModal() == AppKit.NSAlertFirstButtonReturn:
+                on_ok()
+        finally:
+            if after is not None:
+                after()
+    on_main(show)
+
+
+def fetch_permission_request() -> str:
+    """For a listener that is its own process: the one permission the page asked for
+    since the last look, or "" (savta/onboarding_api.py, /api/permissions/next)."""
+    try:
+        with urllib.request.urlopen(SERVER.rstrip("/") + "/api/permissions/next",
+                                    timeout=2) as r:
+            k = json.loads(r.read() or b"{}").get("k")
+        return k if k in SETTINGS_PANES else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+RECOVERY_POLL = 1.5        # while a permission is missing: how often to look (reads only)
+RECOVERY_POLL_SLOW = 10.0  # after RECOVERY_FAST_FOR seconds of looking
+RECOVERY_FAST_FOR = 600.0
+PENDING_POLL = 0.5         # a separate-process listener collecting the page's clicks
+JIT_REPEAT = 3.0           # the just-in-time line, at most this often
+CONTACTS_WAIT = 30.0       # her answer to the contacts line, inside the turn's 45 s
 
 
 def parse_combo(spec: str) -> tuple[int, int]:
@@ -758,6 +887,25 @@ def ensure_server() -> None:
     except Exception as e:  # noqa: BLE001
         log(f"cannot import the bundled server: {e!r}")
         return
+    # One process: the page's "Allow microphone" reaches the listener directly, and the
+    # prompt is asked for on this app's main thread, under the bundle's own identity.
+    try:
+        from savta import onboarding_api as _ob
+        from savta.actions import contacts as _book
+        _ob.set_requester(LISTENER.request_permission)
+        _book.set_explainer(LISTENER.confirm_contacts)
+        LISTENER.in_process = True
+        # "Move to Applications" (savta/install_place.py): the copy is reopened from
+        # there once this one has quit, the way the menu's Quit does it.
+        from savta import install_place as _place
+
+        def _quit_for_move():
+            log("moved to Applications: quitting so the new copy can open")
+            LISTENER.shutdown()
+            AppKit.NSApp().terminate_(None)
+        _place.set_quitter(lambda: on_main(_quit_for_move))
+    except Exception as e:  # noqa: BLE001
+        log(f"permission requests will be collected over HTTP instead: {e!r}")
     threading.Thread(target=_server.main, name="micmic-server", daemon=True).start()
     for _ in range(40):                    # 10s, the same budget the shell launcher used
         time.sleep(0.25)
@@ -1021,6 +1169,11 @@ class Listener:
 
         self.speech_auth = 0
         self.mic_auth = False
+        self.in_process = False       # the server runs in this process (release bundle)
+        self.ax_prompted = False      # macOS's own Accessibility dialog shown this run
+        self._recovery_polling = False
+        self._serving_requests = False
+        self._jit_at = 0.0
 
     # ------------------------------------------------------------------ menu bar
     def build_status_item(self, delegate) -> None:
@@ -1316,8 +1469,10 @@ class Listener:
             # replace them now rather than asking her to quit and reopen.
             log("Accessibility granted — re-arming the hotkey")
             on_main(lambda: self.register_hotkey(force=True))
-        elif not trusted and first_check:
-            on_main(request_accessibility)
+        # Not trusted: say so in the menu (below) and never prompt from here. The
+        # Accessibility dialog used to fire on this first check, at launch, as the
+        # third of the first-run storm; it now comes only from her click (the
+        # onboarding step, Settings, the window's note or "Set up keyboard shortcut").
 
         def apply():
             if self.hotkey_line is None:
@@ -1334,67 +1489,189 @@ class Listener:
                 "(the 'Listen now' menu item and the wake word work without it)")
 
     # ------------------------------------------------------------------ permissions
-    def start_auth(self) -> None:
-        """Ask for speech, then microphone, then start. Both prompts are real
-        macOS dialogs and only appear because MicMic.app has the usage strings."""
-        def speech_done(status):
-            self.speech_auth = int(status)
-            log(f"speech authorization status = {self.speech_auth} (3 = authorized)")
-            AVFoundation.AVCaptureDevice.requestAccessForMediaType_completionHandler_(
-                AVFoundation.AVMediaTypeAudio, mic_done)
+    def start_quietly(self) -> None:
+        """Launch. Asks macOS for NOTHING.
 
-        def mic_done(granted):
-            self.mic_auth = bool(granted)
-            log(f"microphone access granted = {self.mic_auth}")
+        It used to ask for speech, then the microphone, then Accessibility, the moment
+        the app opened, over the top of the onboarding window: three dialogs before she
+        had read a word. Now what is already granted simply works, and what is missing
+        is asked for one at a time, by its own button (the onboarding's steps, Settings
+        > Permissions), or just in time, with MicMic's own line first, when she tries
+        to talk (ask_just_in_time). Listening starts the moment both are granted, from
+        the click's answer or from the poll, with no relaunch."""
+        if not DEFAULT_LOCALE and self.cfg.get("language_hint"):
+            self.locale = str(self.cfg["language_hint"])
+        self.serve_permission_requests()
+        self.speech_auth = speech_status()
+        self.mic_auth = mic_status() == 3
+        if self.speech_auth == 3 and self.mic_auth:
             on_main(self.begin)
+            return
+        log(f"launch: microphone {'allowed' if self.mic_auth else 'not allowed'}, speech "
+            f"status {self.speech_auth}: asking for nothing, waiting for her to allow them")
+        self.set_status(self.waiting_line())
+        # The talk key is how she will try to talk, so it is live already: pressed
+        # without a microphone it explains and asks (start_turn). Registering it never
+        # prompts; without Accessibility it simply hears nothing.
+        self.register_hotkey()
+        self.poll_permission_recovery()
 
-        log("requesting speech recognition authorization…")
-        Speech.SFSpeechRecognizer.requestAuthorization_(speech_done)
+    def waiting_line(self) -> str:
+        return L("wait_mic" if not self.mic_auth else "wait_speech", self.locale)
+
+    def request_permission(self, k: str) -> None:
+        """Exactly one macOS prompt, for the one permission she just clicked for.
+
+        Called by the server (savta/onboarding_api.py request(), in this process in
+        the release bundle), by the pending-request poll (a separate process), or by
+        MicMic's own just-in-time line. The prompt is asked for on the main thread."""
+        def ask():
+            if k == "microphone":
+                log("asking for the microphone: she clicked for it")
+                ask_microphone(self._mic_answered)
+            elif k == "speech":
+                log("asking for speech recognition: she clicked for it")
+                ask_speech(self._speech_answered)
+            elif k == "accessibility":
+                if is_accessibility_trusted():
+                    return
+                # There is no dialog that grants it in place. macOS's own, the first
+                # time, is what puts MicMic in the list, and its button opens the pane
+                # on MicMic's switch; after that, the pane itself.
+                if not self.ax_prompted:
+                    self.ax_prompted = True
+                    log("asking for Accessibility: macOS's dialog, then its pane")
+                    request_accessibility()
+                else:
+                    log("opening the Accessibility pane: she clicked for it")
+                    open_settings_pane("accessibility")
+        on_main(ask)
+        if k in ("microphone", "speech"):
+            self.poll_permission_recovery()
+
+    def _mic_answered(self, granted) -> None:
+        self.mic_auth = bool(granted)
+        log(f"microphone: {'allowed' if self.mic_auth else 'not allowed'}")
+        self._answered()
+
+    def _speech_answered(self, status) -> None:
+        self.speech_auth = int(status)
+        log(f"speech recognition status = {self.speech_auth} (3 = allowed)")
+        self._answered()
+
+    def _answered(self) -> None:
+        """A dialog was answered. Both allowed: start listening now. Otherwise keep
+        waiting, quietly: a "Don't Allow" is her choice, not a failure to announce."""
+        if self.running:
+            return
+        # The other one may have been answered in System Settings meanwhile.
+        self.speech_auth = speech_status() if self.speech_auth != 3 else 3
+        self.mic_auth = self.mic_auth or mic_status() == 3
+        if self.speech_auth == 3 and self.mic_auth:
+            on_main(self.begin)
+        else:
+            self.set_status(self.waiting_line())
+
+    def ask_just_in_time(self) -> None:
+        """She tried to talk (Listen now, the talk key, the window's circle) and MicMic
+        cannot hear. One line, in MicMic's words, and the one permission it is missing:
+        never asked before, its macOS dialog if she says yes; refused before, macOS
+        will not ask again, so the pane that turns it on."""
+        now = time.time()
+        if now - self._jit_at < JIT_REPEAT:
+            return
+        self._jit_at = now
+        mic, speech = mic_status(), speech_status()
+        if mic == 3 and speech == 3:
+            self.speech_auth, self.mic_auth = 3, True
+            on_main(self.begin)
+            return
+        k, st, short = (("microphone", mic, "mic") if mic != 3 else ("speech", speech, "speech"))
+        if (get_config() or self.cfg or {}).get("first_run"):
+            # Not set up yet: the window's own steps are where she is asked, one at a
+            # time, so it comes to the front instead of a second explanation over it.
+            log(f"she tried to talk without {k} before setup: showing the window's steps")
+            if self.panel is not None:
+                on_main(self.panel.show)
+            self.poll_permission_recovery()
+            return
+        log(f"she tried to talk without {k}: explaining, then asking only if she agrees")
+        if st == 0:
+            ask_alert(L(f"jit_{short}", self.locale), L(f"allow_{short}", self.locale),
+                      L("not_now", self.locale), lambda: self.request_permission(k))
+        else:
+            ask_alert(L(f"jit_{short}_off", self.locale), L("open_settings", self.locale),
+                      L("not_now", self.locale), lambda: open_settings_pane(k))
+        self.poll_permission_recovery()
+
+    def confirm_contacts(self) -> bool:
+        """MicMic's one line before macOS first asks about her contacts, which happens
+        on her first request about a person (savta/actions/contacts.py). Called on the
+        server's thread for that turn, which waits for her answer; never the main one."""
+        done, ans = threading.Event(), {"yes": False}
+        loc = str((self.cfg or {}).get("language_hint") or self.locale)
+        log("first read of her contacts: explaining before macOS asks")
+        ask_alert(L("jit_contacts", loc), L("continue", loc), L("not_now", loc),
+                  lambda: ans.update(yes=True), after=done.set)
+        done.wait(CONTACTS_WAIT)
+        return ans["yes"]
 
     def poll_permission_recovery(self) -> None:
-        """begin() used to run exactly once, from applicationDidFinishLaunching_, so
-        a denied permission was permanent until she quit and relaunched the app —
-        even after fixing the switch in System Settings (bugs #5). TCC's own status
-        calls (authorizationStatus / authorizationStatusForMediaType_) never prompt,
-        so this can poll them safely in the background."""
+        """Start listening the moment the microphone and speech are both allowed, with
+        no relaunch: after a dialog she answered later, a switch she turned on in
+        System Settings, or a step she skipped and came back to. TCC's status calls
+        never prompt, so this only ever reads. One poll at a time; it never gives up
+        (it used to after 10 minutes, and a skipped step is often allowed days later),
+        it only slows down."""
+        if self._recovery_polling or self.running:
+            return
+        self._recovery_polling = True
+
         def tick():
-            for _ in range(120):                       # ~10 minutes, then give up
-                time.sleep(5.0)
-                if self.running:
-                    return
-                speech = int(Speech.SFSpeechRecognizer.authorizationStatus())
-                mic = int(AVFoundation.AVCaptureDevice.authorizationStatusForMediaType_(
-                    AVFoundation.AVMediaTypeAudio))
-                if speech == 3 and mic == 3:
-                    self.speech_auth = speech
-                    self.mic_auth = True
-                    log("permission granted in System Settings — resuming without a relaunch")
-                    on_main(self.begin)
-                    return
-            log("still missing microphone/speech permission after 10 minutes of "
-                "polling — giving up; relaunch MicMic after fixing it")
+            started = time.time()
+            try:
+                while not self.running:
+                    fast = time.time() - started < RECOVERY_FAST_FOR
+                    time.sleep(RECOVERY_POLL if fast else RECOVERY_POLL_SLOW)
+                    if self.running:
+                        return
+                    if speech_status() == 3 and mic_status() == 3:
+                        self.speech_auth, self.mic_auth = 3, True
+                        log("microphone and speech allowed: starting to listen, no relaunch")
+                        on_main(self.begin)
+                        return
+            except Exception as e:  # noqa: BLE001
+                log(f"permission poll stopped: {e!r}")
+            finally:
+                self._recovery_polling = False
         threading.Thread(target=tick, daemon=True).start()
+
+    def serve_permission_requests(self) -> None:
+        """A listener in its own process (a source build, where the server runs apart)
+        collects the page's "Allow" clicks from the server. The release bundle shares
+        the server's process and is handed them directly (ensure_server)."""
+        if self.in_process or self._serving_requests:
+            return
+        self._serving_requests = True
+
+        def loop():
+            while True:
+                time.sleep(PENDING_POLL)
+                k = fetch_permission_request()
+                if k:
+                    self.request_permission(k)
+        threading.Thread(target=loop, daemon=True).start()
 
     # ------------------------------------------------------------------ setup
     def begin(self) -> None:
-        if self.speech_auth != 3:
-            self.set_status(L("speech_denied", self.locale), "⚠")
-            log("speech recognition was not authorized — open System Settings > "
-                "Privacy & Security > Speech Recognition and allow MicMic")
-            alert("MicMic can't hear anything",
-                  "Speech recognition was not allowed. Open System Settings > "
-                  "Privacy & Security > Speech Recognition and turn MicMic on.")
-            speak_local("speech_denied", self.locale)
-            self.poll_permission_recovery()
+        if self.running:
             return
-        if not self.mic_auth:
-            self.set_status(L("mic_denied", self.locale), "⚠")
-            log("microphone was not authorized — System Settings > Privacy & Security "
-                "> Microphone and allow MicMic")
-            alert("MicMic can't hear anything",
-                  "Microphone access was not allowed. Open System Settings > "
-                  "Privacy & Security > Microphone and turn MicMic on.")
-            speak_local("mic_denied", self.locale)
+        if self.speech_auth != 3 or not self.mic_auth:
+            # Never an alert or a spoken complaint here: nothing was asked at launch,
+            # so nothing has "failed". The status line says what is off, the window
+            # offers the button, and the poll starts listening once it is allowed.
+            self.set_status(self.waiting_line())
+            log("not listening yet: microphone or speech recognition is not allowed")
             self.poll_permission_recovery()
             return
 
@@ -1671,7 +1948,9 @@ class Listener:
                 log("push-to-talk hotkey: double-tap Fn/Globe")
             elif spec in TAP_KEYS:
                 self._register_tap(spec)
-                log(f"push-to-talk hotkey: tap {spec}")
+                # Held, it sends on release; tapped, it listens until a pause or the
+                # next tap. "tap" here once read as if holding did not work.
+                log(f"push-to-talk hotkey: {spec} (hold to talk, or tap)")
             else:
                 self._register_combo(spec)
                 log(f"push-to-talk hotkey: {spec}")
@@ -1843,7 +2122,9 @@ class Listener:
         """wire is what the server is told the turn is: "hold" for a key that is down,
         "tap" for Listen now or a double Fn, "followup" when MicMic asked."""
         if not self.running:
-            log("turn requested before the listener finished starting")
+            log("turn requested before the listener is listening")
+            if kind == "ptt":
+                self.ask_just_in_time()
             return False
         if self.paused:
             log("turn requested while paused, ignoring")
@@ -2714,7 +2995,6 @@ LISTENER = Listener()
 class Delegate(AppKit.NSObject):
     def applicationDidFinishLaunching_(self, note):
         LISTENER.build_status_item(self)
-        LISTENER.start_auth()
         # Double-clicking an app and getting no window, no Dock icon and no sound is
         # indistinguishable from a crash — this was reported as "nothing opens up".
         # Launched by hand: show the window. Launched at login by launchd: stay quiet.
@@ -2729,6 +3009,8 @@ class Delegate(AppKit.NSObject):
             # an invisible bar a new download showed nothing but a menu bar icon.
             if LISTENER.display_mode() == "panel" or LISTENER.cfg.get("first_run"):
                 self.showPanel_(None)
+        # After the window, and asking macOS for nothing: see start_quietly().
+        LISTENER.start_quietly()
         Foundation.NSDistributedNotificationCenter.defaultCenter() \
             .addObserver_selector_name_object_(
                 self, objc.selector(self.showFromOtherLaunch_, signature=b"v@:@"),
@@ -2768,9 +3050,12 @@ class Delegate(AppKit.NSObject):
         LISTENER.push_to_talk()
 
     def setUpShortcut_(self, sender):
-        request_accessibility()
-        AppKit.NSWorkspace.sharedWorkspace().openURL_(
-            Foundation.NSURL.URLWithString_(ACCESSIBILITY_PANE))
+        # Off: the one request (macOS's dialog the first time, its pane after). On
+        # already: the pane, as before, to see or change it.
+        if is_accessibility_trusted():
+            open_settings_pane("accessibility")
+        else:
+            LISTENER.request_permission("accessibility")
 
     def showPanel_(self, sender):
         if LISTENER.panel is not None:

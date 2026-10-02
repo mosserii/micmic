@@ -599,6 +599,26 @@ def t_router():
     check("walk me through starts guiding even when the intent reads as do_online",
           r["did"] == "guide_step" and m.requests[-1]["goal"] == "walk me through adding the Maps API", r)
     router.GUIDE.stop()
+    # Bench gd-002, measured live: "can you guide me through ..." reads as help (0.93)
+    # with guidance "none" at only 0.32-0.41, and got the feature list 3/3.
+    m.script = [step("Open System Settings and click Bluetooth.", 1)]
+    j.over = {**base, "intent": ("help", 0.93), "guidance": ("none", 0.35)}
+    r = router.handle(j, "can you guide me through connecting my bluetooth headphones",
+                      speak=False)
+    check("'can you guide me through X' starts the guide for X, not the feature list",
+          r["did"] == "guide_step" and m.requests[-1]["goal"].endswith("bluetooth headphones"), r)
+    router.GUIDE.stop()
+    m.script = [step("Open System Settings and click Bluetooth.", 1)]
+    j.over = {**base, "intent": ("help", 0.98), "guidance": ("none", 0.39)}
+    r = router.handle(j, "תדריכי אותי איך לחבר אוזניות בלוטות'", speak=False)
+    check("the same in Hebrew", r["did"] == "guide_step", r)
+    router.GUIDE.stop()
+    # Off the computer (measured: guidance "none" 0.94-1.00): the words are not enough.
+    n0 = len(m.requests)
+    j.over = {**base, "intent": ("help", 0.5), "guidance": ("none", 0.94)}
+    r = router.handle(j, "can you guide me through baking bread", speak=False)
+    check("guiding through something away from the computer is not a guide",
+          not str(r["did"]).startswith("guide") and len(m.requests) == n0, r["did"])
     j.over = {**base, "intent": ("message", 0.9), "guidance": ("walk_me_through", 0.9)}
     n0 = len(m.requests)
     r = router.handle(j, "send Dana a message", speak=False)

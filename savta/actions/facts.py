@@ -33,20 +33,31 @@ class _Gone(Exception):
         self.status, self.body = status, body
 
 
-# Kept-alive connections to wttr.in. A fresh one cost a TLS handshake, about 0.2 s of
-# every weather answer (measured with curl: time_appconnect 0.18-0.58 s). A few are
-# kept because the readings of one Hebrew town name are fetched in parallel.
-_IDLE: list = []
+# Kept-alive connections, per host. A fresh one cost a TLS handshake, about 0.2 s of
+# every weather answer (measured with curl: time_appconnect 0.18-0.58 s), and a
+# Wikipedia lookup 0.55 s fresh against 0.17-0.35 s on a kept one (2026-10-02). A few
+# are kept because the readings of one Hebrew town name are fetched in parallel.
+_IDLE: dict[str, list] = {}
 _IDLE_MAX = 4
+# A connection idle longer than this is not trusted: the far end may have dropped it.
+_IDLE_S = 50.0
 
 
-def _wttr_get(path: str, timeout: float) -> bytes:
+def _kept_get(host: str, path: str, timeout: float) -> tuple[int, bytes]:
+    """(status, body) of one GET on a kept-alive connection to host."""
     with _LOCK:
-        conn = _IDLE.pop() if _IDLE else None
+        pool = _IDLE.setdefault(host, [])
+        conn = None
+        while pool and conn is None:
+            c, at = pool.pop()
+            if time.time() - at <= _IDLE_S:
+                conn = c
+            else:
+                c.close()
     for attempt in (0, 1):
         reused = conn is not None
         if conn is None:
-            conn = http.client.HTTPSConnection("wttr.in", 443, timeout=timeout)
+            conn = http.client.HTTPSConnection(host, 443, timeout=timeout)
         try:
             conn.timeout = timeout
             if conn.sock is not None:
@@ -59,20 +70,51 @@ def _wttr_get(path: str, timeout: float) -> bytes:
             conn.close()
             conn = None
             if reused and attempt == 0:
-                continue          # an idle socket wttr had already closed: try fresh
+                continue          # an idle socket the host had already closed: try fresh
             raise
         except Exception:
             conn.close()
             raise
-        with _LOCK:
-            if len(_IDLE) < _IDLE_MAX and not resp.will_close:
-                _IDLE.append(conn)
-            else:
-                conn.close()
-        if resp.status != 200:
-            raise _Gone(resp.status, raw[:200].decode("utf-8", "replace").lower())
-        return raw
-    raise ConnectionError("wttr.in unreachable")
+        _keep(host, conn, resp.will_close)
+        return resp.status, raw
+    raise ConnectionError(f"{host} unreachable")
+
+
+def _keep(host: str, conn, will_close: bool = False) -> None:
+    with _LOCK:
+        pool = _IDLE.setdefault(host, [])
+        if len(pool) < _IDLE_MAX and not will_close:
+            pool.append((conn, time.time()))
+            return
+    conn.close()
+
+
+def warm(host: str) -> None:
+    """Open a connection to host now, on its own thread, unless one is already kept, so
+    the lookup that follows starts without a handshake. Fails silently."""
+    with _LOCK:
+        if any(time.time() - at <= _IDLE_S for _, at in _IDLE.get(host, [])):
+            return
+
+    def run() -> None:
+        try:
+            conn = http.client.HTTPSConnection(host, 443, timeout=4)
+            conn.connect()
+            _keep(host, conn)
+        except Exception:  # noqa: BLE001
+            pass
+    threading.Thread(target=run, daemon=True).start()
+
+
+def wiki_host(lang: str) -> str:
+    return f"{lang[:2]}.wikipedia.org"
+
+
+def _wttr_get(path: str, timeout: float) -> bytes:
+    status, raw = _kept_get("wttr.in", path, timeout)
+    if status != 200:
+        raise _Gone(status, raw[:200].decode("utf-8", "replace").lower())
+    return raw
 
 
 def _j1(place: str) -> dict | None:
@@ -250,14 +292,18 @@ def wiki(term: str, lang: str = "he") -> str:
     """First paragraph of the best-matching article, in her language when it exists.
 
     One request, not two: the search and the summary used to be separate round trips,
-    a few hundred milliseconds of every knowledge answer."""
+    a few hundred milliseconds of every knowledge answer. On a kept-alive connection
+    (see _kept_get): the handshake was most of what was left."""
     for L in (lang[:2], "en"):
         try:
-            u = (f"https://{L}.wikipedia.org/w/api.php?action=query&format=json"
-                 f"&generator=search&gsrsearch={urllib.parse.quote(term)}&gsrlimit=1"
-                 f"&prop=extracts&exintro=1&explaintext=1&redirects=1")
-            d = json.loads(urllib.request.urlopen(
-                urllib.request.Request(u, headers=UA), timeout=4).read())
+            status, raw = _kept_get(
+                wiki_host(L),
+                f"/w/api.php?action=query&format=json&generator=search"
+                f"&gsrsearch={urllib.parse.quote(term)}&gsrlimit=1"
+                f"&prop=extracts&exintro=1&explaintext=1&redirects=1", 4)
+            if status != 200:
+                continue
+            d = json.loads(raw)
             pages = (d.get("query") or {}).get("pages") or {}
             text = next((p.get("extract") or "" for p in pages.values()), "").strip()
             if text:
@@ -265,3 +311,13 @@ def wiki(term: str, lang: str = "he") -> str:
         except Exception:  # noqa: BLE001
             continue
     return ""
+
+
+_WIKI = wiki
+
+
+def warm_wiki(lang: str) -> None:
+    """warm() the Wikipedia host wiki() will ask first. Skipped when wiki() has been
+    replaced (a test's stand-in): nothing real would use the connection."""
+    if wiki is _WIKI:
+        warm(wiki_host(lang))

@@ -57,6 +57,7 @@ def check(name: str, ok, detail: str = "") -> bool:
 # ---------------------------------------------------------------- fake osascript
 SCRIPTS: list[str] = []
 CAL: dict[str, dict] = {}          # uid -> event, as Calendar would hold it
+REMS: dict[str, dict] = {}         # id -> reminder, as Reminders would hold it
 PLAYER = {"Music": "playing", "Spotify": "not_running"}
 TABS: list[str] = []               # addresses of the tabs open in Chrome
 VIDEO = {"paused": False}
@@ -73,6 +74,24 @@ def _date(script: str, var: str) -> tuple[str, str]:
 
 def fake_osa(script: str, timeout: float = 4.0):
     SCRIPTS.append(script)
+    if 'tell application "Reminders"' in script:
+        # Reminders as it would hold them: rows by id, with a due day and maybe a time.
+        dated = "set year of d" in script
+        date, at = _date(script, "d") if dated else ("", "")
+        allday = "allday due date" in script
+        if "make new reminder" in script:
+            rid = f"x-apple-reminder://REM-{len(REMS) + 1}"
+            name = re.search(r'name:"([^"]*)"', script).group(1)
+            REMS[rid] = {"name": name, "date": date, "at": "" if allday else at}
+            return True, rid
+        m = re.search(r'whose id is "([^"]*)"', script)
+        if m:
+            row = REMS.get(m.group(1))
+            if row is None:
+                return True, "missing"
+            row.update(date=date, at="" if allday else at)
+            return True, "ok"
+        return True, ""
     if "make new event" in script:
         uid = f"UID-{len(CAL) + 1}"
         date, start = _date(script, "s")
@@ -236,6 +255,12 @@ def asked_follow(j: ScriptedJev) -> bool:
     return bool(j.asked) and fu.QUESTION in j.asked[0]
 
 
+def _offered(j: ScriptedJev, prefix: str) -> bool:
+    """The follow-up question of the turn's first call offered a change to `prefix`."""
+    crit = ((j.asked[0] if j.asked else {}).get(fu.QUESTION) or {}).get("criteria") or {}
+    return any(k.startswith(prefix) for k in crit)
+
+
 def told(j: ScriptedJev) -> bool:
     return bool(j.states) and "last_thing_micmic_did" in j.states[0]
 
@@ -249,6 +274,7 @@ def fresh():
               tm.CLOSED, tm.VOLUME):
         x.clear()
     CAL.clear()
+    REMS.clear()
     TABS.clear()
     PLAYER.update(Music="playing", Spotify="not_running")
     VIDEO["paused"] = False
@@ -409,11 +435,13 @@ def t_timer():
     check("HE: moved to 10 minutes, said in Hebrew",
           r["did"] == "timer_set" and r["say"] == "בסדר, אזכיר לך בעוד 10 דקות.", r["say"])
     r, _ = turn("מה השעה", intent="look_up", lang="hebrew")
+    # The spoken answer to "מה השעה" is now the last action (t_spoken_answers), so the
+    # check is that the reminder is no longer what a change would be about.
     check("HE: a new request forgets the reminder as the thing to change",
-          router.MEM.last_action is None)
+          (router.MEM.last_action or {}).get("kind") != "timer", router.MEM.last_action)
     r, j = turn("תבטלי את זה", intent="stop", lang="hebrew")
     check("HE: after it, 'cancel it' is not asked about the reminder",
-          not asked_follow(j) and len(mac.pending_timers()) == 1)
+          not _offered(j, "reminder") and len(mac.pending_timers()) == 1)
     mac.cancel_timers()
 
 
@@ -509,7 +537,7 @@ def t_calendar():
     turn("מה מזג האוויר", intent="look_up", lang="hebrew")
     r, j = turn("תזיזי את זה ליום שישי", intent="chitchat", lang="hebrew")
     check("HE: after a new request, 'move it' is not about the event any more",
-          not asked_follow(j) and r["did"] != "confirm_event_change")
+          not _offered(j, "event") and r["did"] != "confirm_event_change")
 
 
 # ================================================================== players
@@ -715,11 +743,52 @@ def t_answers():
     turn("play Shakira", intent="music",
          extra={"span_subject": "Shakira", "span_subject_exists": 0.95})
     r, j = turn("תקצרי", intent="chitchat", lang="hebrew")
-    check("HE: after a new request, 'shorter' no longer rewrites the answer",
+    check("HE: after a new request, 'shorter' no longer rewrites the screen answer",
           r["did"] != "rewrote_answer"
-          and not any(k[0].startswith("answer") for k in
-                      (fu.question(fu.in_play(router.MEM.last_action, None), "תקצרי")
-                       or {"options": {}})["options"].values()))
+          and (router.MEM.last_action or {}).get("task") != "summarize", router.MEM.last_action)
+
+
+def t_spoken_answers():
+    """Bench v1 mt-010: "who was albert einstein", then "shorter" -> "I can make it
+    louder or quieter". Only screen answers were a last action; every spoken answer
+    (a fact, small talk, the weather, a live result) is one now."""
+    print("\nt_spoken_answers")
+    fresh()
+    r, _ = turn("who was albert einstein", intent="look_up", extra={"needs_knowledge": 0.95})
+    check("a knowledge answer is a last action (kind answer, with what she heard)",
+          r["did"] == "answered" and (router.MEM.last_action or {}).get("kind") == "answer"
+          and router.MEM.last_action.get("text") == "[answer]", (r["did"], router.MEM.last_action))
+    n0 = LLM.calls
+    r, j = turn("shorter", follow="say it shorter")
+    check("shorter after a knowledge answer: asked as a follow-up and rewritten",
+          asked_follow(j) and r["did"] == "rewrote_answer"
+          and r["say"].startswith("[short] [answer]") and LLM.calls == n0 + 1, (r["did"], r["say"]))
+    check("its system prompt is not about a screen",
+          "screen" not in LLM.prompts[-1][0].lower(), LLM.prompts[-1][0][:80])
+    r, _ = turn("say it again", follow="say it again")
+    check("say it again: the last version, no model call",
+          r["did"] == "again" and r["say"].startswith("[short]") and LLM.calls == n0 + 1, r)
+
+    fresh()
+    r, _ = turn("how are you today", intent="chitchat")
+    check("a chat reply is a last action too",
+          r["did"] == "chatted" and (router.MEM.last_action or {}).get("kind") == "answer", r["did"])
+    r, _ = turn("in Hebrew", follow="say it in Hebrew")
+    check("in Hebrew after small talk: rewritten and spoken as Hebrew",
+          r["did"] == "rewrote_answer" and r["lang"] == "hebrew"
+          and r["say"].startswith("[Hebrew] [chat]"), (r["did"], r["lang"], r["say"]))
+
+    fresh()
+    _, j0 = turn("what's the weather", intent="look_up")
+    base_q = sorted(j0.asked[0])
+    turn("who was albert einstein", intent="look_up", extra={"needs_knowledge": 0.95})
+    _, j1 = turn("what's the weather", intent="look_up")
+    check("after an answer, a request with no modifier word is asked exactly as before",
+          sorted(j1.asked[0]) == base_q and not asked_follow(j1) and not told(j1))
+    r, _ = turn("play Shakira", intent="music",
+                extra={"span_subject": "Shakira", "span_subject_exists": 0.95})
+    check("a new request forgets the answer", (router.MEM.last_action or {}).get("kind") != "answer",
+          router.MEM.last_action)
 
 
 # ================================================================== messages
@@ -1101,10 +1170,14 @@ def t_new_chat_resets():
     print("\nt_new_chat_resets")
     fresh()
     turn("remind me in 5 minutes to call", intent="timer", extra={"when_minutes": "5"})
+    old = (router.MEM.last_action or {}).get("id")
     router.new_conversation()
+    check("a new chat forgets the last action", router.MEM.last_action is None)
     r, j = turn("make it 10 minutes instead", intent="timer")
-    check("a new chat forgets the last action", not asked_follow(j)
-          and router.MEM.last_action is None)
+    # Read fresh, with the intent a timer, it sets one of its own (the amount comes from
+    # her words since fix/time); it is never taken as a change to the old reminder.
+    check("and the next turn is not asked about it", not asked_follow(j)
+          and (router.MEM.last_action or {}).get("id") != old)
     mac.cancel_timers()
 
 
@@ -1115,6 +1188,7 @@ def main():
     t_calendar()
     t_players()
     t_answers()
+    t_spoken_answers()
     for t in (t_message_owner_session, t_message_need_what, t_message_follow_ups,
               t_message_gate):
         try:

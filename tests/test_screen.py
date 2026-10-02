@@ -231,7 +231,55 @@ def t_redact_hides_secrets_keeps_ordinary_numbers():
         check(f"kept: {text!r}", r(text) == text, r(text))
 
 
+class _El:
+    def __init__(self, role, **attrs):
+        self.attrs = {"AXRole": role, **attrs}
+
+
+def t_document_text_is_only_the_document():
+    """"Send this to Dana" with an email open (bench scr-006) sends the email's own
+    text: the same walk that reads the window gathers what is inside its document
+    (an AXWebArea or AXTextArea) apart from the mailbox list and toolbar around it.
+    A fake accessibility tree; nothing real is read."""
+    body = [_El("AXStaticText", AXValue="Hi Sam! Dinner at Rosa's on Friday at 8pm?"),
+            _El("AXStaticText", AXValue="Bring the photos from Rome. Dana")]
+    web = _El("AXWebArea", AXChildren=[_El("AXGroup", AXChildren=body)])
+    inbox = _El("AXTable", AXChildren=[_El("AXStaticText", AXValue="Gal: about the car"),
+                                       _El("AXStaticText", AXValue="Mom: lunch on Sunday")])
+    window = _El("AXWindow", AXTitle="Dinner on Friday",
+                 AXChildren=[_El("AXButton", AXTitle="Reply"), inbox, web])
+    root = _El("AXApplication", AXMainWindow=window)
+
+    def get(el, name, _):
+        return (0, el.attrs[name]) if name in el.attrs else (-25212, None)
+    ax = {"get": get}
+    real = screen._app_root
+    screen._app_root = lambda pid: (ax, root)
+    try:
+        out = screen._visible_text_for({"app": "Mail", "pid": 1}, 6000, 2500, 1.5)
+    finally:
+        screen._app_root = real
+    check("the whole window is still read", "Gal: about the car" in out["text"]
+          and "Rosa's" in out["text"], out["text"])
+    check("the document is the email alone",
+          "Rosa's" in out["document"] and "Rome" in out["document"]
+          and "Gal" not in out["document"] and "Reply" not in out["document"], out["document"])
+    notes = _El("AXWindow", AXTitle="Notes", AXChildren=[
+        _El("AXStaticText", AXValue="All iCloud"),
+        _El("AXTextArea", AXValue="Plans for Saturday. Meet at the north gate at seven.")])
+    root2 = _El("AXApplication", AXMainWindow=notes)
+    screen._app_root = lambda pid: (ax, root2)
+    try:
+        out2 = screen._visible_text_for({"app": "Notes", "pid": 2}, 6000, 2500, 1.5)
+    finally:
+        screen._app_root = real
+    check("an editor's text area is a document too",
+          out2["document"].startswith("Plans for Saturday") and "iCloud" not in out2["document"],
+          out2["document"])
+
+
 TESTS = [
+    t_document_text_is_only_the_document,
     t_redact_hides_secrets_keeps_ordinary_numbers,
     t_clean_strips_invisible_chars,
     t_clean_collapses_whitespace,

@@ -124,7 +124,7 @@ mac.screen_locked = lambda: False
 FIXED_BOOK = [{"name": "Zohar Levin", "phone": "+972500000001",
               "waid": "972500000001@s.whatsapp.net", "source": "fixture"}]
 book.all_contacts = lambda force=False, wait=None: list(FIXED_BOOK)
-router.get_contacts = lambda utterance="", wait=None: ["Zohar Levin"]
+router.get_contacts = lambda utterance="", wait=None, **_: ["Zohar Levin"]
 
 REAL_TAKE_SCREENSHOT = screen.take_screenshot
 REAL_FRONTMOST = screen.frontmost

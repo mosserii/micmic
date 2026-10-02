@@ -15,7 +15,8 @@ MICMIC_MODE=own_key|proxy forces one of the first two, which is how a test runs 
 proxy path on a machine that also has a key in .env.local.
 """
 from __future__ import annotations
-import http.client, json, os, threading, time, urllib.error, urllib.request
+import http.client, json, os, queue, sys, threading, time, urllib.error, urllib.request
+from collections import deque
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -33,6 +34,47 @@ IDLE_FRESH = 40.0
 # on a warm connection. A connection opened on demand costs ~500 ms more than the
 # question on it, so a parallel call without a warm spare would be slower than none.
 POOL_SIZE = 2
+
+# Hedged requests. MicMic Bench v1 (2026-10-01, jev-latest, own key, 1,353 turns): one
+# call's own time was p50 400 ms, p95 1.5 s, p98 2.6 s, and 5 calls hung until the 12 s
+# socket timeout, after which the retry answered at once; 8 turns stalled ~13 s and the
+# worst took 26.7 s. So a question not answered by about Jev's p95 sends ONE duplicate,
+# byte for byte the same, and the first answer wins; the other is left to finish on its
+# own and is ignored. The delay is the p95 of this client's recent answers, kept between
+# HEDGE_MIN_S and HEDGE_MAX_S (HEDGE_DEFAULT_S until it has HEDGE_SAMPLES of them).
+# MICMIC_JEV_HEDGE_S=<seconds> fixes it, 0 turns hedging off.
+# Through the proxy the duplicate is metered like any call; at p95 that is about one
+# extra call in twenty, against a stall of 12 s or more on the ones it saves.
+HEDGE_MIN_S = 1.5
+HEDGE_MAX_S = 2.5
+HEDGE_DEFAULT_S = 2.0
+HEDGE_SAMPLES = 20
+# With her own key a duplicate costs a fraction of a cent and nothing else, so it goes
+# out sooner: at the p90 of recent answers, not under HEDGE_OWN_MIN_S. Bench v1 run
+# v1-final-12405eb (2026-10-02): the 26 hedged single-call turns answered 0.05-1.6 s
+# after the duplicate went (median 0.5 s), the shape of an independent second draw.
+# Drawing twice from Bench v1's unhedged calls (v1-20261001, 672 single-call turns):
+# a duplicate at 1.0 s instead of 1.5 s takes one call's p95 from 1.53 to 1.36 s and
+# its p98 from 1.89 to 1.45 s, for 9.8% duplicates instead of 5.6%. Through the proxy
+# every duplicate is metered against her allowance, so there it stays at p95.
+HEDGE_OWN_Q = 0.90
+HEDGE_OWN_MIN_S = 1.0
+# The whole question, duplicate and retries included, gives up after this. It was 12 s
+# per attempt with up to three attempts.
+TOTAL_CAP_S = 12.0
+
+
+def _hedge_env() -> float | None | str:
+    """MICMIC_JEV_HEDGE_S as seconds (0 = off), or "auto" when unset or unreadable."""
+    v = os.environ.get("MICMIC_JEV_HEDGE_S", "").strip().lower()
+    if not v:
+        return "auto"
+    if v in ("off", "no", "false"):
+        return 0.0
+    try:
+        return max(0.0, float(v))
+    except ValueError:
+        return "auto"
 
 
 def _close(conn) -> None:
@@ -196,6 +238,26 @@ class Jev:
         self.busy_ms = 0.0
         self._idle: list[tuple] = []       # (connection, last answered at), newest last
         self._lock = threading.Lock()      # guards _idle and the counters
+        # Hedging (see HEDGE_*): None = adaptive, 0 = off, else fixed seconds.
+        env = _hedge_env()
+        self.hedge_s: float | None = None if env == "auto" else env  # type: ignore[assignment]
+        self.total_cap = TOTAL_CAP_S
+        self.hedges = 0                    # duplicates sent (each one a billed call)
+        self.hedge_wins = 0                # ... of which answered first
+        self._lat: deque = deque(maxlen=200)   # recent answers' ms, for the p95
+
+    def hedge_delay(self) -> float | None:
+        """Seconds to wait for an answer before sending the duplicate; None = never."""
+        if self.hedge_s is not None:
+            return self.hedge_s or None
+        with self._lock:
+            lat = sorted(self._lat)
+        if len(lat) < HEDGE_SAMPLES:
+            return HEDGE_DEFAULT_S
+        own = self.mode == "own_key"
+        q, floor = (HEDGE_OWN_Q, HEDGE_OWN_MIN_S) if own else (0.95, HEDGE_MIN_S)
+        at = lat[min(len(lat) - 1, int(q * len(lat)))] / 1000.0
+        return min(HEDGE_MAX_S, max(floor, at))
 
     def _new_conn(self):
         cls = http.client.HTTPSConnection if self._https else http.client.HTTPConnection
@@ -260,23 +322,22 @@ class Jev:
         retry_on = (429, 529) if self.mode == "own_key" else (503, 529)
         last = None
         fresh = False            # after a failure, never trust another idle connection
+        hedged = False           # at most one duplicate per question, retries included
+        deadline = time.time() + self.total_cap
         for attempt in range(3):
+            left = deadline - time.time()
+            if left <= 0:
+                break
             t0 = time.time()
-            conn = None
-            try:
-                conn = None if fresh else self._take()
-                if conn is None:
-                    conn = self._new_conn()
-                conn.request("POST", self._path, body=payload, headers=headers)
-                resp = conn.getresponse()
-                raw = resp.read()
-                status = resp.status
-                self._give(conn)
-                conn = None
+            status, raw, err, dup, timed_out = self._race(
+                payload, headers, fresh, None if hedged else self.hedge_delay(), left)
+            hedged = hedged or dup
+            if err is None:
                 if status == 200:
                     d = json.loads(raw)
                     with self._lock:
                         self.last_ms = (time.time() - t0) * 1000
+                        self._lat.append(self.last_ms)
                         self.calls += 1
                         self.input_tokens += d.get("usage", {}).get("input_tokens", 0)
                     return d["answers"]
@@ -286,28 +347,103 @@ class Jev:
                     self._proxy_refusal(status, raw)
                 last = f"HTTP {status}: {raw[:200].decode(errors='replace')}"
                 if status in retry_on and attempt < 2:
-                    time.sleep(0.4 * (2 ** attempt)); continue
-                break
-            except (QuotaExceeded, NotConfigured):
-                raise
-            except Exception as e:  # noqa: BLE001
-                last = repr(e)[:200]
-                if conn is not None:
-                    _close(conn)
-                fresh = True
-                # Through the proxy a timeout is not retried: the proxy is still waiting
-                # on Jev and has already counted the call, so each retry cost her one
-                # more of her daily requests (three for one hung question) and twelve
-                # more seconds of silence. Only a request that never got through (a
-                # refused connection, a keep-alive the server had already closed) is
-                # worth sending again.
-                never_sent = isinstance(e, (ConnectionRefusedError, BrokenPipeError,
-                                            http.client.RemoteDisconnected))
-                if self.mode == "proxy" and not never_sent:
-                    break
-                if attempt < 2:
+                    time.sleep(min(0.4 * (2 ** attempt), max(0.0, deadline - time.time())))
                     continue
+                break
+            if isinstance(err, (QuotaExceeded, NotConfigured)):
+                raise err
+            last = repr(err)[:200]
+            fresh = True
+            if timed_out:
+                break
+            # Through the proxy a timeout is not retried: the proxy is still waiting
+            # on Jev and has already counted the call, so each retry cost her one
+            # more of her daily requests (three for one hung question) and twelve
+            # more seconds of silence. Only a request that never got through (a
+            # refused connection, a keep-alive the server had already closed) is
+            # worth sending again. A duplicate already sent was the retry.
+            never_sent = isinstance(err, (ConnectionRefusedError, BrokenPipeError,
+                                          http.client.RemoteDisconnected))
+            if (self.mode == "proxy" or dup) and not never_sent:
+                break
+            if attempt < 2:
+                continue
         raise RuntimeError(f"jev call failed: {last}")
+
+    def _once(self, payload: str, headers: dict, fresh: bool) -> tuple[int, bytes]:
+        """One request on the wire: (status, body). Raises when it never got an answer."""
+        conn = None
+        try:
+            conn = None if fresh else self._take()
+            if conn is None:
+                conn = self._new_conn()
+            conn.request("POST", self._path, body=payload, headers=headers)
+            resp = conn.getresponse()
+            raw = resp.read()
+            status = resp.status
+        except BaseException:
+            if conn is not None:
+                _close(conn)
+            raise
+        self._give(conn)
+        return status, raw
+
+    def _race(self, payload: str, headers: dict, fresh: bool, delay: float | None,
+              budget: float) -> tuple:
+        """The request, plus one identical duplicate if no answer came within `delay`
+        seconds. The first 200 wins; a failure waits for the other copy. Returns
+        (status, body, error, duplicate_sent, timed_out); the copy that lost is left to
+        finish on its own thread and its answer is dropped."""
+        box: queue.Queue = queue.Queue()
+
+        def run(tag: str, fresh_: bool) -> None:
+            try:
+                box.put((tag, self._once(payload, headers, fresh_), None))
+            except BaseException as e:  # noqa: BLE001
+                box.put((tag, None, e))
+
+        t0 = time.time()
+        end = t0 + budget
+        threading.Thread(target=run, args=("first", fresh), daemon=True).start()
+        started, got, dup_at = 1, 0, None
+        failure = None
+        while True:
+            now = time.time()
+            wait = end - now
+            if dup_at is None and delay is not None:
+                wait = min(wait, t0 + delay - now)
+            try:
+                tag, resp, err = box.get(timeout=max(0.0, wait))
+            except queue.Empty:
+                now = time.time()
+                if dup_at is None and delay is not None and now < end:
+                    dup_at = now
+                    with self._lock:
+                        self.hedges += 1
+                    print(f"  jev: no answer after {delay:.1f} s, sent the same question "
+                          "again", file=sys.stderr)
+                    threading.Thread(target=run, args=("duplicate", fresh), daemon=True).start()
+                    started += 1
+                    continue
+                if failure is not None:
+                    return (*failure, dup_at is not None, False)
+                return (0, b"", TimeoutError(f"no answer within {budget:.1f} s"),
+                        dup_at is not None, True)
+            got += 1
+            if err is None and resp[0] == 200:
+                if tag == "duplicate":
+                    with self._lock:
+                        self.hedge_wins += 1
+                if dup_at is not None:
+                    print(f"  jev: the {tag} answered after {(time.time() - t0) * 1000:.0f} ms",
+                          file=sys.stderr)
+                return (resp[0], resp[1], None, dup_at is not None, False)
+            if failure is None or (tag == "first" and failure[2] is not None):
+                failure = (resp[0], resp[1], None) if err is None else (0, b"", err)
+            if got >= started:
+                # Nothing else in flight. A failure before the duplicate was due goes
+                # back to the retry loop exactly as it did before hedging existed.
+                return (*failure, dup_at is not None, False)
 
     @staticmethod
     def _proxy_refusal(status: int, raw: bytes) -> None:

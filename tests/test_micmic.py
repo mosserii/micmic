@@ -227,7 +227,8 @@ mac.open_url = lambda u: OPENED.append(u)
 mac.open_app = lambda a: (APPS.append(a), (True, a))[1]
 mac.open_path = lambda p: (PATHS.append(p), (True, p))[1]
 mac.make_note = lambda t, title="": (NOTES.append(t), (True, "ok"))[1]
-mac.add_reminder = lambda t: (REMINDERS.append(t), (True, "ok"))[1]
+REAL_ADD_REMINDER = mac.add_reminder
+mac.add_reminder = lambda t, *a, **k: (REMINDERS.append(t), (True, "ok"))[1]
 mac.facetime = lambda n, number="", video=True: (CALLED.append((n, number)), (True, "ok"))[1]
 mac.end_call = lambda: (HUNGUP.append(1), (True, "quit"))[1]
 # The suite must not depend on whether whoever runs it happened to lock their Mac.
@@ -348,6 +349,9 @@ REAL_RECENT_CHATS = book.recent_chats
 book._CACHE.update(at=time.time() * 10, rows=list(FIXED_BOOK))
 book.all_contacts = lambda force=False, wait=None: list(FIXED_BOOK)
 book.recent_chats = lambda limit=30: [dict(r) for r in FIXED_BOOK[:limit]]
+# This fixture is a Mac where reading her contacts has worked (savta/actions/contacts.py
+# contacts_ok): every turn shortlists, so each Jev request is exactly the recorded one.
+(Path(_STATE) / "contacts_ok").write_text("fixture")
 REAL_UNREAD = book.unread_summary          # kept for the store-lock test; stubbed below
 REAL_READ_RECENT = book._read_recent
 book.unread_summary = lambda limit=8: []
@@ -688,6 +692,7 @@ class _ScriptedJev:
         self.answer: dict = {}    # utterance -> (is_answer, restates_request)
         self.yes: dict = {}       # utterance -> ("yes"|"no"|"neither", confidence)
         self.named: dict = {}     # utterance -> the contact her answer to "who?" names
+        self.agreed: dict = {}    # utterance -> her yes to "shall I call?" (noul)
         # pick_result: what she asked for -> a piece of the title Jev chooses. None
         # leaves pick_result refusing everything, as it always did here.
         self.best: dict | None = None
@@ -725,6 +730,8 @@ class _ScriptedJev:
                 out[k] = {"noul": 0.9 if self.spans.get(utt) else 0.1}
             elif k == "contact" and utt in self.named:
                 out[k] = {"choice": self.named[utt], "confidence": 0.9, "probabilities": {}}
+            elif k == "agreed":
+                out[k] = {"noul": self.agreed.get(utt, 0.0)}
             elif k == "yes_no":
                 pick, conf = self.yes.get(utt, ("neither", 0.9))
                 out[k] = {"choice": pick, "confidence": conf, "probabilities": {pick: conf}}
@@ -1122,8 +1129,10 @@ def t_a_follow_up_keeps_the_message(j):
               and [t for _, t in WA] == ["[fr] I love her"], f"sent={SENT} wa={WA}")
         check("owner shape: translated once, not again for the app change",
               s.llm.calls == 1, f"llm calls={s.llm.calls}")
+        # fix/people-safety: the first turn's "Gal" is Gal Ben Ami by its spelling
+        # (savta/people.py), so no turn asks Jev at all; before, only the first did.
         check("owner shape: a pointed-back person is never checked as a spoken name",
-              s.j.asked.count("same_person") == 1, str(s.j.asked))   # only the first turn
+              s.j.asked.count("same_person") == 0, str(s.j.asked))
 
     # ---- a pronoun with no message kept: the same-name check alone ----------------
     reset_state()
@@ -1880,6 +1889,12 @@ def t_message_end_to_end(j: Jev):
     """8. The whole thing in one Hebrew breath: who, what, read back, armed."""
     reset_state()
     router.CANCEL_WINDOW = 30.0
+    # One Zohar, as the fixture book has. Run from a checkout that holds a profile.json,
+    # the profile is copied in (paths.state) and its pinned names join her list; with
+    # a second Zohar pinned there, "לזוהר" alone is rightly asked about ("Zohar X or
+    # Zohar Levin?", fix/people-safety), which is not what this section tests.
+    p_before = prof.load()
+    prof.save({**p_before, "pinned": []})
     try:
         r = router.handle(j, "תשלחי הודעה לזוהר שאני מרגישה הרבה יותר טוב היום",
                           speak=False)
@@ -1909,6 +1924,7 @@ def t_message_end_to_end(j: Jev):
     finally:
         router._cancel_pending()
         router.CANCEL_WINDOW = 6.0
+        prof.save(p_before)
 
 
 @with_gates_on
@@ -3975,10 +3991,13 @@ def t_live_answers(j):
             intent="look_up", needs_knowledge=0.95,
             spans={"term": ("first prime minister of israel", 0.9)}),
     }
+    # Yesterday around noon, whatever the hour the suite runs: a fixed 26 hours ago
+    # is "two days ago" just after midnight, and the check below failed at 00:28.
+    _yday = time.localtime().tm_hour + time.localtime().tm_min / 60 + 12
     en_feed = _rss([("Bayern München beat Hapoel Tel-Aviv 86-84 after Voigtmann's late three",
-                     "Sofascore", 26),
+                     "Sofascore", _yday),
                     ("ASVEL sink Maccabi Tel Aviv with 16 threes in Euroleague opener",
-                     "Sofascore", 27),
+                     "Sofascore", _yday + 1),
                     ("Average possession - Maccabi Tel Aviv stats", "FotMob", 5),
                     ("A story from last week", "Old News", 24 * 5)])
     he_feed = _rss([('ראשון לעונה: הפועל ת"א הביסה 67:85 את באר שבע', "ynet.co.il", 14),

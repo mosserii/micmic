@@ -117,7 +117,7 @@ mac.add_event = _stub_add_event
 FIXED_BOOK = [{"name": "Zohar Levin", "phone": "+972500000001",
               "waid": "972500000001@s.whatsapp.net", "source": "fixture"}]
 book.all_contacts = lambda force=False, wait=None: list(FIXED_BOOK)
-router.get_contacts = lambda utterance="", wait=None: ["Zohar Levin"]
+router.get_contacts = lambda utterance="", wait=None, **_: ["Zohar Levin"]
 
 # ---------------------------------------------------------------- harness
 PASSED = 0
@@ -666,6 +666,124 @@ def t_recent_screenshot_expires():
             screen.capture_region = real_capture
 
 
+# ==================================================================== "this" is the open document
+MAIL_BODY = ("From: Dana Cohen. Subject: Dinner on Friday. Hi! Dinner at Rosa's on "
+             "Friday at 8pm? Bring the photos from Rome. Dana")
+
+
+def _capture_must_not_start():
+    real = screen.capture_region
+    calls: list = []
+
+    def fake(on_start=None):
+        calls.append(1)
+        return {"ok": False, "why": "cancelled"}
+    screen.capture_region = fake
+    return real, calls
+
+
+def t_send_this_email_sends_its_text():
+    """13. Bench scr-006: "send this to Dana" with an email open and nothing selected
+    brought up the drag crosshair (3/3). The email's own text (the document the
+    screen reader found, not the mailbox around it) is "this": read back, counting
+    down, no crosshair."""
+    reset_state()
+    real, calls = _capture_must_not_start()
+    try:
+        with gates_on():
+            u = fake_u(intent="message", contact="Zohar Levin", contact_named=1.0,
+                       channel="not_applicable", refers_to_screen=0.43, screen_task="send")
+            ctx = readable_ctx(frontmost={"app": "Mail", "pid": 4242, "bundle_id": "com.apple.mail",
+                                          "window": "Dinner on Friday"},
+                               visible={"text": "Inbox | Gal: car | Mom: lunch | " + MAIL_BODY,
+                                        "truncated": False, "document": MAIL_BODY})
+            with with_understand(u), with_same_person(), with_screen_context(ctx):
+                r = router.handle(_j, "send this to Zohar Levin", speak=False)
+        check("no crosshair: it is sending the email", r["did"] == "sending" and not calls,
+              short(r))
+        check("what goes is the email itself, not the inbox list around it",
+              (router.PENDING or {}).get("text") == MAIL_BODY, short(router.PENDING))
+        check("it says what it is sending and where it came from",
+              "Mail" in r["say"] and "{" not in r["say"] and "—" not in r["say"], r["say"])
+        check("the kind is the open window's text", r["detail"].get("from_screen") == "send_window",
+              short(r["detail"]))
+    finally:
+        screen.capture_region = real
+        router._cancel_pending()
+
+
+def t_send_this_whole_window_asks_first():
+    """14. A document app whose document the reader could not single out: the whole
+    window may hold more than she meant, so it is read back for a yes, never sent on
+    a countdown, and never the crosshair."""
+    reset_state()
+    real, calls = _capture_must_not_start()
+    try:
+        with gates_on():
+            u = fake_u(intent="message", contact="Zohar Levin", contact_named=1.0,
+                       channel="not_applicable", refers_to_screen=0.43, screen_task="send")
+            ctx = readable_ctx(frontmost={"app": "Mail", "pid": 4242, "bundle_id": "com.apple.mail",
+                                          "window": "Dinner on Friday"},
+                               visible={"text": MAIL_BODY, "truncated": False})
+            with with_understand(u), with_same_person(), with_screen_context(ctx):
+                r = router.handle(_j, "send this to Zohar Levin", speak=False)
+        check("it asks first", r["did"] == "confirm_send" and r.get("asked_back") and not calls,
+              short(r))
+        check("nothing is armed or sent", router.PENDING is None and not SENT, short(router.PENDING))
+        check("the question names the app, with no raw placeholder",
+              "Mail" in r["say"] and "{" not in r["say"], r["say"])
+        check("the yes carries the window's text",
+              (router.AWAITING or {}).get("body") == MAIL_BODY
+              and (router.AWAITING or {}).get("from_screen") == "send_window",
+              short(router.AWAITING))
+    finally:
+        screen.capture_region = real
+        router.AWAITING = None
+
+
+def t_send_this_chat_still_crosshair():
+    """15. A chat in front is never "this" (it would forward her conversation): with
+    nothing selected the crosshair is still the way to pick."""
+    reset_state()
+    real = screen.capture_region
+    started = threading.Event()
+    screen.capture_region = lambda on_start=None: (started.set(), {"ok": False, "why": "cancelled"})[1]
+    try:
+        with gates_on():
+            u = fake_u(intent="message", contact="Zohar Levin", contact_named=1.0,
+                       channel="not_applicable", refers_to_screen=0.9, screen_task="send")
+            ctx = readable_ctx(frontmost={"app": "WhatsApp", "pid": 4242, "bundle_id": "",
+                                          "window": "WhatsApp"},
+                               visible={"text": "Mom: did you eat? | me: yes | Mom: good",
+                                        "truncated": False, "document": "Mom: did you eat? yes good"})
+            with with_understand(u), with_same_person(), with_screen_context(ctx):
+                r = router.handle(_j, "send this to Zohar Levin", speak=False)
+        check("a chat in front gets the crosshair, not its text",
+              r["did"] == "screen_select_wait" and router.PENDING is None, short(r))
+        started.wait(2.0)
+    finally:
+        screen.capture_region = real
+        router.AWAITING = None
+
+
+def t_send_it_to_him_asks_who():
+    """16. Bench hard-amb-007: "send it to him" at the start of a session, nothing
+    in front, nobody named: who, not a drag over the screen for nobody."""
+    reset_state()
+    real, calls = _capture_must_not_start()
+    try:
+        with gates_on():
+            u = fake_u(intent="message", contact="nobody", contact_named=0.05,
+                       channel="not_applicable", refers_to_screen=0.3, screen_task="send")
+            with with_understand(u), with_screen_context(readable_ctx()):
+                r = router.handle(_j, "send it to him", speak=False)
+        check("it asks who", r["did"] == "need_who" and r.get("asked_back") and not calls, short(r))
+        check("nothing armed", router.PENDING is None and not SENT, short(router.PENDING))
+    finally:
+        screen.capture_region = real
+        router.AWAITING = None
+
+
 TESTS = [
     ("1. calendar: date with no time, then a real time", t_calendar_date_no_time_then_timed),
     ("2. calendar: date with no time, then all day", t_calendar_date_no_time_then_all_day),
@@ -679,6 +797,10 @@ TESTS = [
     ("10. prefs always-ask reaches a screenshot send", t_always_ask_reaches_screenshot_send),
     ("11. a recent screenshot is reused without the word", t_recent_screenshot_reused_without_the_word),
     ("12. an expired screenshot is not reused", t_recent_screenshot_expires),
+    ("13. send this with an email open sends the email", t_send_this_email_sends_its_text),
+    ("14. a whole document window is read back for a yes", t_send_this_whole_window_asks_first),
+    ("15. a chat in front still gets the crosshair", t_send_this_chat_still_crosshair),
+    ("16. send it to him with nothing in front asks who", t_send_it_to_him_asks_who),
 ]
 
 

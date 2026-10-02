@@ -522,6 +522,21 @@ def t_gate():
                                 "which_one") for v in fu.LINES[k].values()))
 
 
+def t_words_keep_their_apostrophes():
+    """The message is a span of her own words: "I'm running late" went out as
+    "I m running late" because every apostrophe was stripped before the spans."""
+    from savta.brain import span_candidates
+    c = span_candidates("send Dana a WhatsApp that I'm running late, then play some jazz")
+    check("a contraction stays whole in the words a message is picked from",
+          "I'm running late" in c and "I m running late" not in " | ".join(c), c[:4])
+    c = span_candidates("tell Gal it’s Dana’s turn")
+    check("a curly apostrophe stays too", "it’s Dana’s turn" in c, c[:3])
+    c = span_candidates("tell Gal 'see you soon'")
+    check("quote marks around words are still dropped", "see you soon" in c, c[:3])
+    c = span_candidates("תשלח לדנה שאני קונה צ'יפס")
+    check("a Hebrew geresh stays", "שאני קונה צ'יפס" in c, c[:3])
+
+
 def main():
     for t, args in ((t_owner_session, ("english",)), (t_owner_session, ("hebrew",)),
                     (t_countdown_over, ("english",)), (t_countdown_over, ("hebrew",)),
@@ -531,7 +546,8 @@ def main():
                     (t_sound_alike_asks_first, ("hebrew",)),
                     (t_both_asked_for, ()), (t_stopped_and_corrected, ()),
                     (t_correction_needs_a_name, ()),
-                    (t_own_words_move_app, ()), (t_gate, ())):
+                    (t_own_words_move_app, ()), (t_gate, ()),
+                    (t_words_keep_their_apostrophes, ())):
         try:
             t(*args)
         except Exception as e:  # noqa: BLE001  (on a checkout without the fix)

@@ -73,6 +73,49 @@ SCREEN_SONG_QUESTIONS = {
                      "false": "She names a song or an artist of her own (play Waka Waka, put on Bad Bunny), asks for a kind of music, rejects what is playing (no, not this one, something else) with nothing about a screen, or is not asking for a song at all."}},
 }
 
+# Asked only when her words may be aimed at MicMic itself (people.may_be_at_micmic:
+# "useless", "stupid", "מטומטמת", "тупая"...). The bench (2026-10-01): "you're useless" scored
+# distress over the gate and was answered "You sound upset. Shall I call Dana Cohen?".
+# Being annoyed with the computer is not needing a person.
+AT_MICMIC_QUESTIONS = {
+    "upset_with_micmic": {"type": "noul",
+        "instructions": "She is annoyed or frustrated with the computer assistant itself, or insulting it, rather than upset about something happening to her or to someone she knows",
+        "criteria": {"true": "You're useless. You never understand me. Stupid machine. את מטומטמת. ты тупая. إنتي ما بتفهمي.",
+                     "false": "She is hurt, frightened, lonely, being pressured or in danger, or someone she knows is: I fell, I'm scared, someone is at the door, a man says I must pay him. Can you help me, I don't feel well. Or an ordinary request."}},
+}
+
+# Asked only when her words may be asking for a detail of something open on her
+# screen (actions/screen.may_ask_about_screen: "my flight", "the booking code", "how
+# many eggs", "what time does my..."). The bench (2026-10-01): with a flight
+# confirmation in front of her, "what time does my flight leave" was answered "I do
+# not have access to your personal travel information" (refers_to_screen 0.07: no
+# "this", no "screen"), and with a recipe saying 4 eggs, "how many eggs" got "2".
+# Jev never sees the screen; it judges only whether the answer would be written in
+# something she has open. Code then reads the screen and grounds the answer in it.
+SCREEN_ASK_QUESTIONS = {
+    "screen_question": {"type": "noul",
+        "instructions": "She asks for a particular detail that would be written in something she has open on her computer right now: her own booking, flight, ticket, order, appointment, bill, an email, a recipe, a document or the page she is reading. Not a fact about the world in general",
+        "criteria": {"true": "What time does my flight leave? What's my booking code? Which seat do I have? How many eggs do I need? How many eggs does it need? How much is the total? When is my appointment? What is the order number? מתי הטיסה שלי? מה קוד ההזמנה? כמה ביצים צריך? كم بيضة لازم؟ متى رحلتي؟ Во сколько мой рейс? Сколько яиц нужно?",
+                     "false": "A fact about the world or a general how-to: how many eggs are in a dozen, how many people live in Paris, what time is it, when did the war end, how much is a bitcoin, how many minutes in an hour, what is the weather. Or a request to do something: play, send, call, open, set a timer, remind me."}},
+}
+
+# Asked only when the microphone was open without her pressing the key (the wake word,
+# the open mic, the window after a countdown): then the words may not be for MicMic at
+# all. Bench v1 (2026-10-01): a TV line on an open mic started pop music, and "honey
+# did you take the keys" got a chatty answer, because the old filter only looked at
+# unclear or small-talk intents. A push-to-talk turn never asks this, so its request
+# is exactly what it was. "assistant" first: a replay that never saw this question
+# defaults to the first option, which keeps acting as before.
+OPEN_MIC_QUESTIONS = {
+    "addressed_to": {"type": "choice",
+        "instructions": "The microphone was open without a button being pressed, so these words may not have been meant for MicMic, the voice assistant on this computer. Who were they said to, or where did they come from?",
+        "criteria": {
+            "assistant": "To MicMic: a request, an instruction or a question for the computer, however casual, or a word to it like thanks, stop or good night. It may be indirect (it is too cold in here for this music, I cannot read this, what did I note down) or have um, uh and pauses in it. Put on some jazz, what is the weather tomorrow, message Noa that I am on my way, call my sister, set a timer for the oven, louder, stop that, tell me something funny, thanks. תשימי שיר של אריק איינשטיין, מה השעה, תתקשרי לבת שלי. شغلي أغاني فيروز. позвони дочке.",
+            "someone_in_room": "To another person, in the room or on a phone call: a question or remark to family or a friend, plans, a goodbye at the end of a call. Did you feed the dog, Mike dinner is ready, we have to leave by six, okay talk to you later bye, I will bring it on Sunday. האכלת את הכלב, אנחנו יוצאים בשש. أكلت؟ ты покормил кота?",
+            "broadcast": "From a television, radio, video, podcast or song playing nearby: a presenter, a news anchor, an advert, lines from a show or film, song lyrics. Stay with us after the break, this is the nine o'clock news, the detective opened the door slowly, back to you in the studio. ואלה החדשות, נמשיך אחרי הפרסומות. هنا الأخبار. в эфире новости.",
+            "no_one": "Not words for anyone: a cough, a sneeze, a laugh, um, a stray word or sound, someone thinking aloud to themselves."}},
+}
+
 INTENTS = {
     "watch":    "Watch something on screen: a film, a show, a video, a clip, a match, the television news.",
     "music":    "Listen to music or a song or a singer.",
@@ -104,7 +147,11 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
                draft: dict | None = None, standing: dict | None = None,
                guide: dict | None = None, named: dict | None = None,
                follow: dict | None = None,
-               song_desc: bool = False, screen_song: bool = False) -> dict:
+               song_desc: bool = False, screen_song: bool = False,
+               at_micmic: bool = False,
+               open_mic: bool = False,
+               screen_ask: bool = False,
+               when: dict | None = None) -> dict:
     """One request. Everything the decision tree could need.
 
     `standing` is savta.prefs.questions(): the preference questions when her words
@@ -143,9 +190,29 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
     (actions/music.describes_a_song), so describes_song rides along. Otherwise it is
     not asked and the request is exactly what it was.
 
+    `at_micmic`: her words may be aimed at MicMic itself (people.may_be_at_micmic), so
+    upset_with_micmic rides along: frustration with the machine is not distress.
+    Otherwise not asked, and the request is exactly what it was.
+
     `screen_song`: her words may be pointing at the screen instead of naming a song
     (actions/music.mentions_screen_song), so screen_song rides along. Otherwise not
-    asked, and the request is exactly what it was."""
+    asked, and the request is exactly what it was.
+
+    `open_mic`: the microphone was open without her pressing the key (router: the
+    activation was not "push"), so addressed_to rides along: were these words said to
+    MicMic, to someone else, or by a television? Never asked on a push-to-talk turn,
+    whose request is exactly what it was.
+
+    `screen_ask`: her words may ask for a detail of something open on her screen
+    (actions/screen.may_ask_about_screen), so screen_question rides along. Otherwise
+    not asked, and the request is exactly what it was.
+
+    `when` is savta.timewords.question(): asked only when her words hold a time word
+    (a unit, a clock reading, "at 7", or a word for a timer, an alarm, a reminder or her
+    calendar). Which kind of thing she wants set, and which of her words are the amount
+    of time, the clock time, the day and what it is about; code computes the numbers.
+    The old when_minutes below is still asked, so every other request is byte for byte
+    what it was, but its closed list of minutes is no longer read for a number."""
     contact_opts = {c: None for c in contacts[:MAX_OPTIONS - 1]}
     contact_opts["nobody"] = "She did not name a person."
 
@@ -429,6 +496,14 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
         qs.update(SONG_DESC_QUESTIONS)
     if screen_song:
         qs.update(SCREEN_SONG_QUESTIONS)
+    if at_micmic:
+        qs.update(AT_MICMIC_QUESTIONS)
+    if screen_ask:
+        qs.update(SCREEN_ASK_QUESTIONS)
+    if open_mic:
+        qs.update(OPEN_MIC_QUESTIONS)
+    if when:
+        qs.update(when["questions"])
     cands = span_candidates(utterance) if spans else []
     for name, spec in (spans or {}).items():
         if not cands:
@@ -533,20 +608,43 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
                            if song_desc and "describes_song" in a else 0.0),
         "screen_song": (noul(a, "screen_song")
                        if screen_song and "screen_song" in a else 0.0),
+        "at_micmic": (noul(a, "upset_with_micmic")
+                      if at_micmic and "upset_with_micmic" in a else 0.0),
+        "screen_question": (noul(a, "screen_question")
+                            if screen_ask and "screen_question" in a else 0.0),
         "guide_command": choice(a, "guide_command")[0] if guide and "guide_command" in a else "none",
         "guide_command_confidence": (choice(a, "guide_command")[1]
                                      if guide and "guide_command" in a else 0.0),
+        **_addressed(a, open_mic),
     }
+
+
+def _addressed(a: dict, open_mic: bool) -> dict:
+    """The open-mic signals, typed: who the words were for, and the two numbers the
+    router gates on. On a push turn (not asked) they read as plainly for MicMic."""
+    if not open_mic or "addressed_to" not in a:
+        return {"addressed_to": "assistant", "addressed_to_confidence": 1.0,
+                "addressed_to_assistant": 1.0, "is_broadcast": 0.0}
+    sel, conf, probs = choice(a, "addressed_to")
+    probs = probs or {}
+    return {"addressed_to": sel, "addressed_to_confidence": conf,
+            "addressed_to_assistant": float(probs.get("assistant",
+                                                      conf if sel == "assistant" else 0.0)),
+            "is_broadcast": float(probs.get("broadcast",
+                                            conf if sel == "broadcast" else 0.0))}
 
 
 # ---------------------------------------------------------------- span picking
 
-_CMD_NOISE = re.compile(r"[\"'“”‘’.,!?;:()\[\]]+")
+_CMD_NOISE = re.compile(r"[\"“”.,!?;:()\[\]]+")
+# An apostrophe or ’ inside a word stays ("I'm", "Dana's", Hebrew geresh in "צ'יפס"):
+# stripping it sent "I m running late". Only a quote mark at a word's edge is noise.
+_EDGE_QUOTE = re.compile(r"(?<!\w)['‘’]+|['‘’]+(?!\w)")
 
 def span_candidates(utterance: str, max_words: int = 9) -> list[str]:
     """Every contiguous word span, longest first. Jev picks one of these, which is how
     we extract free text from a model that cannot emit free text."""
-    words = [w for w in _CMD_NOISE.sub(" ", utterance).split() if w]
+    words = [w for w in _EDGE_QUOTE.sub(" ", _CMD_NOISE.sub(" ", utterance)).split() if w]
     seen, out = set(), []
     for n in range(min(max_words, len(words)), 0, -1):
         for i in range(len(words) - n + 1):
@@ -667,3 +765,75 @@ def pick_result(j: Jev, want: str, results: list[dict], full_length: bool,
         return results[int(pick)], conf, good
     except (ValueError, IndexError):
         return None, conf, good
+
+
+# ---------------------------------------------------------------- a stammered start
+# MicMic Bench v1 msg-019: "אממ תשלחי לדנה ש... שאני בפקק" was read as half a sentence
+# ("I only caught part of that", 3/3: is_complete 0.22). A filler at the start, a word
+# cut off and said again ("ש... שאני", "la- late", "תש תשלחי") and a first word said
+# twice ("call call dana") are tidied here, in code, before understand() sees the
+# sentence. A sentence with none of these comes back as it was, byte for byte.
+_FILLERS = {"um", "umm", "ummm", "uh", "uhh", "uhm", "er", "erm", "hmm", "hm", "mm", "mmm",
+            "אממ", "אמממ", "אממממ", "אמ", "אה", "אהה", "אההה", "הממ", "המ", "ממ",
+            "اممم", "امم", "ام", "اه", "إمم", "эм", "эмм", "ээ", "эээ", "мм", "ммм", "э"}
+_CUT = re.compile(r"^(.*?\w)(?:\.{2,}|…|-)$")
+_EDGE = re.compile(r"^[\s,.…!?;:\-]+|[\s,.…!?;:\-]+$")
+_SEMITIC = re.compile(r"^[֐-׿؀-ۿ]+$")
+# Two-letter Hebrew and Arabic words a bare fragment must never be mistaken for.
+_SHORT_WORDS = set("""של את על אם גם זה לא כן מה מי אז יש רק עם אל כל הם הן זו בו לו לה בה די אף
+פה שם כי או אך זאת
+في من عن مع لا ما يا هو هي او أو لو كل""".split())
+
+
+# Words said twice on purpose, never a stammer.
+_PAIRS = {"bye", "yes", "yeah", "okay", "cough", "knock", "very", "really", "so", "now",
+          "come", "go", "please", "wait", "ביי", "כן", "לא", "נו", "די", "רגע", "בואי", "מהר",
+          "يلا", "لا", "اه", "да", "нет", "ну", "пока"}
+
+
+def steady(utterance: str) -> str:
+    """The sentence with a stammered start and cut-off words tidied (see above)."""
+    text = utterance or ""
+    toks = re.sub(r"(\.{2,}|…)(?=\w)", r"\1 ", text).split()
+    out: list[str] = []
+    changed = False
+    i = 0
+    # Fillers at the start: "um", "אממ", "uh," and the like.
+    while i < len(toks) and _EDGE.sub("", toks[i]).lower() in _FILLERS:
+        i += 1
+        changed = True
+    first = True
+    while i < len(toks):
+        tok, nxt = toks[i], (toks[i + 1] if i + 1 < len(toks) else "")
+        core, nxt_core = _EDGE.sub("", tok).lower(), _EDGE.sub("", nxt).lower()
+        cut = _CUT.match(tok)
+        if nxt_core and cut:
+            frag = cut.group(1).lower()
+            # "ש... שאני", "la- late", "tea... teacher", or a repeated letter "שש... שלחי".
+            if nxt_core.startswith(frag) or (len(set(frag)) == 1 and frag[0] == nxt_core[0]):
+                i += 1
+                changed = True
+                continue
+        if first and nxt_core:
+            # A cut-off first word with no mark: "תש תשלחי" (Hebrew or Arabic, 2-3
+            # letters, not a word of its own), or the first word said twice.
+            bare = (_SEMITIC.match(core or "-") and 2 <= len(core) <= 3
+                    and core not in _SHORT_WORDS and len(nxt_core) >= len(core) + 2
+                    and nxt_core.startswith(core))
+            # Said twice and then carried on: "call call dana". A pair on its own
+            # ("cough cough", "bye bye", "no no") is what she said, and stays.
+            twice = (core == nxt_core and len(core) >= 3 and tok == core
+                     and i + 2 < len(toks) and core not in _PAIRS)
+            if bare or twice:
+                i += 1
+                changed = True
+                continue
+        out.append(tok)
+        first = False
+        i += 1
+    if not changed:
+        return utterance
+    # Nothing but fillers ("hmm", "um") is what she said, not an empty turn: as the
+    # answer to "send it?" an empty utterance reached understand() with no words at
+    # all (test_micmic 3c, after the merge of fix/media-live-speed).
+    return " ".join(out).strip() or utterance

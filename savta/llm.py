@@ -50,6 +50,112 @@ def _keep_own_script(text: str, language: str) -> str:
     return " ".join(p for p in parts if p and not foreign_script(p, language)).strip()
 
 
+# Letters of one script inside a word of another: "בשeמחה", "גل חום" (bench v1). The
+# model swaps a letter for its counterpart in a related alphabet. Code repairs it,
+# which also spares the strict second request _spoken would otherwise make.
+_LETTER_RUN = re.compile(r"[^\W\d_]+")
+_SCRIPT_OF = (("hebrew", re.compile(r"[\u0590-\u05FF]")),
+              ("arabic", re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]")),
+              ("russian", re.compile(r"[\u0400-\u04FF]")),
+              ("english", re.compile(r"[A-Za-z\u00C0-\u024F]")))
+# Counterpart letters, per target: Arabic and Hebrew share their Semitic alphabet;
+# Latin and Cyrillic share lookalikes.
+_COUNTERPART = {
+    "hebrew": str.maketrans("ابتثجحخدذرزسشصضطظعغفقكلمنهوي",
+                            "אבתתגחחדדרזסשצצטטעעפקכלמנהוי"),
+    "arabic": str.maketrans("אבגדהוזחטיכךלמםנןסעפףצץקרשת",
+                            "ابجدهوزحطيككلممننسعففصصقرشت"),
+    "russian": str.maketrans("aeopcxykmtAEOPCXYKMTBH", "аеорсхукмтАЕОРСХУКМТВН"),
+    "english": str.maketrans("аеорсхукмтАЕОРСХУКМТВН", "aeopcxykmtAEOPCXYKMTBH"),
+}
+_HE_FINAL = str.maketrans("כמנפצ", "ךםןףץ")
+
+
+def _script(ch: str) -> str:
+    return next((name for name, rx in _SCRIPT_OF if rx.match(ch)), "other")
+
+
+def fix_stray_letters(text: str, language: str) -> str:
+    """Repair letters of another script inside a word of her language's script.
+
+    Only inside a word that has letters of her script: a word wholly in another
+    script (a name in Latin letters) is left alone, and so is a Latin run of three or
+    more glued to a Hebrew prefix ("בYouTube"). A stray letter becomes its counterpart
+    in her alphabet when there is one, and is dropped otherwise."""
+    if not text or language not in _COUNTERPART:
+        return text
+    table = _COUNTERPART[language]
+
+    def fix(m: re.Match) -> str:
+        word = m.group(0)
+        kinds = [_script(c) for c in word]
+        if language not in kinds or all(k == language for k in kinds):
+            return word
+        out, i = [], 0
+        while i < len(word):
+            k = kinds[i]
+            j = i
+            while j < len(word) and kinds[j] == k:
+                j += 1
+            run = word[i:j]
+            if k == language or (k == "english" and len(run) >= 3):
+                out.append(run)
+            else:
+                mapped = run.translate(table)
+                out.append("".join(c for c in mapped if _script(c) == language))
+            i = j
+        fixed = "".join(out)
+        if language == "hebrew" and fixed:
+            fixed = fixed[:-1] + fixed[-1].translate(_HE_FINAL)
+        return fixed
+
+    return _LETTER_RUN.sub(fix, text)
+
+
+# Small talk that says it did something. The chat model cannot act, so any of these
+# is untrue (bench v1: "Got it, turning off the living room lights for you.").
+_ACT_VERBS = (r"turn|switch|send|call|dial|play|open|close|set|dim|order|book|add|lock|"
+              r"unlock|mute|pause|remind|text|message|schedule|buy|pay|transfer|mark|"
+              r"delete|adjust|start|stop|cancel")
+_CLAIM_RX = {
+    "english": re.compile(
+        r"\b(?:i'?m|i am|i'?ll|i will|i'?ve|i have|i)\s+(?:just\s+|now\s+|already\s+|"
+        r"going to\s+|gonna\s+)?(?:(?:" + _ACT_VERBS + r")"
+        r"(?:s|es|d|ed|ing|ped|ping|led|ling|med|ming)?|sent|bought|paid)\b"
+        r"|^(?:ok(?:ay)?|got it|sure(?: thing)?|alright|all right|right away|done|on it|"
+        r"no problem|you got it)\b[\s,.!]*(?:" + _ACT_VERBS + r")[a-z]*ing\b"
+        r"|\b(?:turning|switching|dimming)\s+(?:\w+\s+){0,4}?(?:on|off|down|up)\b"
+        r"|\b(?:consider it done|all done|it'?s done|that'?s done)\b",
+        re.IGNORECASE | re.MULTILINE),
+    "hebrew": re.compile(
+        r"(?<![\u0590-\u05FF])(?:מכבה|מדליקה|שולחת|מתקשרת|מחייגת|מנגנת|משמיעה|פותחת|"
+        r"סוגרת|מכוונת|מזמינה|קובעת|מעמעמת|מוסיפה|כיביתי|הדלקתי|שלחתי|התקשרתי|חייגתי|"
+        r"ניגנתי|פתחתי|סגרתי|כיוונתי|הזמנתי|קבעתי|עמעמתי|הוספתי)(?![\u0590-\u05FF])"),
+    "russian": re.compile(
+        r"\b(?:выключаю|включаю|отправляю|звоню|набираю|ставлю|открываю|закрываю|"
+        r"заказываю|выключила|включила|отправила|позвонила|открыла|закрыла|поставила|"
+        r"заказала|приглушила|приглушаю)\b", re.IGNORECASE),
+    "arabic": re.compile(
+        r"(?<![\u0600-\u06FF])(?:بطفي|طفيت|بولع|ولعت|ببعت|بعتت|اتصلت|بتصل|بشغل|شغلت|"
+        r"فتحت|سكرت|بفتح|بسكر|طلبت)(?![\u0600-\u06FF])"),
+}
+# "Sending you a big hug" is affection, not an action.
+_FONDNESS = re.compile(r"\b(?:hugs?|love|kiss(?:es)?|vibes|wishes)\b|חיבוק|נשיק|אהבה|"
+                       r"обним|целую|поцелу|بوس|حضن", re.IGNORECASE)
+
+
+def claims_action(text: str, language: str = "english") -> bool:
+    """True when a small-talk line says MicMic is doing, did or will do something."""
+    for sentence in re.split(r"(?<=[.!?؟])\s+", text or ""):
+        if _FONDNESS.search(sentence):
+            continue
+        for name in {language, "english"}:
+            rx = _CLAIM_RX.get(name)
+            if rx and rx.search(sentence):
+                return True
+    return False
+
+
 def _drop_trailing_question(text: str) -> str:
     """An answer ends when the answer does. "את מתעניינת באסטרונומיה?" tacked on after
     the distance to the moon is filler she then feels she has to reply to."""
@@ -319,8 +425,14 @@ class LLM:
     def _address(language: str, gender: str) -> str:
         """Hebrew, Arabic and Russian conjugate for who is being spoken to, and a model
         left to guess picks one and misgenders the user in every sentence."""
-        if language == "english" or gender not in ("feminine", "masculine"):
+        if language not in ("hebrew", "arabic", "russian"):
             return ""
+        if gender not in ("feminine", "masculine"):
+            # Not set yet: the app's own lines default to feminine (router.degender),
+            # so the model does too, instead of switching between את and אתה.
+            return (" Use feminine grammatical forms for every verb, pronoun and "
+                    "adjective that refers to the person you are speaking to, and never "
+                    "switch between forms.")
         word = "a woman" if gender == "feminine" else "a man"
         return (f" You are speaking to {word}: use {gender} grammatical forms for every "
                 f"verb, pronoun and adjective that refers to them.")
@@ -335,6 +447,7 @@ class LLM:
         still does not fit is cut to the sentences that do."""
         out = self.text(prompt, system, max_tokens=max_tokens, temperature=temperature,
                         timeout=SPOKEN_TIMEOUT)
+        out = fix_stray_letters(out, language) if out else out
         if out and foreign_script(out, language):
             strict = (system + f"\nWrite ONLY in {lang_name}, in its own alphabet. Not a "
                       "single word in any other language or alphabet; write numbers "
@@ -355,15 +468,29 @@ class LLM:
         you" with "say it again in other words" is the rudest thing this can do."""
         lang = {"hebrew": "Hebrew", "arabic": "Arabic", "russian": "Russian"}.get(
             language, "English")
-        now = time.localtime()
         who = f" You are talking to {name}." if name else ""
+        # Bench v1 (2026-10-01): given the clock, it remarked on the hour in almost
+        # every reply ("why are you awake at such an hour?"); it ended with personal
+        # questions, answered remarks meant for family as if it were in the room, and
+        # narrated actions it cannot take ("turning off the living room lights for
+        # you"). The router also rejects a reply that claims an action (claims_action).
         sys_prompt = (
-            f"You are MicMic, a warm voice assistant living on someone's Mac.{who}"
+            f"You are MicMic, a friendly voice assistant on someone's Mac.{who}"
             f"{self._address(language, gender)}\n"
-            f"Reply in {lang}. It is {time.strftime('%H:%M on %A', now)}.\n"
-            "This is small talk, not a task. Answer like a friendly person would: one "
-            "or two short sentences, warm, never formal. You may ask a light question "
-            "back.\n"
+            f"Reply in {lang}.\n"
+            "This is small talk, not a task. Answer in one or two short, plain "
+            "sentences: kind, simple, never formal and never gushing.\n"
+            "You cannot do anything from here. Never say or imply that you are doing, "
+            "did, or will do something: turning anything on or off, sending, calling, "
+            "playing, opening, setting, ordering or buying. If she asks for something "
+            "like that, say plainly that you cannot do it from here.\n"
+            "You are an assistant on a computer, not a person in the house. Never "
+            "pretend to be family or a friend, and never claim to see, hold or know "
+            "where things in the house are. MicMic is made by a small independent "
+            "team, not by Apple.\n"
+            "Do not ask her personal questions and do not end with a question. Never "
+            "comment on the time of day or on how late or early it is.\n"
+            "If she asks for a joke, tell one short joke.\n"
             "Your answer is read aloud by a speech synthesiser, so plain spoken words "
             "only: no markdown, no lists, no emoji, no URLs, no parentheses.\n"
             "Do NOT list your features and do NOT offer a menu of options unless she "
@@ -374,6 +501,7 @@ class LLM:
         prompt = (f"Just before this, the conversation was: {recent}\n\n" if recent else "")
         prompt += f"She said: {utterance}"
         out = self._spoken(prompt, sys_prompt, language, lang, 160, 0.7)
+        out = _drop_trailing_question(out) if out else None
         return out[:300] if out else None
 
     def report(self, question: str, items: list[dict], language: str = "hebrew",

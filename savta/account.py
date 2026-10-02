@@ -35,7 +35,7 @@ def _baked_cloud_url() -> str:
 
 
 DEFAULT_CLOUD_URL = _baked_cloud_url()
-APP_VERSION = "1.2.0"   # keep equal to build.sh --version
+APP_VERSION = "1.2.3"   # keep equal to build.sh --version
 
 STATUS_TTL = 30.0
 # Seconds to wait before the next registration attempt after each consecutive failure.

@@ -192,9 +192,87 @@ def _read_macos() -> list[dict]:
         return []
 
 
+# Reading the address book is itself a macOS prompt the first time: WhatsApp's data
+# asks for "data from other apps", the Contacts app for Automation. So nothing reads it
+# until one read has worked on this Mac (this marker); until then the first read is
+# the one her own request about a person makes (router.get_contacts), just in time,
+# after MicMic's own line (may_read_first). The listener's contextual names at launch
+# and the server's warm-up of recent chats both wait for it. It was the fourth dialog
+# of the first-run storm.
+def _ok_marker() -> Path:
+    from ..paths import state
+    return state("contacts_ok")
+
+
+def read_before(source: str = "") -> bool:
+    """Has a read of her contacts (from `source`, when given) worked on this Mac?"""
+    try:
+        got = _ok_marker().read_text().strip()
+    except OSError:
+        got = _legacy_ok()
+    return bool(got) and (not source or got in (source, "legacy"))
+
+
+def _legacy_ok() -> str:
+    """A Mac onboarded before the just-in-time read (no contacts_gate in its settings)
+    has been reading her contacts at every launch: its prompts were answered long ago.
+    Upgrading must not show MicMic's line and wait on her first request about a person."""
+    try:
+        from ..router import load_settings
+        st = load_settings()
+    except Exception:  # noqa: BLE001
+        return ""
+    if not st.get("onboarded") or st.get("contacts_gate"):
+        return ""
+    _note_read_ok("legacy")
+    return "legacy"
+
+
+# MicMic's own line before that first prompt. The listener sets it when it shares
+# this process (native/listener.py confirm_contacts): it shows the line and returns
+# her answer. Unset (a test, a separate-process source build): no line, and the read
+# goes ahead as her request asked.
+_explain_first = None
+_first_ok: list = [None]            # her answer this run, once she has given one
+DECLINE_FOR = 300.0                 # a "Not now" holds for this long
+
+
+def set_explainer(fn) -> None:
+    global _explain_first
+    _explain_first = fn
+
+
+def may_read_first() -> bool:
+    """May the first read of her contacts (a macOS prompt) happen now? Asked once:
+    a yes stands for the run, a "Not now" for DECLINE_FOR seconds."""
+    ans = _first_ok[0]
+    if ans is True:
+        return True
+    if isinstance(ans, float) and time.time() - ans < DECLINE_FOR:
+        return False
+    if _explain_first is None:
+        _first_ok[0] = True
+        return True
+    try:
+        yes = bool(_explain_first())
+    except Exception:  # noqa: BLE001
+        yes = True
+    _first_ok[0] = True if yes else time.time()
+    return yes
+
+
+def _note_read_ok(source: str) -> None:
+    try:
+        _ok_marker().write_text(source)
+    except OSError:
+        pass
+
+
 def _load_now() -> list[dict]:
     """The slow part, run on whatever thread calls it."""
     rows = _read_whatsapp() or _read_macos()
+    if rows:
+        _note_read_ok(rows[0].get("source") or "macos")
     seen, uniq = set(), []
     for r in rows:
         k = r["name"].lower()

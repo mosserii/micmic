@@ -393,6 +393,68 @@ def by_sound(said: str, songs: list[dict], limit: int = 5) -> list[dict]:
     return [s for s in scored if s["sound_score"] >= SOUND_MATCH_GATE][:limit]
 
 
+# Stricter than a title's: a misheard name sounds the same once its vowels are gone
+# ("ed sharon", "brunno mars", "tylor swift" all score 1.0), while "popular songs"
+# against an artist called Popular scores 0.58 and must not be "corrected".
+ARTIST_SOUND_GATE = 0.75
+
+
+def artists(term: str, where: str | None = None, limit: int = 8,
+            timeout: float = 3.0) -> list[dict]:
+    """Apple's artist search: [{"name", "artist_id"}], best first. Its own matching is
+    forgiving ("ed sharon" lists Ed Sheeran first, "brunno mars" Bruno Mars, "tylor
+    swift" Taylor Swift; checked by hand 2026-10-02). [] when nothing or unreachable."""
+    q = urllib.parse.urlencode({"term": term, "entity": "musicArtist", "limit": limit,
+                                "country": (where or country()).upper()})
+    hit = _CACHE.get(q)
+    if hit and time.time() - hit[0] < CACHE_S:
+        return [dict(r) for r in hit[1]]
+    try:
+        data = _fetch(f"{SEARCH}?{q}", timeout)
+    except Exception:  # noqa: BLE001
+        return []
+    rows = [{"name": str(r["artistName"]), "artist_id": r.get("artistId")}
+            for r in (data or {}).get("results") or [] if r.get("artistName")]
+    _CACHE[q] = (time.time(), rows)
+    return [dict(r) for r in rows]
+
+
+def artist_by_sound(said: str, where: str | None = None) -> dict | None:
+    """The real artist a misheard name most likely is ("ed sharon" -> Ed Sheeran), as
+    {"name", "artist_id", "sound_score"}: Apple's artist search, then the same spelling
+    and sound match a misheard title gets (similarity). None when the best match is
+    the name she already said, or none is close enough to be a mishearing. Bench v1
+    med-003: "play some ed sharon" found nothing although Ed Sheeran was right there."""
+    said = (said or "").strip()
+    if len(_plain(said).replace(" ", "")) < 3:
+        return None
+    rows = [{**r, "sound_score": similarity(said, r["name"])} for r in artists(said, where)]
+    rows = [r for r in rows if r["sound_score"] >= ARTIST_SOUND_GATE]
+    if not rows:
+        return None
+    best = max(rows, key=lambda r: r["sound_score"])
+    if _plain(best["name"]) == _plain(said):
+        return None
+    return best
+
+
+def clean_query(q: str) -> str:
+    """A search query with what trips a search engine taken out: bracketed parts
+    ("(Love Theme from "Titanic")", "[feat. ...]"), feat./ft. credits, quotes and
+    " - " separators. Bench v1 hard-media-009: YouTube gave nothing for 'My Heart Will
+    Go On (Love Theme from "Titanic") James Horner'."""
+    t = q or ""
+    while True:
+        t, n = re.subn(r"[\(\[][^\(\)\[\]]*[\)\]]", " ", t)
+        if not n:
+            break
+    t = re.sub(r"\s(?:feat\.?|ft\.?|featuring)\s.*?(?=\s[-\u2013\u2014|]\s|$)", " ", t, flags=re.I)
+    t = re.sub(r"[\"“”„«»]", " ", t)
+    t = re.sub(r"\s[-\u2013\u2014|]\s", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t or (q or "").strip()
+
+
 def ensure_running(app: str) -> None:
     """Start `app` in the background, not in front of her, well before her words
     are even fully understood: called the moment they plausibly want it (before the

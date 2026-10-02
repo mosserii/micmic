@@ -52,6 +52,9 @@ TEXT_ROLES = {
 VALUE_BEARING = {"AXTextField", "AXTextArea", "AXTextView", "AXValueIndicator",
                  "AXComboBox", "AXSearchField", "AXStaticText", "AXHeading"}
 
+# What holds a window's document, as opposed to the chrome around it.
+DOCUMENT_ROLES = {"AXWebArea", "AXTextArea"}
+
 _WS_RE = re.compile(r"\s+")
 
 
@@ -325,7 +328,8 @@ def visible_text(max_chars: int = 6000, max_elements: int = 2500,
 
 def _visible_text_for(fm: dict, max_chars: int, max_elements: int,
                       budget_s: float) -> dict:
-    out = {"app": "", "window": "", "text": "", "truncated": False, "elements": 0}
+    out = {"app": "", "window": "", "text": "", "truncated": False, "elements": 0,
+           "document": ""}
     out["app"] = fm["app"]
     ax, root = _app_root(fm["pid"])
     if ax is None or root is None:
@@ -337,11 +341,16 @@ def _visible_text_for(fm: dict, max_chars: int, max_elements: int,
 
     started = time.time()
     parts: list[str] = []
+    # The text inside the window's document only: a mail's body, a note, a page, an
+    # editor's text (an AXWebArea or AXTextArea and what is under it), without the
+    # mailbox list, sidebars and toolbars around it. "Send this to Dana" with an email
+    # open sends that, not every subject line in her inbox. Gathered on the same walk.
+    doc_parts: list[str] = []
     count = 0
     truncated = False
     too_deep = False      # text below MAX_DEPTH exists and was not read: say so
 
-    def walk(el, depth: int):
+    def walk(el, depth: int, in_doc: bool = False):
         nonlocal count, truncated, too_deep
         # Deep on purpose: Electron and Chrome wrap text in 20 to 40 nested groups,
         # and a cap of 14 read 7 empty elements out of VS Code. The element count
@@ -359,6 +368,7 @@ def _visible_text_for(fm: dict, max_chars: int, max_elements: int,
                 return
             count += 1
             role = str(_attr(ax, kid, "AXRole") or "")
+            doc_here = in_doc or role in DOCUMENT_ROLES
             subrole = str(_attr(ax, kid, "AXSubrole") or "") if role in TEXT_ROLES else ""
             if role in TEXT_ROLES and subrole not in _CHROME:
                 label = _screen_label(ax, kid)
@@ -385,11 +395,14 @@ def _visible_text_for(fm: dict, max_chars: int, max_elements: int,
                     for c in (lab, val):
                         if c:
                             parts.append(c)
-            walk(kid, depth + 1)
+                            if doc_here:
+                                doc_parts.append(c)
+            walk(kid, depth + 1, doc_here)
 
     walk(window, 0)
     out["elements"] = count
     out["text"], out["truncated"] = _finalize_text(parts, max_chars, truncated or too_deep)
+    out["document"] = _finalize_text(doc_parts, max_chars, False)[0]
     return out
 
 
@@ -673,6 +686,7 @@ def context(max_chars: int = 6000) -> dict:
     focused["value"] = redact(focused.get("value", ""))
     visible = _visible_text_for(fm, max_chars, 2500, 1.5)
     visible["text"] = redact(visible.get("text", ""))
+    visible["document"] = redact(visible.get("document", ""))
     page = _browser_page_for(fm)
     if page:
         page = {"url": redact(page.get("url", "")), "title": redact(page.get("title", ""))}
@@ -686,3 +700,91 @@ def context(max_chars: int = 6000) -> dict:
         "page": page,
         "has_image": _screen_recording_granted(),
     }
+
+
+# ---------------------------------------------------------------- questions about it
+# "What time does my flight leave?" with the booking in front of her. No "this", no
+# "screen", so nothing pointed at the screen and it was answered blind (bench
+# 2026-10-01: scr-010/011/014). This is only the cheap gate that decides whether
+# understand() asks about it at all (brain.SCREEN_ASK_QUESTIONS): a sentence it
+# misses is judged exactly as before, and one it catches is decided by Jev, then
+# grounded in what is actually on the screen.
+_SCREEN_NOUNS = (
+    r"flights?|booking|reservation|order|recipe|ticket|tickets|appointment|meeting|"
+    r"e-?mail|mail|invoice|receipt|bill|total|seat|gate|terminal|departure|arrival|"
+    r"confirmation|code|reference|itinerary|delivery|package|tracking|train|bus|"
+    r"hotel|check-?in|check-?out|deadline|balance|amount|price|cost|ingredients?|"
+    r"steps?|document|page|article|letter|form|schedule|event|address|number|date")
+_SCREEN_ASK = [re.compile(p, re.I) for p in (
+    rf"\b(?:my|this|the|our|that)\s+(?:\w+\s+)?(?:{_SCREEN_NOUNS})\b",
+    r"\bhow\s+(?:many|much|long)\b",
+    r"\bwhat\s+time\s+(?:does|do|is|are|was|did)\s+(?:my|the|this|our|that)\b",
+    r"\bwhen\s+(?:does|do|is|are)\s+(?:my|the|this|our)\b",
+    r"\b(?:does|do)\s+(?:it|this|that)\s+need\b",
+    r"\b(?:do|did)\s+i\s+(?:have|need|get|pay|owe)\b",
+    # Hebrew: how many / at what time / when, or a possessive "...שלי" on a noun.
+    r"כמה|באיזו שעה|באיזה שעה|מתי|"
+    r"(?:טיסה|הזמנה|מתכון|כרטיס|תור|פגישה|מייל|קוד|קבלה|חשבונית|מושב|שער|סכום|מחיר)",
+    # Arabic.
+    r"\bكم\b|[أا]ي ساعة|\bمتى\b|[إا]يمتى|\bامتى\b|"
+    r"رحلت|حجز|الوصفة|تذكرت|موعد|الكود|رمز|الفاتورة|المقعد|المبلغ|السعر",
+    # Russian.
+    r"сколько|во сколько|\bкогда\b|"
+    r"рейс|брон|рецепт|билет|запис|\bкод\b|заказ|сч[её]т|\bчек\b|мест[оа]\b|сумм|цен[аы]",
+)]
+
+
+def may_ask_about_screen(text: str) -> bool:
+    """Her words MAY ask for a detail of something open on her screen. A wide net on
+    purpose (it only decides whether one question rides along); the deciding is
+    Jev's, and the answer is checked against the screen itself."""
+    t = text or ""
+    return any(rx.search(t) for rx in _SCREEN_ASK)
+
+
+_NUM_WORDS = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+              "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+              "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+              "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+              "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70,
+              "eighty": 80, "ninety": 90, "hundred": 100}
+_DIGITS = re.compile(r"\d+")
+_NUM_WORD_RX = re.compile(r"\b(" + "|".join(_NUM_WORDS) + r")\b", re.I)
+
+
+def _digit_groups(text: str) -> set[str]:
+    """Every run of digits, in any script's digits, without leading zeros."""
+    norm = "".join(str(unicodedata.digit(c)) if c.isdigit() else c for c in (text or ""))
+    return {g.lstrip("0") or "0" for g in _DIGITS.findall(norm)}
+
+
+def _counted(text: str) -> list[tuple[str, str]]:
+    """(number, the word right after it) for every number in the text, number words
+    included: "4 eggs" and "four eggs" both give ("4", "egg")."""
+    norm = "".join(str(unicodedata.digit(c)) if c.isdigit() else c for c in (text or ""))
+    norm = _NUM_WORD_RX.sub(lambda m: str(_NUM_WORDS[m.group(1).lower()]), norm)
+    toks = re.findall(r"\d+|[^\W\d_]+", norm)
+    out = []
+    for i, t in enumerate(toks):
+        if t.isdigit():
+            nxt = toks[i + 1].lower() if i + 1 < len(toks) and not toks[i + 1].isdigit() else ""
+            out.append((t.lstrip("0") or "0", nxt[:-1] if nxt.endswith("s") else nxt))
+    return out
+
+
+def numbers_on_screen(answer: str, screen_text: str) -> bool:
+    """Every number in the answer is one the screen shows: digits as written, and the
+    English number words ("four eggs"). And when the answer counts something the
+    screen also counts ("2 eggs"), the screen must show that number of that thing:
+    the recipe said "4 eggs, 2 tomatoes", so "2 eggs" is invented even though a 2 is
+    on the screen. Such an answer is never passed on as if it were read off it."""
+    seen = _digit_groups(screen_text)
+    pairs = _counted(answer)
+    if not {n for n, _ in pairs} <= seen:
+        return False
+    on_screen = _counted(screen_text)
+    things = {w for _, w in on_screen if w}
+    for n, w in pairs:
+        if w in things and (n, w) not in on_screen:
+            return False
+    return True

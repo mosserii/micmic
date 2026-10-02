@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 import types
 from pathlib import Path
 
@@ -889,12 +890,20 @@ def t_named_search():
         fresh()
         r, _ = place_turn("order me headphones on Amazon", "amazon", intent="do_online",
                           query="headphones", extra={"named_app_only_look": 0.1})
+        # A purchase waits for her yes, and she hears it stops before paying
+        # (tests/test_people.py t_money; the bench's hard-safe-002).
+        check("'order me headphones on Amazon': asked first, nothing started",
+              r["did"] == "confirm_web" and not STARTS and "before paying" in (r["say"] or ""),
+              (r["did"], STARTS, r["say"]))
+        yes = ScriptedJev()
+        yes.say = {"is_answer": 0.95, "agreed": 0.95}
+        r = router.handle(yes, "yes", speak=False, client="native", activation="push")
         import time as _t
         for _ in range(40):
             if STARTS:
                 break
             _t.sleep(0.05)
-        check("'order me headphones on Amazon': the agent, started on Amazon's search",
+        check("and on her yes: the agent, started on Amazon's search",
               r["did"] == "web_working" and STARTS == ["https://www.amazon.com/s?k=headphones"],
               (r["did"], STARTS))
     finally:
@@ -1699,6 +1708,198 @@ def t_source_units():
     STATE["wiki"] = {"query": {"pages": {}}}
 
 
+# ================================================================== Bench v1 media fixes
+SHEERAN_VIDS = [{"id": "JGwWNGJdvx8", "title": "Ed Sheeran - Shape of You (Official Music Video)",
+                 "channel": "Ed Sheeran", "length": "4:24", "views": "6.5B"},
+                {"id": "2Vv-BfVoq4g", "title": "Ed Sheeran - Perfect (Official Music Video)",
+                 "channel": "Ed Sheeran", "length": "4:39", "views": "3.9B"}]
+SHARON_VIDS = [{"id": "aaaaaaaaaaa", "title": "Sharon Osbourne interview 2019", "channel": "TalkTV",
+                "length": "12:03", "views": "90K"},
+               {"id": "bbbbbbbbbbb", "title": "Ed and Sharon wedding dance", "channel": "Ed T",
+                "length": "3:11", "views": "2K"}]
+ARTISTS = {"ed sharon": {"resultCount": 2, "results": [
+    {"wrapperType": "artist", "artistType": "Artist", "artistName": "Ed Sheeran",
+     "artistId": 183313439},
+    {"wrapperType": "artist", "artistType": "Artist", "artistName": "Ed O'Brien",
+     "artistId": 156334706}]}}
+
+
+class PickyJev(ScriptedJev):
+    """pick_result (the YouTube path) refuses everything unless she asked for Sheeran,
+    as live Jev did for "ed sharon" (Bench v1 med-003: any_good 0.82, no pick)."""
+
+    def ask(self, state, qs):
+        out = super().ask(state, qs)
+        if "best" in qs:
+            ok = "sheeran" in str(state.get("she_asked_for", "")).lower()
+            out["best"] = {"choice": "0" if ok else "__none__", "confidence": 0.9,
+                           "probabilities": {"0" if ok else "__none__": 0.9}}
+            out["any_good"] = {"noul": 0.9 if ok else 0.82}
+        return out
+
+
+def _with_artist_search(fn):
+    """am._fetch answering Apple's artist search from ARTISTS, everything else as before."""
+    def fetch(url, timeout):
+        from urllib.parse import parse_qs, urlsplit
+        q = parse_qs(urlsplit(url).query)
+        if q.get("entity") == ["musicArtist"]:
+            FETCHED.append(url)
+            return ARTISTS.get(q["term"][0].lower(), {"results": []})
+        return fn(url, timeout)
+    return fetch
+
+
+def t_misheard_artist_youtube():
+    """Bench v1 med-003: "play some ed sharon" -> "I looked for ed sharon and found
+    nothing". Apple's artist search plus matching by sound finds Ed Sheeran."""
+    fresh()
+    queries: list[str] = []
+    router.yt.search = lambda q, n=18: (queries.append(q), [dict(v) for v in (
+        SHEERAN_VIDS if "sheeran" in q.lower() else SHARON_VIDS)])[1]
+    am._fetch = _with_artist_search(fake_fetch)
+    try:
+        j = PickyJev()
+        j.say = {"intent": "music", "span_subject": "ed sharon", "span_subject_exists": 0.95,
+                 "names_a_specific_title": 0.2}
+        r = router.handle(j, "play some ed sharon", speak=False, client="native",
+                          activation="push")
+        check("a misheard artist plays the real one, matched by sound",
+              r["did"] == "playing" and "Sheeran" in str(r["detail"]),
+              f"{r['did']} {r['say']} {r['detail']}")
+        check("  searched YouTube again for the real name, once",
+              queries[-1] == "Ed Sheeran" and len(queries) == 2, queries)
+        det = r["detail"] if isinstance(r["detail"], dict) else {}
+        check("  the detail says what was heard and what it was taken as",
+              det.get("heard_as") == "ed sharon" and det.get("artist_fixed") == "Ed Sheeran", det)
+        check("  one more pick only (understand, pick, pick)", j.calls == 3, j.calls)
+    finally:
+        am._fetch = fake_fetch
+        router.yt.search = REAL_YT_SEARCH
+
+
+def t_exact_artist_no_extra_lookup():
+    """An artist found the first time costs nothing more: no artist search."""
+    fresh()
+    router.yt.search = lambda q, n=18: [dict(v) for v in SHEERAN_VIDS]
+    am._fetch = _with_artist_search(fake_fetch)
+    try:
+        j = PickyJev()
+        j.say = {"intent": "music", "span_subject": "ed sheeran", "span_subject_exists": 0.95}
+        r = router.handle(j, "play ed sheeran", speak=False, client="native", activation="push")
+        check("found first time: playing, two Jev calls, no artist search",
+              r["did"] == "playing" and j.calls == 2
+              and not any("musicArtist" in u for u in FETCHED), (r["did"], j.calls))
+    finally:
+        am._fetch = fake_fetch
+        router.yt.search = REAL_YT_SEARCH
+
+
+def t_misheard_artist_apple_music():
+    """The same in Apple Music: no song for "ed sharon", Ed Sheeran's for the real name."""
+    fresh()
+    STATE["library"] = []
+    STATE["more"] = {"ed sheeran": {"results": [
+        _song(1193701392, "Shape of You", "Ed Sheeran", "÷ (Deluxe)", 1193701079,
+              date="2017-01-06", aid=183313439)]}}
+    am._fetch = _with_artist_search(fake_fetch)
+    try:
+        r, j = turn("play ed sharon on apple music", player="apple_music", subject="ed sharon",
+                    pick=by("Sheeran"))
+        check("Apple Music: the real artist's song", r["did"] in ("opened_in_app", "playing")
+              and r["say"].startswith("Shape of You"), f"{r['did']} {r['say']}")
+        check("  says what it was taken as", isinstance(r["detail"], dict)
+              and r["detail"].get("artist_fixed") == "Ed Sheeran", r["detail"])
+    finally:
+        am._fetch = fake_fetch
+
+
+def t_youtube_empty_retried_once():
+    """Bench v1 hard-media-009: the Titanic song identified, then "found nothing" for
+    'My Heart Will Go On (Love Theme from "Titanic") James Horner'; hard-media-002:
+    "I looked for popular songs and found nothing". YouTube's page sometimes comes
+    back empty: one retry, with the query cleaned."""
+    fresh()
+    queries: list[str] = []
+
+    def flaky(q, n=18):
+        queries.append(q)
+        return [] if len(queries) == 1 else [dict(v) for v in SHEERAN_VIDS]
+    router.yt.search = flaky
+    try:
+        subj = 'My Heart Will Go On (Love Theme from "Titanic") James Horner'
+        r, j = turn("play " + subj, subject=subj)
+        check("an empty first search is tried once more and plays",
+              r["did"] == "playing" and len(queries) == 2, (r["did"], queries))
+        check("  with the brackets and quotes cleaned out",
+              queries[1] == "My Heart Will Go On James Horner", queries)
+        fresh()
+        queries.clear()
+        router.yt.search = lambda q, n=18: (queries.append(q), [])[1]
+        r, j = turn("play popular songs", subject="popular songs")
+        check("empty twice: not found, and only one retry",
+              r["did"] == "not_found" and len(queries) == 2, (r["did"], queries))
+    finally:
+        router.yt.search = REAL_YT_SEARCH
+    check("clean_query keeps a plain query as it is",
+          am.clean_query("bad bunny") == "bad bunny")
+    check("clean_query drops feat., brackets, quotes and separators",
+          am.clean_query('Shakira - La La La (Brazil 2014) [feat. Carlinhos Brown]')
+          == "Shakira La La La", am.clean_query('Shakira - La La La (Brazil 2014) [feat. Carlinhos Brown]'))
+
+
+def t_artist_by_sound_units():
+    am._fetch = _with_artist_search(fake_fetch)
+    try:
+        got = am.artist_by_sound("ed sharon")
+        check("ed sharon -> Ed Sheeran", got and got["name"] == "Ed Sheeran", got)
+        ARTISTS["ed sheeran"] = ARTISTS["ed sharon"]
+        check("an exact name is not 'fixed'", am.artist_by_sound("ed sheeran") is None)
+        check("nothing close enough: None", am.artist_by_sound("billy eyelash") is None)
+    finally:
+        am._fetch = fake_fetch
+
+
+def t_youtube_page_fetch():
+    """Media p95 was 5.9 s (hard media 11 s) with Jev under a second: the slow step is
+    YouTube's results page. One page fetch now: gzip, a duplicate after YT_HEDGE_S
+    when the first has not answered, and the same page within a turn fetched once."""
+    from savta.actions import youtube as ytm
+    real = ytm._fetch_page
+    seen: list[tuple[str, dict]] = []
+    try:
+        ytm._PAGES.clear()
+        calls = {"n": 0}
+
+        def stall_first(url, headers, timeout):
+            calls["n"] += 1
+            seen.append((url, headers))
+            if calls["n"] == 1:
+                time.sleep(2.0)
+                return "<first>"
+            return "<second>"
+        ytm._fetch_page = stall_first
+        ytm.YT_HEDGE_S, old = 0.2, ytm.YT_HEDGE_S
+        t0 = time.time()
+        page = ytm._page("https://www.youtube.com/results?search_query=x")
+        took = time.time() - t0
+        ytm.YT_HEDGE_S = old
+        check("a stalled page fetch is hedged: the duplicate's page, fast",
+              page == "<second>" and took < 1.0, (page, round(took, 2)))
+        check("  asked for gzip", seen and seen[0][1].get("Accept-Encoding") == "gzip", seen[:1])
+        n = calls["n"]
+        again = ytm._page("https://www.youtube.com/results?search_query=x")
+        check("  the same page again within the turn is not fetched again",
+              again == page and calls["n"] == n, calls)
+        ytm._PAGES.clear()
+        ytm._fetch_page = lambda url, headers, timeout: None
+        check("  both failing: None, not an exception",
+              ytm._page("https://www.youtube.com/results?search_query=y") is None)
+    finally:
+        ytm._fetch_page = real
+        ytm._PAGES.clear()
+
+
 def main():
     for t in (t_units, t_owner_case_catalog_only, t_measured_span_shapes, t_in_library_plays,
               t_stop_and_undo_pause_music, t_another_one_stays_in_music, t_hebrew,
@@ -1710,7 +1911,10 @@ def main():
               t_described_song_from_sources,
               t_screen_song, t_sound_match_within_artist, t_named_app_switch_on_reject,
               t_reject_plays_another_never_not_found, t_year_refines_described_song_search,
-              t_warms_apple_music_and_shorter_press_wait):
+              t_warms_apple_music_and_shorter_press_wait,
+              t_misheard_artist_youtube, t_exact_artist_no_extra_lookup,
+              t_misheard_artist_apple_music, t_youtube_empty_retried_once,
+              t_artist_by_sound_units, t_youtube_page_fetch):
         print(f"\n{t.__name__}")
         try:
             t()

@@ -464,14 +464,56 @@ def make_note(text: str, title: str = "") -> tuple[bool, str]:
     return ok2, (f"Notes is not available ({msg[:40]}), {msg2}" if ok2 else msg)
 
 
-def add_reminder(text: str) -> tuple[bool, str]:
+def _reminder_date(date: str, at: str = "") -> str | None:
+    """AppleScript for the due moment in variable d, built field by field (see
+    add_event), or None when `date` is not YYYY-MM-DD or `at` not HH:MM."""
+    import re as _re
+    m = _re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", date or "")
+    t = _re.fullmatch(r"(\d{1,2}):(\d{2})", at or "") if at else None
+    if not m or (at and not t):
+        return None
+    y, mo, d = (int(x) for x in m.groups())
+    h, mi = (int(x) for x in t.groups()) if t else (9, 0)
+    return _as_date("d", y, mo, d, h, mi)
+
+
+def add_reminder(text: str, date: str = "", at: str = "") -> tuple[bool, str]:
+    """A row in her Reminders list. `date` (YYYY-MM-DD) makes it due that day, and `at`
+    (HH:MM) at that time, when Reminders itself will alert her. On success the text is
+    the new row's id: what a follow-up ("make it the day after") changes, and nothing
+    else."""
     esc = text.replace("\\", "\\\\").replace('"', '\\"')
-    ok, msg = _osa(f'tell application "Reminders" to make new reminder '
-                   f'with properties {{name:"{esc}"}}')
+    when = _reminder_date(date, at) if date else ""
+    if when is None:
+        return False, "bad date"
+    due = ("" if not date else ", allday due date:d" if not at
+           else ", due date:d, remind me date:d")
+    ok, msg = _osa(when + 'tell application "Reminders"\n'
+                   f'  set r to make new reminder with properties {{name:"{esc}"{due}}}\n'
+                   '  return id of r\nend tell')
     if ok:
-        return True, "saved in Reminders"
-    ok2, msg2 = _keep_locally(text)
+        return True, msg.strip() or "saved in Reminders"
+    ok2, msg2 = _keep_locally(text + (f" ({date}{' ' + at if at else ''})" if date else ""))
     return ok2, (f"Reminders is not available, {msg2}" if ok2 else msg)
+
+
+def change_reminder(rid: str, date: str, at: str = "") -> tuple[bool, str]:
+    """Move the one reminder MicMic added, found by its id, to another day or time.
+    (True, "ok"), (False, "missing") when it is not there any more, or (False, why).
+    Never looks at, and so never changes, any other reminder; nothing is deleted."""
+    when = _reminder_date(date, at)
+    if not rid or when is None or not rid.startswith("x-apple-reminder://"):
+        return False, "missing" if not rid else "bad id or date"
+    sets = ("  set allday due date of r to d\n" if not at
+            else "  set due date of r to d\n  set remind me date of r to d\n")
+    ok, out = _osa(when + 'tell application "Reminders"\n'
+                   f'  set rs to (every reminder whose id is "{_esc(rid)}")\n'
+                   '  if (count of rs) is 0 then return "missing"\n'
+                   '  set r to item 1 of rs\n' + sets +
+                   '  return "ok"\nend tell', timeout=10.0)
+    if ok and out.strip() == "missing":
+        return False, "missing"
+    return ok and out.strip() == "ok", out
 
 
 def music(action: str, query: str = "") -> tuple[bool, str]:
@@ -615,30 +657,193 @@ def close_front_window() -> tuple[bool, str]:
 
 # ---------------------------------------------------------------- timers
 _TIMERS: list[dict] = []
+# Every spoken timer, reminder and alarm is also written to a small state file, so a
+# "remind me tomorrow at 9" or an alarm is not lost when MicMic quits, the Mac restarts
+# or an update installs. At launch the future ones are armed again and the ones that
+# came due while MicMic was off are said once (router.restore_timers). An entry leaves
+# the file when it goes off or is cancelled; going off CLAIMS it first, under a lock, so
+# nothing is said twice, even by a second MicMic reading the same file.
+_FILE_LOCK = threading.Lock()
 
 
-def set_timer(minutes: float, text: str, language: str = "english") -> dict:
-    """A spoken reminder, in process. Needs no permission from anybody.
+def _timer_file() -> Path:
+    from ..paths import state
+    return state("timers.json")
+
+
+def _read_entries() -> list[dict]:
+    """The entries in the file. A file that is not ours to read (bad JSON, wrong shape)
+    is kept beside it as timers.json.corrupt and read as empty: a broken file must never
+    stop MicMic from starting, nor be silently overwritten without a copy."""
+    import json
+    f = _timer_file()
+    try:
+        raw = f.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return []
+    try:
+        d = json.loads(raw)
+        rows = d.get("timers") if isinstance(d, dict) else None
+        if not isinstance(rows, list):
+            raise ValueError("no timers list")
+        return [r for r in rows if isinstance(r, dict) and r.get("id")
+                and isinstance(r.get("at"), (int, float))]
+    except ValueError:
+        try:
+            (f.parent / (f.name + ".corrupt")).write_text(raw, encoding="utf-8")
+        except OSError:
+            pass
+        return []
+
+
+def _write_entries(rows: list[dict]) -> bool:
+    """Atomically: a whole new file, then renamed over the old one."""
+    import json
+    f = _timer_file()
+    tmp = f.parent / f"{f.name}.tmp{os.getpid()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"version": 1, "timers": rows}, fh, ensure_ascii=False, indent=1)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, f)
+        return True
+    except OSError:
+        return False
+
+
+def _locked(fn):
+    """Run fn(entries) -> (result, new entries or None) under the in-process lock and
+    an advisory lock on the file, so two MicMics never interleave a read and a write."""
+    import fcntl
+    with _FILE_LOCK:
+        lock = _timer_file().parent / "timers.json.lock"
+        try:
+            fh = open(lock, "a")
+        except OSError:
+            fh = None
+        try:
+            if fh is not None:
+                fcntl.flock(fh, fcntl.LOCK_EX)
+            res, rows = fn(_read_entries())
+            if rows is not None:
+                ok = _write_entries(rows)
+                if isinstance(res, dict):
+                    res["persisted"] = ok
+            return res
+        finally:
+            if fh is not None:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+                fh.close()
+
+
+def _persist(row: dict) -> bool:
+    entry = {k: row.get(k) for k in ("id", "at", "text", "kind", "language", "lead")}
+    entry["set_at"] = time.time()
+    res = _locked(lambda rows: ({}, [r for r in rows if r.get("id") != entry["id"]] + [entry]))
+    return bool(res.get("persisted"))
+
+
+def _claim(timer_id: str) -> bool:
+    """Take this entry out of the file. True when it was there: whoever claims it is
+    the one who says it. False when it was not (already said, or cancelled)."""
+    def take(rows):
+        hit = any(r.get("id") == timer_id for r in rows)
+        return ({"hit": hit}, [r for r in rows if r.get("id") != timer_id] if hit else None)
+    return bool(_locked(take).get("hit"))
+
+
+def _fire_words(kind: str, text: str, language: str, lead: str | None) -> str:
+    first = lead or {"hebrew": "תזכורת.", "arabic": "تذكير.", "russian": "Напоминание.",
+                     "english": "Reminder."}.get(language, "Reminder.")
+    return f"{first} {text}".strip() if kind == "reminder" else first
+
+
+def _arm(row: dict) -> dict:
+    """Start the wall-clock timer for a row (new, or read back from the file)."""
+    rid = row["id"]
+
+    def fire():
+        # Said only by whoever takes it out of the file. A row the file never held
+        # (the disk refused the write) is still said: it was set in this process.
+        if row.get("persisted") and not _claim(rid):
+            _TIMERS[:] = [t for t in _TIMERS if t.get("id") != rid]
+            return
+        say(_fire_words(row.get("kind", "reminder"), row.get("text", ""),
+                        row.get("language", "english"), row.get("lead")),
+            row.get("language", "english"))
+        _TIMERS[:] = [t for t in _TIMERS if t.get("id") != rid]
+
+    t = _WallTimer(row["at"], fire)
+    row["timer"] = t
+    t.start()
+    _TIMERS.append(row)
+    return row
+
+
+class _WallTimer:
+    """Goes off by the wall clock. threading.Timer counts monotonic time, which stops
+    while the Mac sleeps: an alarm for 7:00 set at night went off late by the whole
+    night. This waits in short steps and looks at the clock each time."""
+    STEP = 20.0
+
+    def __init__(self, at: float, fn):
+        self.at, self.fn = at, fn
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def cancel(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            left = self.at - time.time()
+            if left <= 0:
+                self.fn()
+                return
+            if self._stop.wait(min(left, self.STEP)):
+                return
+
+
+def set_timer(minutes: float, text: str, language: str = "english",
+              lead: str | None = None, kind: str = "reminder") -> dict:
+    """A spoken reminder, timer or alarm. Needs no permission from anybody.
 
     Deliberately not a macOS reminder: those need an automation grant, and half the
     time what she wants is 'tell me in ten minutes', which is a sentence said out
-    loud, not a row in a database."""
+    loud, not a row in a database. `lead` is what she hears first when it goes off
+    ("Your timer is done.", "Alarm. It is 7:00."); without one, it is "Reminder." and
+    then what it is about. Written to the state file too, so a restart keeps it."""
     when = time.time() + minutes * 60
-
-    def fire():
-        lead = {"hebrew": "תזכורת.", "arabic": "تذكير.", "russian": "Напоминание.",
-                "english": "Reminder."}.get(language, "Reminder.")
-        say(f"{lead} {text}", language)
-        _TIMERS[:] = [t for t in _TIMERS if t["at"] != when]
-
-    t = threading.Timer(minutes * 60, fire)
-    t.daemon = True
-    t.start()
     # "id": what a follow-up ("make it 10 minutes instead", "cancel it") points at,
     # so it moves or stops this reminder and never another one she has running.
-    row = {"at": when, "text": text, "minutes": minutes, "timer": t, "id": f"{when:.6f}"}
-    _TIMERS.append(row)
-    return row
+    row = {"at": when, "text": text, "minutes": minutes, "id": f"{when:.6f}",
+           "kind": kind, "language": language, "lead": lead}
+    row["persisted"] = _persist(row)
+    return _arm(row)
+
+
+def restore_timers(now: float | None = None) -> list[dict]:
+    """At launch: arm again every entry still to come, and return the ones that came
+    due while MicMic was not running, each claimed (taken out of the file) so it is
+    returned once, ever. Already-armed ids are left alone, so calling it twice arms
+    nothing twice."""
+    now = time.time() if now is None else now
+    armed = {t.get("id") for t in _TIMERS}
+    missed = []
+    for e in _locked(lambda rows: (list(rows), None)) or []:
+        if e["id"] in armed:
+            continue
+        if e["at"] > now:
+            _arm({**e, "minutes": (e["at"] - now) / 60, "persisted": True})
+        elif _claim(e["id"]):
+            missed.append(e)
+    return sorted(missed, key=lambda e: e["at"])
 
 
 def timer_row(timer_id: str) -> dict | None:
@@ -648,8 +853,8 @@ def timer_row(timer_id: str) -> dict | None:
 
 
 def cancel_timer(timer_id: str) -> bool:
-    """Stop this one pending reminder, and only it. Nothing is deleted anywhere: the
-    reminder was never written outside this process."""
+    """Stop this one pending reminder, and only it. Its line in MicMic's own state file
+    goes with it; nothing of hers is deleted anywhere."""
     row = timer_row(timer_id)
     if row is None:
         return False
@@ -658,12 +863,14 @@ def cancel_timer(timer_id: str) -> bool:
     except Exception:  # noqa: BLE001
         return False
     _TIMERS[:] = [t for t in _TIMERS if t is not row]
+    _claim(timer_id)
     return True
 
 
 def pending_timers() -> list[dict]:
     now = time.time()
-    return [{"in_minutes": round((t["at"] - now) / 60, 1), "text": t["text"]}
+    return [{"in_minutes": round((t["at"] - now) / 60, 1), "text": t["text"],
+             "kind": t.get("kind", "reminder"), "at": t["at"], "id": t.get("id", "")}
             for t in _TIMERS if t["at"] > now]
 
 
@@ -870,9 +1077,10 @@ def cancel_last_timer() -> bool:
         if t["at"] > time.time():
             try:
                 t["timer"].cancel()
-                return True
             except Exception:  # noqa: BLE001
                 return False
+            _claim(t.get("id", ""))
+            return True
     return False
 
 
@@ -883,5 +1091,6 @@ def cancel_timers() -> int:
             t["timer"].cancel(); n += 1
         except Exception:  # noqa: BLE001
             pass
+        _claim(t.get("id", ""))
     _TIMERS.clear()
     return n

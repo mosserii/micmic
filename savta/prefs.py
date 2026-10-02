@@ -370,6 +370,13 @@ def relevant(utterance: str, limit: int = 3) -> list[str]:
     return out[-limit:]
 
 
+def likeliest_rule(utterance: str, near: list[str]) -> str:
+    """Which of the relevant rules to read back when Jev says one is broken: the last
+    one sharing a word with her sentence (the person, the app), else the last one."""
+    uw = _words(utterance)
+    return next((r for r in reversed(near) if _share_a_word(_words(r), uw)), near[-1])
+
+
 # ---------------------------------------------------------------- questions
 
 RULE_SPAN = ("She is telling the computer a rule for the future. Which part of the "
@@ -523,6 +530,9 @@ SAY = {
         "rule": "Noted: {rule}. If you ask for something against it, I will remind you.",
         "huh": "I did not catch what to change. Could you say it again?",
         "rule_note": "You asked me: {rule}. I am doing it anyway, since you are asking now.",
+        "rule_is": "You have a rule: {rule}.",
+        "send_anyway": "Send it to {who} anyway? Say yes and I will send it.",
+        "call_anyway": "Call {who} anyway? Say yes and I will call.",
         "app_note": "This one goes {by_now}, as you asked, not {by_pref}.",
         "volume_note": "You asked me to keep the volume low, but I am making it louder since you asked.",
         "recall_head": "Here is what I know about you.",
@@ -564,6 +574,9 @@ SAY = {
         "rule": "רשמתי: {rule}. אם «תבקשי|תבקש» משהו שסותר את זה, אזכיר לך.",
         "huh": "לא הבנתי מה לשנות. «תגידי|תגיד» שוב?",
         "rule_note": "ביקשת ממני: {rule}. אני עושה את זה בכל זאת, כי ביקשת עכשיו.",
+        "rule_is": "יש לך כלל: {rule}.",
+        "send_anyway": "לשלוח {at_he} בכל זאת? תגיד«י|» כן ואני שולחת.",
+        "call_anyway": "להתקשר {at_he} בכל זאת? תגיד«י|» כן ואני מתקשרת.",
         "app_note": "הפעם {by_now}, כמו שביקשת, ולא {by_pref}.",
         "volume_note": "ביקשת שאשמור על עוצמה נמוכה, אבל אני מגבירה כי ביקשת.",
         "recall_head": "זה מה שאני יודעת «עלייך|עליך».",
@@ -605,6 +618,9 @@ SAY = {
         "rule": "سجّلت: {rule}. إذا طلبت«ي|» إشي عكسه، رح ذكّرك.",
         "huh": "ما فهمت شو بدك غيّر. عيد«ي|» كمان مرة؟",
         "rule_note": "طلبت«ي|» مني: {rule}. رح أعملها لأنك طلبت«ي|» هلّق.",
+        "rule_is": "عندك قاعدة: {rule}.",
+        "send_anyway": "أبعتها {at_ar} مع هيك؟ قولي«|» نعم وببعتها.",
+        "call_anyway": "أتصل {at_ar_b} مع هيك؟ قولي«|» نعم وبتصل.",
         "app_note": "هالمرة {by_now} متل ما طلبت«ي|»، مش {by_pref}.",
         "volume_note": "طلبت«ي|» خلّي الصوت واطي، بس رح علّيه لأنك طلبت«ي|».",
         "recall_head": "هاد اللي بعرفه عنك.",
@@ -646,6 +662,9 @@ SAY = {
         "rule": "Записала: {rule}. Если попросите что-то против этого, я напомню.",
         "huh": "Я не поняла, что изменить. Повторите?",
         "rule_note": "Вы просили: {rule}. Делаю всё равно, раз вы просите сейчас.",
+        "rule_is": "У вас есть правило: {rule}.",
+        "send_anyway": "Всё равно отправить {who}? Скажите «да», и я отправлю.",
+        "call_anyway": "Всё равно позвонить {who}? Скажите «да», и я позвоню.",
         "app_note": "На этот раз {by_now}, как вы просили, а не {by_pref}.",
         "volume_note": "Вы просили держать громкость низкой, но раз просите, делаю громче.",
         "recall_head": "Вот что я о вас знаю.",

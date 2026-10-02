@@ -368,11 +368,18 @@ def t_prefs_free_rules(_j):
         check("en: the rule rode along only because the request touches it",
               s.rules_sent[-1] == ["don't call anyone after 10pm"]
               and s.standing[-1] == ["pref_breaks_rule"], f"{s.rules_sent[-1]} {s.standing[-1]}")
-        check("conflict: the explicit request wins",
+        # Owner decision 2026-10-02: a call against her rule is asked first, never placed.
+        check("conflict: a call against her rule is asked first, not placed",
+              r["did"] == "confirm_call" and not tm.CALLED and r.get("asked_back"),
+              f"did={r['did']} called={tm.CALLED}")
+        check("and she hears the rule read back, then 'anyway?'",
+              "don't call anyone after 10pm" in said(r) and "anyway?" in said(r), said(r))
+        s.j.answer["yes"] = (0.95, 0.05)
+        s.j.agreed["yes"] = 0.95
+        r = router.handle(s.j, "yes", speak=False)
+        check("on her yes, the call is placed (an ordinary call, not an emergency)",
               r["did"] == "calling" and tm.CALLED and tm.CALLED[0][0] == "Dana",
               f"did={r['did']} called={tm.CALLED}")
-        check("and she hears the rule, briefly, first",
-              said(r).startswith("You asked me: don't call anyone after 10pm."), said(r))
         r = router.handle(s.j, "call Dana now", speak=False)
         check("no conflict, no remark", "You asked me" not in said(r), said(r))
         r = router.handle(s.j, music, speak=False)
@@ -383,9 +390,99 @@ def t_prefs_free_rules(_j):
         check("he: stored in her words, answered in Hebrew",
               "אל תתקשרי לאף אחד אחרי עשר בלילה" in prefs.rules()
               and r["lang"] == "hebrew" and said(r).startswith("רשמתי"), said(r))
+        tm.CALLED.clear()
         r = router.handle(s.j, call_he, speak=False)
-        check("he: the request wins and the rule is said in Hebrew",
-              r["did"] == "calling" and said(r).startswith("ביקשת ממני:"), said(r))
+        check("he: asked first in Hebrew, the rule read back, nothing dialled",
+              r["did"] == "confirm_call" and not tm.CALLED
+              and "אל תתקשרי לאף אחד אחרי עשר בלילה" in said(r) and "בכל זאת" in said(r),
+              f"{r['did']} {said(r)} {tm.CALLED}")
+        s.j.answer["לא"] = (0.95, 0.05)
+        s.j.agreed["לא"] = 0.05
+        r = router.handle(s.j, "לא", speak=False)
+        check("he: her no places no call", r["did"] == "declined_call" and not tm.CALLED,
+              f"{r['did']} {tm.CALLED}")
+    fresh()
+
+
+@tm.with_gates_on
+def t_prefs_rule_asks_before_send(_j):
+    """Owner decision 2026-10-02 (bench hard-pref-003): a message against a saved rule
+    ("never message Dana after 10pm") is read back with the rule and asked "send
+    anyway?". It goes only on her yes, never on a countdown; a no sends nothing.
+    Anything else against a rule (music, volume) still just says the rule once."""
+    fresh()
+    prefs.add_rule("never message Dana after 10pm")
+    prefs.add_rule("אל תשלחי הודעות לדנה אחרי עשר בלילה")
+    prefs.add_rule("never play music after 10pm")
+    text_en, text_he = "text Dana are you up", "תשלחי לדנה את ערה"
+    ok_en, music = "text Dana see you tomorrow morning", "play some music"
+    bare_en = "send Dana a message"
+    msg = dict(intent="message", contact="Dana", contact_named=0.95, has_message_content=0.9)
+    understood = {
+        text_en: dict(msg, prefs={"pref_breaks_rule": nl(0.93)}),
+        text_he: dict(msg, language="hebrew", prefs={"pref_breaks_rule": nl(0.9)}),
+        ok_en: dict(msg, prefs={"pref_breaks_rule": nl(0.03)}),
+        bare_en: dict(msg, has_message_content=0.1, prefs={"pref_breaks_rule": nl(0.9)}),
+        music: dict(intent="music", media_kind="song_or_music",
+                    prefs={"pref_breaks_rule": nl(0.9)}),
+    }
+    with pref_turns(understood) as s:
+        s.j.same.update({text_en: 0.9, text_he: 0.9, ok_en: 0.9, bare_en: 0.9})
+        s.j.spans.update({text_en: "are you up its late", text_he: "את ערה עכשיו בלילה",
+                          ok_en: "see you tomorrow morning"})
+        tm.SENT.clear()
+        r = router.handle(s.j, text_en, speak=False)
+        aw = router.AWAITING or {}
+        check("en: a message against her rule is asked, not counted down",
+              r["did"] == "confirm_send" and router.PENDING is None and not tm.SENT
+              and aw.get("need") == "confirm_send" and aw.get("why") == "rule",
+              f"did={r['did']} pending={router.PENDING} awaiting={short(aw)}")
+        check("en: the rule is read back, then 'send anyway?'",
+              "never message Dana after 10pm" in said(r) and "anyway?" in said(r)
+              and "I am doing it anyway" not in said(r), said(r))
+        r = tm._answer(s, "yes")
+        check("en: her yes sends it, on the ordinary read-back",
+              r["did"] == "sending" and (router.PENDING or {}).get("to") == "Dana",
+              f"did={r['did']} pending={short(router.PENDING)}")
+        router._cancel_pending()
+
+        r = router.handle(s.j, text_en, speak=False)
+        r = tm._answer(s, "no", yes="no")
+        check("en: her no sends nothing", r["did"] == "send_declined"
+              and router.PENDING is None and not tm.SENT, f"{r['did']} {router.PENDING}")
+
+        r = router.handle(s.j, ok_en, speak=False)
+        check("en: a message the rule does not cover goes as before",
+              r["did"] == "sending" and "rule" not in said(r), f"{r['did']} {said(r)}")
+        router._cancel_pending()
+
+        r = router.handle(s.j, text_he, speak=False)
+        check("he: asked first in Hebrew, the rule read back, no countdown",
+              r["did"] == "confirm_send" and router.PENDING is None and r["lang"] == "hebrew"
+              and "אל תשלחי הודעות לדנה אחרי עשר בלילה" in said(r) and "בכל זאת" in said(r),
+              f"{r['did']} {said(r)}")
+        r = tm._answer(s, "כן")
+        check("he: her yes sends it", r["did"] == "sending"
+              and (router.PENDING or {}).get("to") == "Dana", f"{r['did']} {said(r)}")
+        router._cancel_pending()
+
+        # No words yet: asked what it should say, and her answer is then asked about.
+        r = router.handle(s.j, bare_en, speak=False)
+        check("en: no words yet, asked what to say, the rule read first",
+              r["did"] == "need_what" and said(r).startswith("You have a rule:"),
+              f"{r['did']} {said(r)}")
+        s.j.answer["are you still awake"] = (0.95, 0.05)
+        r = router.handle(s.j, "are you still awake", speak=False)
+        check("en: her words are then asked about, never counted down",
+              r["did"] == "confirm_send" and router.PENDING is None and "anyway?" in said(r)
+              and (router.AWAITING or {}).get("why") == "rule", f"{r['did']} {said(r)}")
+        router.AWAITING = None
+
+        r = router.handle(s.j, music, speak=False)
+        check("not a send or a call: nothing asked, the rule said once as before",
+              not str(r["did"]).startswith("confirm_") and router.AWAITING is None
+              and said(r).startswith("You asked me: never play music after 10pm."),
+              f"{r['did']} {said(r)}")
     fresh()
 
 
@@ -548,6 +645,7 @@ TESTS = [
     ("P2. prefs: which app a message goes by", t_prefs_message_app),
     ("P3. prefs: confirm, volume, video site, language", t_prefs_confirm_volume_site_language),
     ("P4. prefs: rules in her own words", t_prefs_free_rules),
+    ("P4b. prefs: a send against a rule waits for her yes", t_prefs_rule_asks_before_send),
     ("P5. prefs: what do you know about me, forget", t_prefs_recall_and_forget),
     ("P6. prefs: an unsure reading changes nothing", t_prefs_unsure_is_an_ordinary_request),
     ("P7. prefs: which app music plays in", t_prefs_music_app),

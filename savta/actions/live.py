@@ -15,6 +15,12 @@ Sources, each checked by hand before it was chosen (2026-09-27):
     top coins with names, symbols and current prices, so the list is the candidates.
   * Frankfurter (European Central Bank reference rates), for exchange rates. Keyless,
     daily, and names the date the rate is for.
+  * Yahoo Finance's public search and chart endpoints, for stock prices and indices
+    (2026-10-02). Keyless: the search names the listing (Apple -> AAPL, "teva" -> TEVA,
+    "s&p 500" -> ^GSPC), the chart gives the price, the day's closes and a year of them.
+    Stooq, the other keyless source, now answers its CSV address with a JavaScript
+    check instead of data. Unofficial: if Yahoo stops answering, she hears that the
+    price could not be reached, never a guess.
 
 Every fetch is cached for FRESH_S and fails soft: None means the source could not be
 reached (say so), [] means it answered with nothing (say that instead)."""
@@ -114,11 +120,15 @@ def headlines(topic: str, lang: str, sport: bool = False, n: int = 25) -> list[d
     Google News could not be reached or sent something that is not a feed."""
     try:
         rows = parse_rss(_get(_news_url(topic, lang, sport)))
-        if sport and len(rows) < 3:
-            # The result words found almost nothing: the plain search, once.
-            rows = parse_rss(_get(_news_url(topic, lang, False))) or rows
     except Exception:  # noqa: BLE001
         return None
+    if sport and len(rows) < 3:
+        # The result words found almost nothing: the plain search, once. Its failure
+        # keeps what the first search found.
+        try:
+            rows = parse_rss(_get(_news_url(topic, lang, False))) or rows
+        except Exception:  # noqa: BLE001
+            pass
     return rows[:n]
 
 
@@ -219,3 +229,75 @@ def amount(x: float) -> str:
     if x >= 1:
         return f"{x:,.2f}"
     return f"{x:.4g}"
+
+
+# ---------------------------------------------------------------- stocks
+YAHOO_SEARCH = "https://query1.finance.yahoo.com/v1/finance/search?"
+YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/"
+# What a spoken question about a share price can mean: a company's shares, a fund, an
+# index ("how is the S&P doing"). Futures, options and currencies are left out.
+STOCK_TYPES = ("EQUITY", "ETF", "INDEX", "MUTUALFUND")
+# A few prices are quoted in hundredths: Tel Aviv in agorot (ILA), London in pence (GBp).
+_MINOR = {"ILA": ("ILS", 100.0), "GBp": ("GBP", 100.0), "GBX": ("GBP", 100.0),
+          "ZAc": ("ZAR", 100.0)}
+
+
+def stock_search(name: str) -> list[dict] | None:
+    """Listings for a company or index name, Yahoo's best first: [{"symbol", "name",
+    "type"}]. None when Yahoo could not be reached."""
+    url = YAHOO_SEARCH + urllib.parse.urlencode(
+        {"q": name, "quotesCount": 6, "newsCount": 0, "listsCount": 0})
+    try:
+        d = json.loads(_get(url))
+    except Exception:  # noqa: BLE001
+        return None
+    return [{"symbol": str(q["symbol"]), "name": str(q.get("longname") or q.get("shortname")
+                                                     or q["symbol"]).strip(),
+             "type": str(q.get("quoteType") or "")}
+            for q in d.get("quotes") or [] if q.get("symbol")
+            and str(q.get("quoteType") or "") in STOCK_TYPES]
+
+
+def stock_quote(symbol: str) -> dict | None:
+    """The price now, the previous close and the close a year ago, from one chart of
+    daily closes: {"symbol", "name", "price", "prev", "year_ago", "currency", "index",
+    "at"}. None when Yahoo could not be reached or sent no price."""
+    url = YAHOO_CHART + urllib.parse.quote(symbol) + "?" + urllib.parse.urlencode(
+        {"range": "1y", "interval": "1d"})
+    try:
+        r = json.loads(_get(url))["chart"]["result"][0]
+        meta = r["meta"]
+        price = float(meta["regularMarketPrice"])
+    except Exception:  # noqa: BLE001
+        return None
+    ts = r.get("timestamp") or []
+    closes = ((r.get("indicators") or {}).get("quote") or [{}])[0].get("close") or []
+    days = [(t, float(c)) for t, c in zip(ts, closes) if c is not None]
+    at = float(meta.get("regularMarketTime") or (days[-1][0] if days else time.time()))
+    prev = None
+    if days:
+        # The last close is today's own when it is the same day as the price.
+        same_day = time.gmtime(days[-1][0])[:3] == time.gmtime(at)[:3]
+        prev = days[-2][1] if same_day and len(days) > 1 else (None if same_day else days[-1][1])
+    year_ago = days[0][1] if len(days) > 200 else None
+    currency = str(meta.get("currency") or "USD")
+    if currency in _MINOR:
+        currency, div = _MINOR[currency]
+        price, prev = price / div, (prev / div if prev is not None else None)
+        year_ago = year_ago / div if year_ago is not None else None
+    return {"symbol": str(meta.get("symbol") or symbol),
+            "name": str(meta.get("shortName") or meta.get("longName") or symbol).strip(),
+            "price": price, "prev": prev, "year_ago": year_ago, "currency": currency,
+            "index": str(meta.get("instrumentType") or "") == "INDEX", "at": at,
+            "source": "Yahoo Finance"}
+
+
+def pct(a: float, b: float) -> float:
+    """The change from b to a, in percent."""
+    return (a - b) / b * 100.0 if b else 0.0
+
+
+def pct_words(x: float) -> str:
+    """A percentage as a voice reads it well: one decimal under ten, whole above."""
+    x = abs(x)
+    return f"{x:.1f}".rstrip("0").rstrip(".") if x < 10 else f"{x:.0f}"

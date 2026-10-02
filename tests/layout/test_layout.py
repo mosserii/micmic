@@ -116,11 +116,11 @@ LAYOUT_JS = r"""
   const W = innerWidth, H = innerHeight, panel = document.body.classList.contains('panel');
   const out = [];
   const TEXTY = el => [...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim());
-  const PARTS = '.ob-demo,.ob-bar,.ob-kbd,.ob-key,.ob-perms,.ob-orb,.ob-quote,.ob-pill,.orb,.card,.typerow,.ob-prog';
+  const PARTS = '.ob-demo,.ob-bar,.ob-kbd,.ob-key,.ob-pcard,.ob-pdots,.ob-orb,.ob-quote,.ob-pill,.orb,.card,.typerow,.ob-prog';
   const effOpacity = el => { let o = 1; for(let e = el; e && e.nodeType === 1; e = e.parentElement)
     o *= parseFloat(getComputedStyle(e).opacity); return o; };
   const shown = el => {
-    if(el.closest('.ob-sr,[aria-hidden="true"]:not(.ob-demo),#dev,.field,svg')) return false;
+    if(el.closest('.ob-sr,[aria-hidden="true"]:not(.ob-demo):not(.ob-pdots),#dev,.field,svg')) return false;
     const cs = getComputedStyle(el);
     if(cs.visibility !== 'visible' || cs.display === 'none') return false;
     const r = el.getBoundingClientRect();
@@ -287,6 +287,7 @@ class Api:
         self.gets = {}                  # GET path suffix -> JSON body (the guide's state)
         self.posts = []
         self.web = None                 # /api/web_status answers, the last one repeated
+        self.onboarding = None          # fields laid over a first run's /api/onboarding
         self.web_polls = 0
 
     def route(self, route):
@@ -317,6 +318,10 @@ class Api:
         if path.endswith("/api/permissions") and self.perms is not None:
             return route.fulfill(status=200, content_type="application/json",
                                  body=json.dumps(self.perms))
+        if path.endswith("/api/onboarding") and self.onboarding is not None and self.heard is None:
+            return route.fulfill(status=200, content_type="application/json", body=json.dumps(
+                {"show": True, "first_run": True, "onboarded": False, "armed": True, "turn": None,
+                 "move": {"needed": False}, "clash": None, **self.onboarding}, ensure_ascii=False))
         if path.endswith("/api/onboarding") and self.heard is not None:
             return route.fulfill(status=200, content_type="application/json", body=json.dumps(
                 {"show": True, "first_run": True, "turn": {"heard": self.heard}}))
@@ -327,7 +332,7 @@ class Api:
         return route.continue_()
 
 
-def open_panel(browser, lang, scheme, step=None, api=None, first_run=True):
+def open_panel(browser, lang, scheme, step=None, api=None, first_run=True, perm=None):
     ctx = browser.new_context(viewport={"width": W, "height": H}, color_scheme=scheme,
                               device_scale_factor=2, reduced_motion="reduce")
     api = api or Api()
@@ -338,6 +343,8 @@ def open_panel(browser, lang, scheme, step=None, api=None, first_run=True):
     init = INIT + f"try{{localStorage.setItem('micmic.lang',{json.dumps(lang)})}}catch(_){{}}"
     init += (f"try{{sessionStorage.setItem('micmic.onboarding.step','{step}')}}catch(_){{}}"
              if step else "try{sessionStorage.clear()}catch(_){}")
+    if perm is not None:            # which permission step 2 opens on (0, 1, 2)
+        init += f"try{{sessionStorage.setItem('micmic.onboarding.perm','{perm}')}}catch(_){{}}"
     ctx.add_init_script(init)
     page = ctx.new_page()
     errors = []
@@ -375,21 +382,8 @@ def test_onboarding(browser):
             check(f"no page errors, step 1 ({tag})", not errors, errors[:2])
             ctx.close()
 
-            # 2: waiting, two switched off (the "Turn on" buttons), all on
-            api = Api()
-            for kind, perms in (
-                    ("unknown", {}),
-                    ("denied", {"microphone": "granted", "speech": "denied",
-                                "accessibility": "denied", "ready": False}),
-                    ("granted", {"microphone": "granted", "speech": "granted",
-                                 "accessibility": "granted", "ready": False})):
-                api.perms = perms
-                ctx, page, errors = open_panel(browser, lang, scheme, step=2, api=api)
-                page.wait_for_timeout(300)
-                page.evaluate("window.panelState('listening','')")
-                page.wait_for_timeout(60)
-                layout(page, f"ob2-{kind}-{tag}")
-                ctx.close()
+            # 2: one permission at a time, each in every state it can be in
+            perm_step_pictures(browser, lang, scheme, tag)
 
             # 3: waiting, thinking, and heard
             api = Api()
@@ -406,14 +400,122 @@ def test_onboarding(browser):
             ctx.close()
 
     # The longest copy the page has, so a language nobody looked at cannot wrap a
-    # button into the next one.
+    # button into the next one. Russian's permission lines are the longest of all.
     for lang in ("ru", "ar"):
         for step in (1, 2, 3):
-            ctx, page, _ = open_panel(browser, lang, "dark", step=step)
+            ctx, page, _ = open_panel(browser, lang, "dark", step=step,
+                                      api=Api(perms=NEW_MAC) if step == 2 else None)
             page.evaluate("window.panelState('listening','')")
             page.wait_for_timeout(60)
             layout(page, f"ob{step}-{lang}-dark")
             ctx.close()
+        for scheme in ("dark", "light"):
+            perm_step_pictures(browser, lang, scheme, f"{lang}-{scheme}")
+
+
+NEW_MAC = {"microphone": "not_asked", "speech": "not_asked", "accessibility": "denied", "ready": False}
+NO_AX = {"microphone": "granted", "speech": "granted", "accessibility": "denied", "ready": False}
+CLASH = {"app": "Handy", "key": "right-option", "suggest": "right-command",
+         "free": ["right-command", "right-control", "right-shift", "fn-fn"]}
+
+
+def test_first_run_fixes(browser):
+    """The owner's fresh install (2026-09-30), every new picture in all four languages,
+    dark and light: the move screen (waiting, reopening, failed), step 3 with another
+    app on her key (and its other keys open), step 3 without Accessibility (the circle
+    leads), and both at once (the clash waits until the key can work)."""
+    for lang in ("he", "en", "ar", "ru"):
+        for scheme in ("dark", "light"):
+            tag = f"{lang}-{scheme}"
+            for kind in ("disk_image", "translocated"):
+                api = Api()
+                api.onboarding = {"move": {"needed": True, "kind": kind, "from": "/Volumes/MicMic/MicMic.app"}}
+                api.replies = {"install/move": {"ok": False, "error": "could_not_copy"}}
+                ctx, page, errors = open_panel(browser, lang, scheme, api=api)
+                check(f"move screen first ({kind}, {tag})", page.evaluate(
+                    "document.querySelector('.ob-step.on').dataset.n") == "0")
+                layout(page, f"ob0-move-{kind}-{tag}")
+                if kind == "disk_image":
+                    page.click(".ob-movego")
+                    page.wait_for_selector(".ob-movefail:not([hidden])", timeout=3000)
+                    page.wait_for_timeout(120)
+                    layout(page, f"ob0-movefail-{tag}")
+                    api.replies = {"install/move": {"ok": True, "to": "/Applications/MicMic.app"}}
+                    page.click(".ob-movego")
+                    page.wait_for_function("document.querySelector('.ob-movego').disabled", timeout=3000)
+                    page.wait_for_timeout(120)
+                    layout(page, f"ob0-moved-{tag}")
+                    check(f"the move posts once per press, to install/move ({tag})",
+                          [p for p, _ in api.posts if p == "install/move"] == ["install/move"] * 2, api.posts)
+                check(f"no page errors, move screen ({kind}, {tag})", not errors, errors[:2])
+                ctx.close()
+
+            for name, perms, onb in (("clash", ALL_ON, {"clash": CLASH}),
+                                     ("noax", NO_AX, {}),
+                                     ("noax-clash", NO_AX, {"clash": CLASH})):
+                api = Api(perms=dict(perms))
+                api.onboarding = onb
+                ctx, page, errors = open_panel(browser, lang, scheme, step=3, api=api)
+                page.wait_for_timeout(300)
+                if name == "clash":
+                    page.wait_for_selector(".ob-clash:not([hidden])", timeout=3000)
+                if name == "noax-clash":
+                    check(f"without Accessibility the clash waits: no key is named yet ({tag})",
+                          page.is_hidden(".ob-clash"))
+                if "noax" in name:
+                    page.wait_for_selector(".ob-nokey:not([hidden])", timeout=3000)
+                    check(f"without Accessibility the circle leads ({name}, {tag})",
+                          page.text_content('.ob-step[data-n="3"] .ob-sub') == page.evaluate("t('ob3SubClick')"))
+                layout(page, f"ob3-{name}-{tag}")
+                if name == "clash":
+                    page.click(".ob-clash-other")
+                    page.wait_for_timeout(120)
+                    layout(page, f"ob3-clash-keys-{tag}")
+                    page.click(".ob-clash-use")
+                    page.wait_for_timeout(200)
+                    check(f"Use saves the hotkey setting ({tag})",
+                          ("settings", {"hotkey": "right-command"}) in api.posts, api.posts)
+                    check(f"and the line goes ({tag})", page.is_hidden(".ob-clash"))
+                check(f"no page errors, step 3 {name} ({tag})", not errors, errors[:2])
+                ctx.close()
+
+
+def perm_step_pictures(browser, lang, scheme, tag):
+    """Step 2, one permission at a time: to be asked, asking (macOS's dialog up), on
+    (the tick), refused (Open Settings and Continue), and step 3 without a way to hear
+    her. Every picture measured."""
+    for i, k in enumerate(("microphone", "speech", "accessibility")):
+        api = Api(perms=dict(NEW_MAC))
+        ctx, page, errors = open_panel(browser, lang, scheme, step=2, api=api, perm=i)
+        page.wait_for_selector(f'.ob-pcard[data-k="{k}"][data-s="ask"]', timeout=5000)
+        page.wait_for_timeout(120)
+        layout(page, f"ob2-{k}-ask-{tag}")
+        page.click(".ob-allow")
+        page.wait_for_selector('.ob-pcard[data-s="asking"]', timeout=3000)
+        page.wait_for_timeout(120)
+        layout(page, f"ob2-{k}-asking-{tag}")
+        check(f"step 2 posts {k}, and only {k} ({tag})",
+              [b for pth, b in api.posts if pth == "permissions/request"] == [{"k": k}], api.posts)
+        if k != "accessibility":
+            api.perms = {**NEW_MAC, k: "denied"}
+            page.wait_for_selector('.ob-pcard[data-s="denied"]', timeout=3000)
+            page.wait_for_timeout(120)
+            layout(page, f"ob2-{k}-denied-{tag}")
+        api.perms = {**NEW_MAC, k: "granted"}
+        page.wait_for_selector('.ob-pcard[data-s="granted"]', timeout=3000)
+        layout(page, f"ob2-{k}-granted-{tag}")
+        check(f"no page errors, step 2 {k} ({tag})", not errors, errors[:2])
+        ctx.close()
+    for off in ("microphone", "speech"):
+        api = Api(perms={"microphone": "granted", "speech": "granted", "accessibility": "granted",
+                         off: "denied", "ready": False})
+        ctx, page, errors = open_panel(browser, lang, scheme, step=3, api=api)
+        page.wait_for_selector(".ob-nohear:not([hidden])", timeout=4000)
+        page.wait_for_timeout(120)
+        layout(page, f"ob3-no-{off}-{tag}")
+        check(f"step 3 without {off}: Done, not a wait for a turn that cannot come ({tag})",
+              page.is_visible('[data-go="done"]') and not page.is_visible(".ob-pill"))
+        ctx.close()
 
 
 def test_panel_states(browser):
@@ -459,6 +561,33 @@ def test_panel_states(browser):
                   ("settings", {"open_at_login": True}) in api.posts, api.posts)
             page.click("#sdone")
             check(f"no page errors, panel ({tag})", not errors, errors[:2])
+            ctx.close()
+
+
+def test_settings_permissions(browser):
+    """Settings > Permissions in every language and scheme: a refused one, one never
+    asked, one on. Scrolled into view and measured."""
+    for lang in ("en", "he", "ar", "ru"):
+        for scheme in ("dark", "light"):
+            tag = f"{lang}-{scheme}"
+            api = Api(perms={"microphone": "denied", "speech": "not_asked",
+                             "accessibility": "granted", "ready": False})
+            ctx, page, errors = open_panel(browser, lang, scheme, api=api, first_run=False)
+            dismiss_onboarding(page)
+            page.click("#gear")
+            page.wait_for_timeout(400)
+            page.evaluate("document.getElementById('rowPerms').scrollIntoView({block:'center'})")
+            page.wait_for_timeout(150)
+            layout(page, f"settings-perms-{tag}")
+            btns = page.evaluate("[...document.querySelectorAll('.sperm')].map(r => "
+                                 "r.querySelector('.spbtn').hidden ? '' : r.querySelector('.spbtn').textContent)")
+            check(f"each missing permission has its own button, in her language ({tag})",
+                  btns == [page.evaluate("t('obOpenSettings')"), page.evaluate("t('obAllowSpeech')"), ""], btns)
+            page.click('.sperm[data-k="speech"] .spbtn')
+            page.wait_for_timeout(150)
+            check(f"the speech button posts speech ({tag})",
+                  ("permissions/request", {"k": "speech"}) in api.posts, api.posts)
+            check(f"no page errors, settings permissions ({tag})", not errors, errors[:2])
             ctx.close()
 
 
@@ -823,8 +952,8 @@ def test_panel_details(browser):
               page.text_content("#state") == page.evaluate("t('idleNoKey')"), page.text_content("#state"))
         page.click("#axbtn")
         page.wait_for_timeout(100)
-        check(f"#4 its button opens the Accessibility pane ({tag})",
-              ("permissions/open", {"pane": "accessibility"}) in api.posts, api.posts)
+        check(f"#4 its button asks for Accessibility (its prompt, then its pane) ({tag})",
+              ("permissions/request", {"k": "accessibility"}) in api.posts, api.posts)
         check(f"#4 and does not also start listening ({tag})",
               page.evaluate("window.__msgs.includes('listen')") is False)
         api.perms = ALL_ON
@@ -1145,7 +1274,7 @@ def main():
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)    # bundled Chromium, never channel="chrome"
             try:
-                for t in (test_onboarding, test_panel_states, test_results, test_web_task,
+                for t in (test_onboarding, test_first_run_fixes, test_settings_permissions, test_panel_states, test_results, test_web_task,
                           test_panel_details, test_lead_items, test_qa_v2, test_bar, test_guide,
                           test_selection_and_drag):
                     print(f"\n-- {t.__name__}")
