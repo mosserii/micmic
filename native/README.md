@@ -1,7 +1,8 @@
 # MicMic without Chrome
 
 This folder turns MicMic into a small Mac app that listens all the time, with no
-browser window anywhere. It sits in the menu bar as a dot. When it hears **מיקמיק**
+browser window anywhere. It is a regular Mac app: it shows in the Dock and Cmd-Tab
+while it runs, and as a dot in the menu bar. When it hears **מיקמיק**
 it sends what she said next to the MicMic that is already running, exactly as the
 web page did.
 
@@ -114,7 +115,11 @@ clashes, either set that menu to "Do Nothing" or switch to a `cmd+shift+…` sty
 `MICMIC_HOTKEY`. Not verified against a real Accessibility-permission dialog or a
 real Globe key press on this Mac — see "What was actually tested".
 
-### The dot in the menu bar
+### The Dock icon and the dot in the menu bar
+
+MicMic shows in the Dock and Cmd-Tab while it runs (it never pins itself to the Dock).
+Click its Dock icon to open the MicMic window. The app menu has Settings (Cmd-,) and
+Quit (Cmd-Q), plus Edit and Window.
 
 Click it to see what MicMic is doing right now — waiting, listening, thinking,
 counting down — in her own language, not just in English. The same menu has
