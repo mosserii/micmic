@@ -57,3 +57,11 @@ brand/menubar/preview-compare-*.png
 
 # The private repo's working notes for Claude (never published)
 CLAUDE.md
+
+# ---- more local state, never published
+prefs.json
+timers.json*
+native/dist-*/
+
+# The iPhone brain (device state, eval sets): private, never published
+brain/

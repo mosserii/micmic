@@ -284,6 +284,26 @@ def t_clock():
           (r.get("say") or "").lower() == "i'll remind you tomorrow at 9:00 to call mom.",
           r.get("say"))
 
+    # Live (2026-10-03), with a 4-name book Jev left the about span empty: the label and
+    # the line became the whole sentence. Asked and empty: her words minus the lead and
+    # the time spans, with no extra call.
+    for utt, lang_, sp, want_text in (
+            ("remind me tomorrow at 9 to call the bank", None,
+             {"clock": "at 9", "day": "tomorrow"}, "call the bank"),
+            ("תזכירי לי מחר בתשע להתקשר לבנק", "hebrew",
+             {"clock": "בתשע", "day": "מחר"}, "להתקשר לבנק")):
+        tf.fresh()
+        extra = {Q: "reminder", **spans(**sp), "time_about_exists": 0.02}
+        r, j = tf.turn(utt, intent="timer", lang=lang_, extra=extra)
+        asked = any("time_about" in q for q in j.asked)
+        pend = [t for t in mac._TIMERS if t["at"] > time.time()]
+        check(f"no about span, derived from her words ({lang_ or 'english'})",
+              asked and r["did"] == "timer_set" and pend and pend[-1]["text"] == want_text
+              and len(j.asked) == 1, (asked, r["did"], pend and pend[-1]["text"], len(j.asked)))
+        check(f"the line keeps what it is about ({lang_ or 'english'})",
+              want_text.split()[-1] in (r.get("say") or ""), r.get("say"))
+        mac.cancel_timers()
+
     tf.fresh()
     r, _ = ask("remind me at 6:30 to call mom", "reminder", intent="timer", clock="at 6:30",
                about="to call mom")

@@ -116,6 +116,25 @@ OPEN_MIC_QUESTIONS = {
             "no_one": "Not words for anyone: a cough, a sneeze, a laugh, um, a stray word or sound, someone thinking aloud to themselves."}},
 }
 
+# Asked only when her spoken reply goes to a voice that can act on a delivery tag
+# (the cloud voice, ElevenLabs v4 Turbo: router._ask_tone) AND her words carry a cue of
+# feeling or hurry (voice_tags.may_carry_feeling). How she said it, not what she asked
+# for. "neutral" first: a replay that never saw this question defaults to the first
+# option, and so does every turn that does not ask it. Code maps the answer and the
+# outcome to a tag (voice_tags.choose); Jev never writes a tag. Measured (60/60 on 30
+# utterances x 2, no latency delta outside the spread) in micmic-work/voice/TAGS_DESIGN.md.
+TONE_QUESTIONS = {
+    "reply_tone": {"type": "choice",
+        "instructions": "MicMic is about to answer her out loud. Judging only from HOW she said this (her mood, whether she is in a hurry, how she feels about the computer), not from what she is asking for, which tone of voice should the spoken answer have?",
+        "criteria": {
+            "neutral": "She sounds ordinary: a plain request or question with no feeling in it. Most requests are this. Turn on the radio. What time is it in Tokyo. Send Noa that dinner is at seven. תפתחי את היומן.",
+            "warm": "She is friendly, thankful or affectionate toward MicMic: thanks a lot, you are a gem, good evening my dear. תודה רבה חמודה. спасибо, дорогая.",
+            "calm": "She is stressed, anxious, flustered or frightened, or annoyed or angry, including at the computer itself: I am panicking, where did it go, this thing never works, why is nothing happening. אני מתחרפנת, זה שוב לא עובד.",
+            "upbeat": "She is happy, excited or celebrating something: good news, a win, a party, a wedding. Our team scored, play something lively. איזה כיף, הנכדה נולדה.",
+            "gentle": "She is sad, lonely, grieving, worn out or unwell: I had an awful day, nobody visits me, I feel weak today. קשה לי היום.",
+            "brief": "She is in a hurry or impatient for it to be done: be fast, I must run, I am out the door, come on already. תזדרזי, אני יוצאת."}},
+}
+
 INTENTS = {
     "watch":    "Watch something on screen: a film, a show, a video, a clip, a match, the television news.",
     "music":    "Listen to music or a song or a singer.",
@@ -151,7 +170,8 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
                at_micmic: bool = False,
                open_mic: bool = False,
                screen_ask: bool = False,
-               when: dict | None = None) -> dict:
+               when: dict | None = None,
+               tone: bool = False) -> dict:
     """One request. Everything the decision tree could need.
 
     `standing` is savta.prefs.questions(): the preference questions when her words
@@ -504,6 +524,8 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
         qs.update(OPEN_MIC_QUESTIONS)
     if when:
         qs.update(when["questions"])
+    if tone:
+        qs.update(TONE_QUESTIONS)
     cands = span_candidates(utterance) if spans else []
     for name, spec in (spans or {}).items():
         if not cands:
@@ -616,6 +638,9 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
         "guide_command_confidence": (choice(a, "guide_command")[1]
                                      if guide and "guide_command" in a else 0.0),
         **_addressed(a, open_mic),
+        "reply_tone": choice(a, "reply_tone")[0] if tone and "reply_tone" in a else "neutral",
+        "reply_tone_confidence": choice(a, "reply_tone")[1] if tone and "reply_tone" in a else 0.0,
+        "reply_tone_probs": choice(a, "reply_tone")[2] if tone and "reply_tone" in a else {},
     }
 
 

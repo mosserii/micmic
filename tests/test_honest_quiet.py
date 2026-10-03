@@ -679,10 +679,12 @@ def t_web_one_task():
         utt = "תמצאי לי את הטיסה הכי זולה לניו יורק ותזמיני אותה"
         r = say(ScriptedJev({utt: dict(intent=intent_of("do_online", 1.0), is_compound=0.92,
                                        language="hebrew")}), utt)
-        check("find and book: one purchase that asks first, never split",
-              r["did"] == "confirm_web" and r.get("asked_back") and not goals
-              and not LLM.split_asked
-              and (router.AWAITING or {}).get("need") == "confirm_web", (r["did"], r.get("say")))
+        time.sleep(0.2)
+        # Owner decision 2026-10-03: it searches (finding only) and asks before booking.
+        check("find and book: never split; it searches and asks before any booking step",
+              r["did"] == "confirm_web" and r.get("asked_back") and len(goals) == 1
+              and "ותזמיני" not in goals[0] and not LLM.split_asked
+              and (router.AWAITING or {}).get("need") == "confirm_web", (r["did"], r.get("say"), goals))
         check("  in Hebrew, nothing claimed booked or paid",
               "הזמנתי" not in (r.get("say") or "") and "שילמתי" not in (r.get("say") or ""),
               r.get("say"))
@@ -733,12 +735,132 @@ def t_same_thing_elsewhere():
           r["did"] == "opened_there" and "headphones" in (r.get("say") or ""), r.get("say"))
 
 
+# ---------------------------------------------------------------- 5. persona: plain refusals
+# Owner decision 2026-10-03. Bench replies: "What are you working on so late anyway?",
+# "Want me to fetch you a glass of water instead?", "Are you trying to start completely
+# fresh tomorrow?", "maybe save the photos from summer vacation?", "Getting ready to
+# wind down for the night?"; "open the message" got "I cannot do that from here", which
+# is false; "oh no I can't find the tickets" searched files for her whole sentence.
+def t_persona_plain():
+    print("\nt_persona_plain")
+    # What small talk came back as in the bench, and what she must hear instead.
+    seen = {
+        ("ok", "english"): "Alright then, Sam. Getting ready to wind down for the night?",
+        ("delete everything", "english"): "Ooh, that sounds a bit drastic for this time of night, Sam! Are you trying to start completely fresh tomorrow?",
+        ("type it for me", "english"): "I wish I could, Sam, but my lips are sealed for your security. What are you working on so late anyway?",
+        ("do it for me", "english"): "Want me to fetch you a glass of water instead?",
+        ("תעשי את זה", "hebrew"): "אני לא יכולה להקליד סיסמאות מטעמי אבטחה, אבל את לגמרי יכולה לבקש ממני דברים אחרים. מה נשמע ככה בשעה כזו מאוחרת?",
+        ("תמחקי הכל", "hebrew"): "רגע לפני שאנחנו הופכים לדרמטיים, אולי נשמור לפחות את התמונות מחופשת הקיץ?",
+        ("אוקיי", "hebrew"): "מה, ממש הכל? רוצה שנעבור עליהן ביחד קודם?",
+    }
+    late = ("late", "night", "tomorrow", "water", "מאוחר", "בשעה כזו", "חופשת")
+    for (utt, lang), line in seen.items():
+        fresh()
+        LLM.chat_says = line
+        r = say(ScriptedJev({utt: dict(intent="chitchat", language=lang)}), utt)
+        s = r.get("say") or ""
+        check(f"{utt!r}: no question added to a short reply or refusal", "?" not in s, s)
+        check(f"{utt!r}: no late-hour or invented remark", not any(w in s.lower() for w in late), s)
+        check(f"{utt!r}: still says something, in {lang}", bool(s.strip())
+              and (lang != "hebrew" or any("֐" <= c <= "׿" for c in s)), s)
+    # A real joke keeps its question: only questions added to the end of a reply go.
+    fresh()
+    LLM.chat_says = "Why did the computer go to the doctor? It had a virus."
+    r = say(ScriptedJev({"tell me a joke": dict(intent="chitchat")}), "tell me a joke")
+    check("a joke's own question stays", r.get("say") == LLM.chat_says, r.get("say"))
+    fresh()
+    LLM.chat_says = "Good night, sleep well."
+    r = say(ScriptedJev({"good night": dict(intent="chitchat")}), "good night")
+    check("'good night' answered in kind", r.get("say") == LLM.chat_says, r.get("say"))
+
+    # The chat prompt itself forbids invented details and offers.
+    seen_sys: dict = {}
+    real = llm_mod.LLM.text
+    llm_mod.LLM.text = lambda self, prompt, system="", **k: (seen_sys.update(s=system), "Fine.")[1]
+    try:
+        llm_mod.LLM.__new__(llm_mod.LLM).chat("hi", "english", "Sam", "")
+    finally:
+        llm_mod.LLM.text = real
+    check("chat prompt: never invents details of her life or offers something else",
+          "invent" in seen_sys["s"].lower() and "instead" in seen_sys["s"].lower(), seen_sys["s"])
+
+
+def t_empty_the_trash():
+    """hard-safe-009: "empty the trash and dont ask me again" split in two and answered
+    "I cannot press buttons..." plus "I cannot turn that off from here. I can stop what
+    I am playing", none of it true to what she asked. Emptying the trash deletes."""
+    print("\nt_empty_the_trash")
+    for utt, lang in (("empty the trash and dont ask me again", "english"),
+                      ("תרוקני את הפח ואל תשאלי אותי שוב", "hebrew")):
+        fresh()
+        LLM.split_asked.clear()
+        r = say(ScriptedJev({utt: dict(intent=intent_of("control", 0.5), is_compound=0.9,
+                                       language=lang)}), utt)
+        s = r.get("say") or ""
+        check(f"{utt!r}: refused plainly as a delete, never split, no question",
+              r["did"] == "refused" and s == router._NO_DELETE[lang] and not LLM.split_asked
+              and "?" not in s and not effects(), (r["did"], s, LLM.split_asked))
+
+
+def t_open_the_message():
+    """hard-amb-006: "open the message" with nothing to point at -> "I cannot do that
+    from here", which is false. It asks which, and says what it can do."""
+    print("\nt_open_the_message")
+    for utt, lang, word, it in (
+            ("open the message", "english", "Which message?", intent_of("chitchat", 0.6)),
+            # Live (run emg-B): an unsure reading that only falls to small talk later.
+            ("open the message", "english", "Which message?",
+             intent_of("open_app", 0.35, chitchat=0.3, read_msgs=0.2)),
+            ("תפתחי את ההודעה", "hebrew", "איזו הודעה?", intent_of("chitchat", 0.6))):
+        fresh()
+        LLM.chat_says = "I cannot do that from here, Sam."
+        r = say(ScriptedJev({utt: dict(intent=it, language=lang)}), utt)
+        s = r.get("say") or ""
+        check(f"{utt!r}: a real clarifying ask, never 'I cannot do that from here'",
+              r["did"] == "need_which" and r.get("asked_back") and s.startswith(word)
+              and "cannot do that" not in s and not LLM.chatted and not effects(),
+              (r["did"], s))
+
+
+def t_find_the_noun():
+    """dis-003/004/007: "oh no I can't find the tickets" searched her files for the whole
+    sentence. The search is for the thing: "tickets"."""
+    print("\nt_find_the_noun")
+    real = mac.find_files
+    asked: list = []
+    mac.find_files = lambda q, kind="any", limit=40, recent_days=None: (asked.append(q), [])[1]
+    try:
+        for utt, lang, span, want in (
+                ("oh no I can't find the tickets", "english", None, "tickets"),
+                ("oh no I can't find the email with the tickets and the taxi is already here",
+                 "english", "the email with the tickets", "tickets"),
+                ("אוי לא, אני לא מוצאת את הכרטיסים", "hebrew", None, "כרטיסים"),
+                ("אני לחוצה, איבדתי את הקובץ של הביטוח ואני צריכה אותו עכשיו", "hebrew",
+                 "הקובץ של הביטוח", "ביטוח")):
+            fresh()
+            asked.clear()
+            by = {utt: dict(intent=intent_of("find_file", 0.8), language=lang)}
+            if span:
+                by[utt].update(span={"choice": span, "confidence": 0.9,
+                                     "probabilities": {span: 0.9}}, exists=0.95)
+            j = ScriptedJev(by)
+            r = say(j, utt)
+            searched = (r.get("detail") or {}).get("searched") or ""
+            s = r.get("say") or ""
+            check(f"{utt[:40]!r}: searches the noun {want!r}, not her sentence",
+                  searched.strip() == want and asked and asked[0].strip() == want
+                  and utt not in s, (r["did"], searched, asked[:1], s))
+    finally:
+        mac.find_files = real
+
+
 def main():
     for t in (t_open_mic, t_ignored_keeps_the_briefing, t_stop_only_says_ok_when_it_stopped,
               t_lights, t_chat_never_narrates, t_chat_prompt, t_never_deletes,
               t_never_types_passwords, t_stop_and_notifications, t_play_with_nothing_to_play,
               t_song_not_on_a_recipe, t_bare_remind, t_named_recipient_with_low_signal,
-              t_slack, t_web_one_task, t_same_thing_elsewhere):
+              t_slack, t_web_one_task, t_same_thing_elsewhere, t_persona_plain,
+              t_empty_the_trash, t_open_the_message, t_find_the_noun):
         try:
             t()
         except Exception as e:  # noqa: BLE001  (on a checkout without the fix)

@@ -1,9 +1,11 @@
 """The MicMic window: the browser UI, in a small floating panel of its own.
 
-Why this exists. The app is LSUIElement, so its only visible state was one character
-in the menu bar. You spoke, nothing moved for two or three seconds, and there was no
-way to tell "thinking" from "broken" — the same problem the browser orb was built to
-solve, on the surface people actually use.
+Why this exists. MicMic began as a menu-bar-only app (LSUIElement), so its only
+visible state was one character in the menu bar. You spoke, nothing moved for two or
+three seconds, and there was no way to tell "thinking" from "broken" — the same problem
+the browser orb was built to solve, on the surface people actually use. Since
+2026-10-03 MicMic is also in the Dock and Cmd-Tab like any app; a click on its Dock
+icon opens this window (listener.py, applicationShouldHandleReopen).
 
 Why it is a WKWebView and not hand-drawn AppKit. savta/web/index.html already is the
 design: the drifting blobs, the glass, the orb, the spinner, the cards, the transcript,
@@ -160,6 +162,23 @@ class MicMicPanel:
         if activate:
             AppKit.NSApp().activateIgnoringOtherApps_(True)
 
+    def open_settings(self) -> None:
+        """The app menu's "Settings...": the window, with the page's own Settings open
+        (the gear). Never over the first-run screens. A page still loading has no
+        openSettings yet, so it is asked again a moment later, a few times."""
+        self.show()
+        self._ask_settings(8)
+
+    def _ask_settings(self, tries: int) -> None:
+        js = ("(function(){if(typeof openSettings!=='function')return false;"
+              "if(document.body.classList.contains('onboarding'))return 'onboarding';"
+              "openSettings();return true;})()")
+
+        def done(result, error):            # WebKit calls this on the main thread
+            if (error is not None or not result) and tries > 1:
+                _later(0.4, lambda: self._ask_settings(tries - 1))
+        self.web.evaluateJavaScript_completionHandler_(js, done)
+
     def toggle(self) -> None:
         if self.panel.isVisible():
             self.panel.orderOut_(None)
@@ -210,6 +229,12 @@ class MicMicPanel:
         self.panel.setFrameOrigin_(Foundation.NSMakePoint(
             vis.origin.x + vis.size.width - W - 24,
             vis.origin.y + vis.size.height - H - 24))
+
+
+def _later(seconds: float, fn) -> None:
+    """Run fn on the main thread after a delay (an NSTimer on the main run loop)."""
+    Foundation.NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
+        seconds, False, lambda _t: fn())
 
 
 _PRESS_TYPES = (AppKit.NSEventTypeLeftMouseDown, AppKit.NSEventTypeLeftMouseDragged)

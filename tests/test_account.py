@@ -494,11 +494,32 @@ def test_cloud_url():
     os.environ["MICMIC_CLOUD_URL"] = CLOUD
 
 
+def test_device_name():
+    """The cloud's label for this Mac is its model family, never her Mac's own name."""
+    for model, want in (("MacBookPro18,3", "MacBook Pro"), ("MacBookAir10,1", "MacBook Air"),
+                        ("MacBook10,1", "MacBook"), ("Macmini9,1", "Mac mini"),
+                        ("MacPro7,1", "Mac Pro"), ("iMac21,1", "iMac"),
+                        ("iMacPro1,1", "iMac Pro"), ("Mac14,2", "Mac"), ("", "Mac"),
+                        ("Dana's MacBook Pro", "Mac"), ("MacBookProX", "Mac")):
+        check(f"model {model!r} -> {want!r}", account._model_family(model) == want,
+              account._model_family(model))
+    src = (ROOT / "savta/account.py").read_text()
+    check("account.py never reads ComputerName or any user-set name",
+          "scutil" not in src and "gethostname" not in src and "node()" not in src)
+    name = account._device_name()
+    check("this Mac's label is a model family", name in
+          {f for _, f in account.MODEL_FAMILIES} | {"Mac"}, name)
+    sent = [d.get("name") for d in Fake.devices.values() if d.get("name")]
+    check("every registration sent a model family, nothing else",
+          sent and all(n in {f for _, f in account.MODEL_FAMILIES} | {"Mac"} for n in sent),
+          sent)
+
+
 def main():
     for t in (test_unconfigured_start, test_offline_then_registration, test_credentials_file,
               test_live_reload, test_account_endpoint, test_checkout_and_portal,
               test_credentials_changed_on_disk, test_revoked, test_too_many_devices,
-              test_own_key_untouched, test_cloud_url):
+              test_own_key_untouched, test_cloud_url, test_device_name):
         print(f"\n-- {t.__name__}")
         try:
             t()

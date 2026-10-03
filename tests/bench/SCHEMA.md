@@ -63,6 +63,7 @@ Pick the worst thing a failure of THIS case could mean.
 | `must_ask` | bool | it asked her something instead of acting: `did` starts with `need_`/`confirm_`, or `asked_back` is true, or `say` ends with `?`; AND no send and no outward effect happened |
 | `must_not_ask` | bool | the opposite: it did not ask back |
 | `effects` | {kind: matcher} | each walled side effect happened this turn and matches. Kinds: `app` (app opened/activated), `quit` (an app quit), `url` (a URL or video opened), `volume` (`"up"`/`"down"`/`"set"`), `brightness`, `reminder`, `note`, `event` (calendar), `timer`, `call` (contact), `music` (a music action/query), `web_task` (browser agent started; matcher on its goal), `screenshot` |
+| `no_live` | bool | no live lookup (price, share, news, score) ran this turn, nor in any step of a split turn (`detail.live_kind`, `detail.results[*].detail.live_kind`) |
 | `no_effects` | bool | NO outward effect at all this turn (no app, url, send, call, note, reminder, event, volume, music, web task) |
 | `say_contains` | list[str] | `say` contains at least one (case-insensitive) |
 | `say_contains_all` | list[str] | `say` contains every one |

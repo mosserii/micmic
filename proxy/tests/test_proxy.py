@@ -8,6 +8,8 @@ import socket
 import threading
 from datetime import datetime, timezone
 
+import pytest
+
 from conftest import (FAKE_GEMINI_KEY, FAKE_JEV_KEY, GEMINI_ANSWER, JEV_ANSWER,
                       assert_no_leak, jev_body)
 from proxy import admin
@@ -397,6 +399,28 @@ def test_log_lines_carry_route_status_and_hash_prefix_only(proxy, log_buffer):
     assert any("POST /v1/jev 401" in ln and "tok=-" in ln for ln in lines)
     assert any("protocol error" in ln for ln in lines)
     assert_no_leak(logs, [tok])
+
+
+def test_unhandled_error_logs_its_type_only(proxy, log_buffer, capfd, monkeypatch):
+    """An exception that escapes a handler (here on GET /v1/account, which has no route
+    level catch) must not reach the host's logs as a traceback: the stock socketserver
+    prints the exception text and the client's address to stderr, and that text can
+    quote a key or what someone said."""
+    start = log_buffer.tell()
+    tok = proxy.mint()
+
+    def boom(_h):
+        raise RuntimeError(f"db said {FAKE_JEV_KEY} SAID-OUT-LOUD")
+    monkeypatch.setattr(proxy.store, "account", boom)
+    with pytest.raises((http.client.HTTPException, OSError)):
+        proxy.request("GET", "/v1/account", token=tok)
+    # The server is still up and answering.
+    assert proxy.request("GET", "/health")[0] == 200
+    out, err = capfd.readouterr()
+    logs = log_buffer.getvalue()[start:]
+    assert "RuntimeError" in logs and "Traceback" not in out + err
+    assert "127.0.0.1" not in out + err
+    assert_no_leak(logs + out + err, [tok])
 
 
 # ------------------------------------------------------------------ admin + storage

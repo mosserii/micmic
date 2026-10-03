@@ -147,7 +147,8 @@ def _screen_label(ax, el) -> str:
     return ""
 
 
-def _screen_recording_granted() -> bool:
+def _preflight_granted() -> bool:
+    """The real reading from macOS. Only _screen_recording_granted calls it."""
     try:
         import Quartz
         # Preflight only: it reads the current grant and never puts up a prompt.
@@ -158,10 +159,100 @@ def _screen_recording_granted() -> bool:
         return False
 
 
+def _screen_recording_granted() -> bool:
+    """May MicMic capture the screen right now? Every capture path and permissions()
+    asks this, so a test fake (_fake_screen_state) steers all of them the same way as
+    screen_recording_state(): "granted" is True, anything else False, and the real
+    preflight is never read while a fake is set."""
+    fake = _fake_screen_state()
+    if fake is not None:
+        return fake == "granted"
+    return _preflight_granted()
+
+
 def permissions() -> dict:
     ax = apps._ax()
     accessibility = bool(ax and ax["trusted"]())
     return {"accessibility": accessibility, "screen_recording": _screen_recording_granted()}
+
+
+# ---------------------------------------------------------------- Screen Recording state
+# CGPreflightScreenCaptureAccess() only says yes or no. "No" covers two very different
+# situations: macOS has never been asked (MicMic is not even in the Screen Recording
+# list yet, so "turn MicMic on there" sends her looking for a row that does not exist),
+# and she was asked and said no (or turned it on, and macOS wants MicMic reopened
+# before it counts). macOS keeps the difference in a database MicMic cannot read
+# without Full Disk Access, so MicMic keeps its own note: whoever asks (consent.py,
+# lane L4, with CGRequestScreenCaptureAccess) calls note_screen_recording_asked()
+# right after. Nothing in this file ever asks.
+SCREEN_ASKED_MARKER = "screen_recording_asked"
+SCREEN_STATES = ("granted", "not_asked", "denied")
+
+
+def _screen_asked_marker():
+    from ..paths import state
+    return state(SCREEN_ASKED_MARKER)
+
+
+def _fake_screen_state() -> str | None:
+    """Tests: MICMIC_FAKE_SCREEN_RECORDING=granted|not_asked|denied, or a
+    "screen_recording" key in MICMIC_FAKE_PERMISSIONS (the table onboarding_api.py
+    fakes the other permissions with). None only when neither is set.
+
+    Once either is set, nothing real is read or asked, the same promise
+    onboarding_api.py makes for its table: a value that is not one of SCREEN_STATES,
+    a table without a "screen_recording" key, or a table that is not JSON all read
+    as "not_asked" (onboarding_api's default for a kind it was not given), never as
+    a fall back to the real preflight or the real "asked" note."""
+    raw = os.environ.get("MICMIC_FAKE_SCREEN_RECORDING", "").strip()
+    if raw:
+        return raw if raw in SCREEN_STATES else "not_asked"
+    table = os.environ.get("MICMIC_FAKE_PERMISSIONS")
+    if not table:
+        return None
+    try:
+        import json
+        d = json.loads(table)
+        raw = str(d.get("screen_recording") or "") if isinstance(d, dict) else ""
+    except ValueError:
+        raw = ""
+    return raw if raw in SCREEN_STATES else "not_asked"
+
+
+def screen_recording_asked() -> bool:
+    """Has MicMic ever put the Screen Recording question to macOS on this Mac?"""
+    try:
+        return _screen_asked_marker().exists()
+    except OSError:
+        return False
+
+
+def note_screen_recording_asked() -> bool:
+    """Called by whoever just asked (consent.ask_screen_recording, lane L4), right
+    after CGRequestScreenCaptureAccess(). True when the note was kept. Never asks."""
+    try:
+        _screen_asked_marker().write_text(time.strftime("%Y-%m-%d %H:%M:%S"))
+        return True
+    except OSError:
+        return False
+
+
+def screen_recording_state() -> str:
+    """One of "granted" | "not_asked" | "denied", read without ever putting up a prompt.
+
+    "granted": MicMic can capture now.
+    "not_asked": MicMic has never asked, so it is not in the Screen Recording list
+        yet. The router hands this to the ask (MicMic's own line, then macOS's).
+    "denied": asked before and still not on. Either she said no, or she turned it on
+        and macOS wants MicMic reopened first (Screen Recording only counts after a
+        relaunch). The honest line covers both; macOS will not prompt a second time.
+    """
+    fake = _fake_screen_state()
+    if fake is not None:
+        return fake
+    if _screen_recording_granted():
+        return "granted"
+    return "denied" if screen_recording_asked() else "not_asked"
 
 
 def _lsappinfo(args: list[str]) -> str:
@@ -513,25 +604,122 @@ def screenshot_png(max_px: int = 1600, pid: int | None = None) -> bytes | None:
         return None
 
 
-DESKTOP = os.path.expanduser("~/Desktop")
+DESKTOP = os.path.expanduser("~/Desktop")   # kept for anything that still names it; nothing here saves there
+
+# Where MicMic keeps the pictures it takes: ~/Pictures/MicMic. Not the Desktop: the
+# Desktop, Documents and Downloads are folders macOS guards with a prompt of its own
+# ("MicMic would like to access files in your Desktop folder"), and a screenshot was
+# the first thing to put that prompt up, with no line from MicMic before it. Pictures
+# is not guarded (only the Photos library inside it is), so writing there, and
+# reading the file back for the clipboard, asks nothing.
+SHOTS_DIR = os.path.expanduser("~/Pictures/MicMic")
+SHOTS_LABEL = "Pictures/MicMic"
+_PROTECTED = ("~/Desktop", "~/Documents", "~/Downloads", "~/Library/Mobile Documents",
+              "/Volumes")
+
+
+def in_protected_folder(path: str) -> bool:
+    """Is `path` inside a folder macOS guards with its own Files & Folders prompt?"""
+    real = os.path.realpath(os.path.expanduser(path))
+    for root in _PROTECTED:
+        r = os.path.realpath(os.path.expanduser(root))
+        if real == r or real.startswith(r + os.sep):
+            return True
+    return False
+
+
+def shots_dir() -> str:
+    """The folder screenshots go to, created if it is not there yet: ~/Pictures/MicMic
+    (MICMIC_SHOTS_DIR overrides it, which is how a test keeps her real folders out of
+    it). If that cannot be made, MicMic's own Application Support folder. Never a
+    folder macOS guards (in_protected_folder): an override pointing at one is ignored
+    rather than obeyed. Raises OSError only when not even the fallback can be made."""
+    override = os.environ.get("MICMIC_SHOTS_DIR", "").strip()
+    picks = []
+    if override and not in_protected_folder(override):
+        picks.append(os.path.expanduser(override))
+    picks.append(SHOTS_DIR)
+    for d in picks:
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            continue
+        if os.path.isdir(d) and os.access(d, os.W_OK):
+            return d
+    from ..paths import state_dir
+    d = os.path.join(str(state_dir()), "Screenshots")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _shot_path(kind: str) -> str:
+    """A name nothing is using yet: two shots in the same second must not land on
+    one file (the second would overwrite the first, and a cancelled drag would read
+    the earlier picture as its own)."""
+    d = shots_dir()
+    ts = time.strftime("%Y-%m-%d %H.%M.%S")
+    path = os.path.join(d, f"MicMic {kind} {ts}.png")
+    n = 2
+    while os.path.exists(path) and n < 1000:
+        path = os.path.join(d, f"MicMic {kind} {ts} ({n}).png")
+        n += 1
+    return path
+
+
+def folder_label(path: str) -> str:
+    """The folder `path` is in, as words to say out loud: "Pictures/MicMic" for the
+    usual place, otherwise the folder relative to her home."""
+    d = os.path.dirname(path)
+    if os.path.realpath(d) == os.path.realpath(SHOTS_DIR):
+        return SHOTS_LABEL
+    home = os.path.expanduser("~")
+    return d[len(home) + 1:] if d.startswith(home + os.sep) else d
+
+
+def _to_clipboard(path: str) -> bool:
+    """The picture itself onto the clipboard. mac.copy_file_to_clipboard first (the
+    path every send already uses); if that fails, the clipboard directly from this
+    process, which needs no osascript at all. True only when one of them worked."""
+    try:
+        if mac.copy_file_to_clipboard(path):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    pb = _pasteboard()
+    if pb is None:
+        return False
+    try:
+        from Foundation import NSData
+        data = NSData.dataWithContentsOfFile_(path)
+        if data is None or not data.length():
+            return False
+        pb.clearContents()
+        return bool(pb.setData_forType_(data, "public.png"))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def take_screenshot(pid: int | None = None) -> dict:
     """Capture the screen (or `pid`'s front window) and save it where she can find
-    it: her own Desktop, under a name that says what it is and when, never a temp
-    file this module then has to remember to clean up - there is no cleanup path
-    anywhere in this project (tests/test_micmic.py, rule 2), so an undo was never on
-    the table and this does not pretend otherwise. Also copies the image onto the
-    clipboard, so a paste into any app drops the picture without a Finder trip.
+    it: ~/Pictures/MicMic (shots_dir), under a name that says what it is and when,
+    never a temp file this module then has to remember to clean up - there is no
+    cleanup path anywhere in this project (tests/test_micmic.py, rule 2), so an undo
+    was never on the table and this does not pretend otherwise. Also copies the image
+    onto the clipboard, so a paste into any app drops the picture without a Finder trip.
 
-    {"ok": True, "path": ...} on success. {"ok": False, "why": "screen_recording"}
-    when the permission is not granted, or {"ok": False, "why": "no_window"} /
-    {"ok": False, "why": "capture_failed"} otherwise. Never raises.
+    {"ok": True, "path": ..., "folder": "Pictures/MicMic", "clipboard": bool} on
+    success: "folder" is the place to name when saying where it went, "clipboard"
+    whether the copy really worked. {"ok": False, "why": "screen_recording"} when the
+    permission is not granted (screen_recording_state() tells the caller whether to
+    ask or to explain), or {"ok": False, "why": "no_window"} / {"ok": False, "why":
+    "capture_failed"} otherwise. Never raises.
     """
     if not _screen_recording_granted():
         return {"ok": False, "why": "screen_recording"}
-    ts = time.strftime("%Y-%m-%d %H.%M.%S")
-    path = os.path.join(DESKTOP, f"MicMic screenshot {ts}.png")
+    try:
+        path = _shot_path("screenshot")
+    except Exception:  # noqa: BLE001
+        return {"ok": False, "why": "capture_failed"}
     if pid:
         wid = _front_window_id(pid)
         if wid is None:
@@ -545,8 +733,8 @@ def take_screenshot(pid: int | None = None) -> dict:
         return {"ok": False, "why": "capture_failed"}
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         return {"ok": False, "why": "capture_failed"}
-    mac.copy_file_to_clipboard(path)
-    return {"ok": True, "path": path}
+    clip = _to_clipboard(path)
+    return {"ok": True, "path": path, "folder": folder_label(path), "clipboard": clip}
 
 
 # Two minutes is generous for a drag she may need both hands and her glasses for,
@@ -570,9 +758,8 @@ def capture_region(on_start=None) -> dict:
     raises."""
     if not _screen_recording_granted():
         return {"ok": False, "why": "screen_recording"}
-    ts = time.strftime("%Y-%m-%d %H.%M.%S")
-    path = os.path.join(DESKTOP, f"MicMic selection {ts}.png")
     try:
+        path = _shot_path("selection")
         proc = subprocess.Popen(["screencapture", "-i", "-x", path])
     except Exception:  # noqa: BLE001
         return {"ok": False, "why": "capture_failed"}
@@ -591,8 +778,196 @@ def capture_region(on_start=None) -> dict:
         return {"ok": False, "why": "capture_failed"}
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         return {"ok": False, "why": "cancelled"}
-    mac.copy_file_to_clipboard(path)
-    return {"ok": True, "path": path}
+    clip = _to_clipboard(path)
+    return {"ok": True, "path": path, "folder": folder_label(path), "clipboard": clip}
+
+
+# ---------------------------------------------------------------- without Screen Recording
+# Two ways to still get her a screenshot when MicMic may not capture one itself. Both
+# use macOS's own screenshot tools, which capture with their own rights, so neither
+# needs Screen Recording for MicMic and neither puts up a prompt.
+#
+#  1. "take a screenshot": open the Screenshot app (open_screenshot_app). She clicks
+#     Capture; it saves wherever she usually saves screenshots.
+#  2. "send this screen to Dana": she presses Control-Shift-Command-4 and drags, and
+#     macOS puts the picture on the clipboard. MicMic does not press those keys for
+#     her (a keystroke needs Accessibility, and a blind one could land anywhere): it
+#     says them, watches the clipboard for the new picture (clipboard_count, then
+#     wait_for_clipboard_image), and then opens the chat for her to paste.
+#     Pasting it herself (Command-V) is the first choice for EVERY channel: it is her
+#     own paste, so macOS asks nothing. save_clipboard_image keeps a copy in
+#     shots_dir only for a send that truly needs a file, and it reads the picture's
+#     bytes from MicMic's own process, which newer macOS (26 and later) can answer
+#     with its own "MicMic would like to paste from ..." alert. So it checks
+#     paste_access() first and, unless the caller has already said MicMic's own line
+#     and passes allow_ask=True, refuses with "would_ask" instead of letting that
+#     alert come up unannounced. Watching the counter and the types (clipboard_count,
+#     clipboard_has_image) never reads the data, and never asks.
+SCREENSHOT_APP = "Screenshot"
+CLIPBOARD_KEYS = "Control-Shift-Command-4"
+_IMAGE_TYPES = ("public.png", "public.tiff")
+
+
+def open_screenshot_app() -> tuple[bool, str]:
+    """Open macOS's own Screenshot app (the Command-Shift-5 toolbar). Needs no
+    permission. (True, "opened") only when `open` says it worked, else
+    (False, "open_failed"). Never raises, and never claims a picture was taken:
+    she clicks Capture herself."""
+    try:
+        p = subprocess.run(["open", "-a", SCREENSHOT_APP], capture_output=True, text=True,
+                           timeout=_CMD_TIMEOUT)
+    except Exception:  # noqa: BLE001
+        return False, "open_failed"
+    return (True, "opened") if getattr(p, "returncode", 1) == 0 else (False, "open_failed")
+
+
+def _pasteboard():
+    try:
+        from AppKit import NSPasteboard
+        return NSPasteboard.generalPasteboard()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def clipboard_count() -> int:
+    """The clipboard's change counter right now, -1 when it cannot be read. Take it
+    BEFORE telling her the keys and hand it to wait_for_clipboard_image, so a picture
+    that was already on the clipboard is never mistaken for the new one."""
+    pb = _pasteboard()
+    try:
+        return int(pb.changeCount()) if pb is not None else -1
+    except Exception:  # noqa: BLE001
+        return -1
+
+
+def clipboard_has_image() -> bool:
+    pb = _pasteboard()
+    try:
+        types = [str(t) for t in (pb.types() or [])] if pb is not None else []
+    except Exception:  # noqa: BLE001
+        return False
+    return any(t in types for t in _IMAGE_TYPES)
+
+
+def wait_for_clipboard_image(since: int, timeout: float = REGION_CAPTURE_TIMEOUT,
+                             poll: float = 0.3, cancel=None) -> tuple[bool, str]:
+    """Wait until the clipboard changes after `since` (from clipboard_count) and holds
+    a picture. BLOCKS: run it on a background thread, like capture_region.
+
+    (True, "on_clipboard"): a new picture is there, ready to paste.
+    (False, "not_an_image"): the clipboard changed, but to something else.
+    (False, "timeout") / (False, "cancelled"): nothing came. `cancel`, when given, is
+        a callable checked every round; True stops the wait.
+    (False, "no_clipboard"): the clipboard could not be read at all.
+    """
+    if since < 0 or _pasteboard() is None:
+        return False, "no_clipboard"
+    end = time.monotonic() + max(0.0, timeout)
+    while True:
+        if cancel is not None:
+            try:
+                if cancel():
+                    return False, "cancelled"
+            except Exception:  # noqa: BLE001
+                pass
+        now = clipboard_count()
+        if now < 0:
+            return False, "no_clipboard"
+        if now != since:
+            return (True, "on_clipboard") if clipboard_has_image() else (False, "not_an_image")
+        if time.monotonic() >= end:
+            return False, "timeout"
+        time.sleep(poll)
+
+
+# NSPasteboardAccessBehavior (macOS 15.4 and later). Spelled out here so a PyObjC
+# without the constants still reads the number right.
+_PB_DEFAULT, _PB_ASK, _PB_ALLOW, _PB_DENY = 0, 1, 2, 3
+PASTE_ACCESS = ("free", "ask", "denied")
+
+
+def paste_access() -> str:
+    """Would reading the clipboard's data from MicMic's process put up a macOS alert?
+
+    "free":   no alert. macOS before pasteboard privacy (no accessBehavior at all), or
+              she chose Always Allow for MicMic.
+    "ask":    macOS would show its own "MicMic would like to paste" alert. Also the
+              answer for the system default, the conservative reading: on macOS 26
+              the default is to ask, and guessing "free" wrongly is exactly the
+              unannounced prompt this exists to prevent.
+    "denied": she chose Never; a read gets nothing, so do not try.
+
+    Reading accessBehavior itself never asks. MICMIC_FAKE_PASTE_ACCESS=free|ask|denied
+    fakes it for tests (any other value reads as "ask"); no clipboard at all is
+    "denied"."""
+    fake = os.environ.get("MICMIC_FAKE_PASTE_ACCESS", "").strip()
+    if fake:
+        return fake if fake in PASTE_ACCESS else "ask"
+    pb = _pasteboard()
+    if pb is None:
+        return "denied"
+    getter = getattr(pb, "accessBehavior", None)
+    if getter is None:
+        return "free"
+    try:
+        v = int(getter())
+    except Exception:  # noqa: BLE001
+        return "ask"
+    if v == _PB_ALLOW:
+        return "free"
+    if v == _PB_DENY:
+        return "denied"
+    return "ask"
+
+
+def save_clipboard_image(allow_ask: bool = False) -> tuple[bool, str]:
+    """Keep the picture on the clipboard as a PNG in shots_dir, for a send that needs
+    a file (an iMessage attachment). Reads the clipboard in this process: no
+    osascript, and no prompt unless the caller allows one.
+
+    Prefer having her paste (Command-V) over this: call it only when a file is truly
+    needed. Before reading, paste_access() is checked:
+      "denied"                      -> (False, "paste_denied"), nothing read.
+      "ask" and not allow_ask       -> (False, "would_ask"), nothing read: fall back
+                                       to the paste line, or say MicMic's own line
+                                       first and call again with allow_ask=True.
+      "free", or "ask" + allow_ask  -> the read happens.
+    (True, path) or (False, "no_image" | "save_failed" | "would_ask" | "paste_denied").
+    """
+    pb = _pasteboard()
+    if pb is None:
+        return False, "no_image"
+    access = paste_access()
+    if access == "denied":
+        return False, "paste_denied"
+    if access == "ask" and not allow_ask:
+        return False, "would_ask"
+    try:
+        data = pb.dataForType_("public.png")
+        if data is None:
+            tiff = pb.dataForType_("public.tiff")
+            if tiff is None:
+                return False, "no_image"
+            from AppKit import NSBitmapImageRep, NSBitmapImageFileTypePNG
+            rep = NSBitmapImageRep.imageRepWithData_(tiff)
+            data = (rep.representationUsingType_properties_(NSBitmapImageFileTypePNG, {})
+                    if rep is not None else None)
+            if data is None:
+                return False, "no_image"
+        raw = bytes(data)
+    except Exception:  # noqa: BLE001
+        return False, "no_image"
+    if not raw:
+        return False, "no_image"
+    try:
+        path = _shot_path("selection")
+        with open(path, "wb") as fh:
+            fh.write(raw)
+        if os.path.getsize(path) == 0:
+            return False, "save_failed"
+    except Exception:  # noqa: BLE001
+        return False, "save_failed"
+    return True, path
 
 
 # ---------------------------------------------------------------- redaction

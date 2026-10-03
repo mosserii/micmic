@@ -139,8 +139,13 @@ def _one_at_a_time(fn):
 
 @_one_at_a_time
 def _read_whatsapp() -> list[dict]:
+    # Not even a stat inside WhatsApp's container before she has been asked: a look in
+    # there is what raises macOS's "would like to access data from other apps".
+    if not may_touch():
+        return []
     src = WA_DIR / "ContactsV2.sqlite"
     if not src.exists():
+        _STATUS["whatsapp"] = "absent"
         return []
     tmp = Path(tempfile.gettempdir()) / "micmic_wa_contacts.sqlite"
     try:
@@ -153,7 +158,12 @@ def _read_whatsapp() -> list[dict]:
         # the first read of the contents never comes back. In-process that hung the
         # whole server, so `_read_whatsapp() or _read_macos()` never reached its
         # fallback. A separate process can simply be abandoned.
-        if not _copy_with_timeout(src, tmp):
+        #
+        # The first read just after she said Continue to MicMic's line waits for her
+        # answer to macOS's own question (FIRST_COPY_WAIT), so an Allow lets that same
+        # turn go on. Every other read keeps the short timeout.
+        if not _copy_with_timeout(src, tmp, FIRST_COPY_WAIT if _PATIENT[0] else COPY_TIMEOUT):
+            _STATUS["whatsapp"] = "blocked"
             return []
         for suffix in ("-wal", "-shm"):
             side = src.with_name(src.name + suffix)
@@ -173,22 +183,37 @@ def _read_whatsapp() -> list[dict]:
                          "phone": (phone or "").strip(), "waid": (waid or "").strip(),
                          "source": "whatsapp"})
         con.close()
+        _STATUS["whatsapp"] = "ok" if rows else "empty"
         return rows
     except Exception:  # noqa: BLE001
+        _STATUS["whatsapp"] = "error"
         return []
 
 
 def _read_macos() -> list[dict]:
+    # The Contacts app through osascript is macOS's Automation question the first time.
+    if not may_touch():
+        return []
     try:
         p = subprocess.run(["osascript", "-e",
                             'tell application "Contacts" to get name of every person'],
                            capture_output=True, text=True, timeout=25)
-        if p.returncode != 0 or not p.stdout.strip():
+        if p.returncode != 0:
+            # -1743: Automation refused (or never answered); anything else, the app failed.
+            _STATUS["macos"] = "blocked" if "1743" in (p.stderr or "") else "error"
             return []
+        if not p.stdout.strip():
+            _STATUS["macos"] = "empty"
+            return []
+        _STATUS["macos"] = "ok"
         return [{"name": n.strip(), "first": n.strip().split(" ")[0], "phone": "",
                  "waid": "", "source": "macos"}
                 for n in p.stdout.split(",") if n.strip()]
+    except subprocess.TimeoutExpired:
+        _STATUS["macos"] = "timeout"
+        return []
     except Exception:  # noqa: BLE001
+        _STATUS["macos"] = "error"
         return []
 
 
@@ -261,6 +286,28 @@ def may_read_first() -> bool:
     return yes
 
 
+# THE one gate in front of WhatsApp's container and the Contacts app (owner's fresh
+# 1.2.4 install, 2026-10-03): the day's briefing, on a music turn, read the message
+# store, and macOS asked "MicMic would like to access data from other apps" before
+# MicMic had said a word about it. Every reader in this file asks this first, so no
+# caller, present or future, raises that prompt: until a read has worked on this Mac,
+# only the read her own request about a person makes after MicMic's line
+# (may_read_first said yes) goes ahead, or an emergency (permit), which deliberately
+# does not wait for a line.
+_permit_until = [0.0]
+PERMIT_FOR = 60.0
+
+
+def may_touch() -> bool:
+    """May anything look inside WhatsApp's container or ask the Contacts app now?"""
+    return _first_ok[0] is True or _permit_until[0] > time.time() or read_before()
+
+
+def permit(seconds: float = PERMIT_FOR) -> None:
+    """An emergency: whoever she talks to is a better guess than nobody, prompt or not."""
+    _permit_until[0] = time.time() + seconds
+
+
 def _note_read_ok(source: str) -> None:
     try:
         _ok_marker().write_text(source)
@@ -268,9 +315,26 @@ def _note_read_ok(source: str) -> None:
         pass
 
 
-def _load_now() -> list[dict]:
+# What the last read of each source found: "" (not tried), "ok", "empty", "absent" (no
+# WhatsApp on this Mac), "blocked" (macOS said no, or has not been answered yet),
+# "timeout", "error". unreadable() turns this into what she is told.
+_STATUS: dict = {"whatsapp": "", "macos": ""}
+_ATTEMPTED = [0.0]                  # when a load last started (0: never, in this run)
+_PATIENT = [False]                  # the first read after her Continue: wait for macOS
+FIRST_COPY_WAIT = 20.0              # ...for her answer to "data from other apps"
+FIRST_READ_WAIT = 25.0              # what that turn waits in all, inside its 45 s
+RECHECK_GAP = 3.0                   # a turn about a person re-reads at most this often
+RECHECK_WAIT = 2.5                  # and waits this long for it
+
+
+def _load_now(patient: bool = False) -> list[dict]:
     """The slow part, run on whatever thread calls it."""
-    rows = _read_whatsapp() or _read_macos()
+    _ATTEMPTED[0] = time.time()
+    _PATIENT[0] = patient
+    try:
+        rows = _read_whatsapp() or _read_macos()
+    finally:
+        _PATIENT[0] = False
     if rows:
         _note_read_ok(rows[0].get("source") or "macos")
     seen, uniq = set(), []
@@ -284,7 +348,7 @@ def _load_now() -> list[dict]:
     return uniq
 
 
-def _refresh_in_background() -> None:
+def _refresh_in_background(patient: bool = False) -> None:
     with _LOAD_LOCK:
         if _LOADING.is_set():
             return                      # one loader at a time
@@ -292,7 +356,7 @@ def _refresh_in_background() -> None:
 
     def work():
         try:
-            if not _load_now():
+            if not (_load_now(True) if patient else _load_now()):
                 # Permission refused, WhatsApp not installed, nothing there. Remember
                 # that, so every later request does not pay the waiting budget again
                 # for an answer that is not coming.
@@ -317,6 +381,8 @@ def all_contacts(force: bool = False, wait: float | None = None) -> list[dict]:
     fresh = _CACHE["rows"] and now - _CACHE["at"] < CACHE_SECONDS
     if fresh and not force:
         return _CACHE["rows"]
+    if not may_touch():
+        return _CACHE["rows"]           # not asked yet: nothing is read, nothing failed
 
     recently_failed = time.time() - _LAST_FAIL[0] < RETRY_AFTER
     if not (recently_failed and not force):
@@ -335,7 +401,85 @@ def all_contacts(force: bool = False, wait: float | None = None) -> list[dict]:
     return _CACHE["rows"]
 
 
+def _wait_for_load(wait: float) -> list[dict]:
+    """Until the book is in, the loader gives up, or `wait` runs out."""
+    deadline = time.time() + max(0.0, wait)
+    while time.time() < deadline and not _CACHE["rows"] and _LOADING.is_set():
+        time.sleep(0.05)
+    return _CACHE["rows"]
+
+
+def never_tried() -> bool:
+    """No read of her book has started in this run."""
+    return not _ATTEMPTED[0] and not _CACHE["rows"]
+
+
+def first_read(wait: float = FIRST_READ_WAIT) -> list[dict]:
+    """The just-in-time read, right after she said Continue to MicMic's line.
+
+    macOS asks its own question now ("data from other apps" for WhatsApp, Automation
+    for the Contacts app), and the read blocks until she answers it. Owner's fresh
+    1.2.4 install: the turn waited LOAD_BUDGET (2.5 s), she clicked the Automation
+    prompt a second later, and she heard "I don't have Tamar in your contacts" from a
+    book nobody had read. This waits for her answer, up to `wait`, so an Allow lets
+    this very turn go on and send."""
+    if not may_touch():
+        return []
+    _LAST_FAIL[0] = 0.0
+    _refresh_in_background(patient=True)
+    return _wait_for_load(wait)
+
+
+def recheck(wait: float = RECHECK_WAIT) -> list[dict]:
+    """A turn about a person after a read that found nothing: allowed since?
+
+    A failed load used to be believed for RETRY_AFTER (120 s), so her answer to "who
+    should I send it to?" a moment after switching it on still found nothing. macOS
+    remembers her answer to both questions, so a refused read is refused at once and
+    never asks again: re-reading is cheap, and done at most every RECHECK_GAP."""
+    if _CACHE["rows"] or not may_touch():
+        return _CACHE["rows"]
+    if not _LOADING.is_set() and time.time() - _ATTEMPTED[0] >= RECHECK_GAP:
+        _LAST_FAIL[0] = 0.0
+        _refresh_in_background()
+    return _wait_for_load(wait)
+
+
+def unreadable() -> str:
+    """Why her book has nobody in it, or "" when it has someone.
+
+    "not_asked": MicMic may not look yet (she has not said Continue, or said Not now);
+    "waiting": macOS's own question is still on the screen; "whatsapp": WhatsApp's
+    data was refused; "automation": the Contacts app was; "none": read, and empty."""
+    if all_contacts(wait=0.0):
+        return ""
+    if not may_touch():
+        return "not_asked"
+    if _LOADING.is_set():
+        return "waiting"
+    wa, mc = _STATUS["whatsapp"], _STATUS["macos"]
+    if wa in ("blocked", "error"):
+        return "whatsapp"
+    if mc in ("blocked", "timeout", "error"):
+        return "automation"
+    return "none" if (wa or mc) else "not_asked"
+
+
+def ask_again_next_time() -> None:
+    """Her next request about a person shows MicMic's line again, even after a Not now."""
+    _first_ok[0] = None
+
+
+def said_not_now() -> bool:
+    """Did she answer MicMic's line with Not now (still holding)? Only then may a reply
+    say "since you said not now"."""
+    ans = _first_ok[0]
+    return isinstance(ans, float) and time.time() - ans < DECLINE_FOR
+
+
 def _copy_db(name: str) -> Path | None:
+    if not may_touch():
+        return None                    # the gate above: not even a look inside
     src = WA_DIR / name
     if not src.exists():
         return None
@@ -402,6 +546,8 @@ def _refresh_recent_in_background() -> None:
 def recent_chats(limit: int = 30) -> list[dict]:
     """Who she actually talks to, newest first. A thousand contacts, but she has
     perhaps twenty real correspondents, and those are the ones she means."""
+    if not may_touch():
+        return []                      # and not cached: the first real read fills it
     rows = _RECENT["rows"]
     if rows is None or limit > RECENT_ROWS:
         rows = _load_recent() if limit <= RECENT_ROWS else _read_recent(limit)
@@ -466,6 +612,30 @@ def unread_summary(limit: int = 8) -> list[dict]:
     clean = lambda t: re.sub(r"\s+", " ", (t or "")).strip()[:280]
     return [{"who": clean(w) or "?", "text": clean(t), "at": (d or 0) + 978307200}
             for w, t, d in rows]
+
+
+WA_APPS = (Path("/Applications/WhatsApp.app"), Path.home() / "Applications/WhatsApp.app")
+
+
+def messages_access() -> str:
+    """Why unread_summary() may have come back empty for a reason other than "no new
+    messages", read without touching anything new (PERMISSION_FALLBACKS.md P0-7):
+    "not_asked" (MicMic may not look yet: may_touch), "absent" (no WhatsApp app on
+    this Mac), "denied" (the message store could not be copied: macOS refused or has
+    not been answered, or it is not where WhatsApp keeps it), else "ok". Only a stat
+    of the store, and only when may_touch() already allows looking inside."""
+    if not may_touch():
+        return "not_asked"
+    if not any(p.exists() for p in WA_APPS):
+        return "absent"
+    if _recent_copy_failure("ChatStorage.sqlite"):
+        return "denied"
+    try:
+        if not (WA_DIR / "ChatStorage.sqlite").exists():
+            return "denied"
+    except OSError:
+        return "denied"
+    return "ok"
 
 
 def messages_from(name_fragment: str, limit: int = 5) -> list[dict]:

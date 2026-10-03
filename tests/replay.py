@@ -36,13 +36,51 @@ import json
 import os
 import re
 import threading
+import time
 from pathlib import Path
 
 RECORDING = Path(__file__).resolve().parent / "recordings" / "test_micmic.jsonl"
 MODE = os.environ.get("MICMIC_REPLAY", "replay").strip().lower()
 ALLOW_LIVE = os.environ.get("MICMIC_REPLAY_ALLOW_LIVE", "").strip().lower() in ("1", "true", "yes")
 
-counts = {"replayed": 0, "live": 0}
+# MICMIC_REPLAY_STUB_MISSES=1 (replay mode only, never with ALLOW_LIVE): a MISS gets a
+# fixed made-up answer instead of raising, so a dry run reaches every request the suite
+# would make and two dry runs can be compared request for request (with MICMIC_REPLAY_DUMP).
+# Checks after a stubbed answer mean nothing; the run is for determinism, not results.
+STUB_MISSES = (MODE == "replay" and not ALLOW_LIVE and os.environ.get(
+    "MICMIC_REPLAY_STUB_MISSES", "").strip().lower() in ("1", "true", "yes"))
+
+# MICMIC_REPLAY_DELAY_MS=<n>: every replayed or stubbed answer waits n ms first, the way
+# a live round trip does. A request that changes with this is a request that depends on
+# the wall clock, and it will not replay: the determinism check runs with and without it.
+try:
+    DELAY_S = max(0.0, float(os.environ.get("MICMIC_REPLAY_DELAY_MS") or 0) / 1000.0)
+except ValueError:
+    DELAY_S = 0.0
+
+counts = {"replayed": 0, "live": 0, "stubbed": 0}
+
+
+def _stub_answers(questions: dict) -> dict:
+    """The first option of every question, with full confidence. Deterministic."""
+    out = {}
+    for name, q in (questions or {}).items():
+        kind = (q or {}).get("type") if isinstance(q, dict) else None
+        crit = (q or {}).get("criteria") if isinstance(q, dict) else None
+        if kind == "noul":
+            out[name] = {"type": "noul", "noul": 0.0}
+        elif kind == "score":
+            n = len(crit) if isinstance(crit, (list, dict)) and crit else 1
+            probs = {str(i): (1.0 if i == 0 else 0.0) for i in range(n)}
+            out[name] = {"type": "score", "score": 0.0, "confidence": 1.0,
+                         "legend": {str(i): str(c) for i, c in enumerate(crit or [])}
+                         if isinstance(crit, list) else {}, "probabilities": probs}
+        else:
+            opts = list(crit) if isinstance(crit, (list, dict)) else []
+            pick = opts[0] if opts else ""
+            out[name] = {"type": kind or "choice", "choice": pick, "confidence": 1.0,
+                         "probabilities": {o: (1.0 if o == pick else 0.0) for o in opts}}
+    return out
 
 _lock = threading.Lock()
 _store: dict[str, dict] = {}
@@ -109,9 +147,22 @@ def _load() -> None:
             _store[d.get("req") or d["key"]] = d["response"]
 
 
+# MICMIC_REPLAY_DUMP=<file>: every key this process builds is appended there with its
+# canonical body, so two runs can be diffed to find what still varies between them.
+# The body holds the suite's fixture text and whatever state the run started from,
+# so point it at a scratch file outside the repo and print only redacted diffs.
+DUMP = os.environ.get("MICMIC_REPLAY_DUMP", "").strip()
+
+
 def _key(endpoint: str, canon: dict) -> str:
     blob = json.dumps(canon, sort_keys=True, ensure_ascii=False, default=str)
-    return hashlib.sha256((endpoint + "|" + blob).encode()).hexdigest()
+    key = hashlib.sha256((endpoint + "|" + blob).encode()).hexdigest()
+    if DUMP:
+        _load()
+        with _lock, open(DUMP, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"key": key, "endpoint": endpoint, "hit": key in _store,
+                                "canon": canon}, ensure_ascii=False, default=str) + "\n")
+    return key
 
 
 def _summarize(endpoint: str, canon: dict) -> dict:
@@ -151,6 +202,8 @@ def _install_jev() -> None:
         canon = {"state": _normalize(state), "questions": _normalize(questions)}
         key = _key("jev", canon)
         if MODE != "off" and MODE != "record":
+            if DELAY_S:
+                time.sleep(DELAY_S)
             _load()
             with _lock:
                 rec = _store.get(key)
@@ -161,6 +214,9 @@ def _install_jev() -> None:
                     self.last_ms = 0.1
                 counts["replayed"] += 1
                 return rec["answers"]
+            if STUB_MISSES:
+                counts["stubbed"] += 1
+                return _stub_answers(questions)
             if not ALLOW_LIVE:
                 raise _miss("jev", key)
         before_tok = self.input_tokens
@@ -185,6 +241,8 @@ def _install_llm() -> None:
         canon = {"model": m, "payload": _normalize(payload)}
         key = _key(endpoint, canon)
         if MODE != "off" and MODE != "record":
+            if DELAY_S:
+                time.sleep(DELAY_S)
             _load()
             with _lock:
                 have = key in _store
@@ -196,6 +254,9 @@ def _install_llm() -> None:
                 self.quota_exceeded = None
                 counts["replayed"] += 1
                 return rec
+            if STUB_MISSES:
+                counts["stubbed"] += 1
+                return None                     # what a failed post returns
             if not ALLOW_LIVE:
                 raise _miss(endpoint, key)
         d = real_post(self, payload, model, timeout)
@@ -217,7 +278,9 @@ def install() -> None:
 
 
 def summary_line() -> str:
-    return f"replayed {counts['replayed']}, live {counts['live']} (MICMIC_REPLAY={MODE})"
+    stub = f", stubbed {counts['stubbed']} (dry run: results not meaningful)" if STUB_MISSES else ""
+    return (f"replayed {counts['replayed']}, live {counts['live']}{stub} "
+            f"(MICMIC_REPLAY={MODE})")
 
 
 def skip_latency() -> bool:

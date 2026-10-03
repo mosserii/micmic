@@ -21,7 +21,6 @@
   --blob-a: #a8722c; --blob-b: #9c4f47; --blob-c: #2f6b56;
   --glass: rgba(56, 50, 44, .55); --glass-edge: rgba(255, 255, 255, .16);
   --glass-line: rgba(255, 255, 255, .10); --shade: rgba(0, 0, 0, .5);
-  --key: #2a2723; --key-edge: #3b3731;
   /* Relative luminance 0.179, the one point where black and white text read equally:
      4.57:1 or better each way, on both plates. Warm under MicMic, green under Applications, the same
      way the arrow runs. Keep anything lighter or darker out from under the names. */
@@ -99,9 +98,7 @@ svg.arrow { position: absolute; left: 0; top: 0; width: 660px; height: 420px; ov
 /* ---- the quiet footer --------------------------------------------------- */
 .hint { position: absolute; left: 0; right: 0; bottom: 30px; text-align: center; font-size: 14px;
   color: var(--muted); }
-.key { display: inline-block; font-size: 12.5px; padding: 1px 8px; border-radius: 6px; margin: 0 3px;
-  background: var(--key); border: 1px solid var(--key-edge); border-bottom-width: 2px; color: var(--ink);
-  line-height: 1.45; }
+.hint b { font-weight: 500; color: var(--ink); }
 </style>
 </head>
 <body>
@@ -142,7 +139,7 @@ svg.arrow { position: absolute; left: 0; top: 0; width: 660px; height: 420px; ov
     </g>
   </svg>
 
-  <p class="hint">Then hold right <span class="key">&#8997; option</span> and say it.</p>
+  <p class="hint">Then <b>open MicMic</b> from Applications.</p>
 </div>
 </body>
 </html>

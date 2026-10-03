@@ -22,6 +22,7 @@ FAKE_JEV_KEY = "tsk-FAKE-UPSTREAM-JEV-KEY-0000111122223333"
 FAKE_GEMINI_KEY = "AIza-FAKE-UPSTREAM-GEMINI-KEY-44445555"
 FAKE_STRIPE_KEY = "sk_test_FAKE-LOCAL-ONLY-5555666677778888"
 FAKE_WEBHOOK_SECRET = "whsec_FAKE-LOCAL-ONLY-9999aaaabbbbcccc"
+FAKE_ELEVEN_KEY = "sk_FAKE-UPSTREAM-ELEVEN-KEY-ddddeeeeffff0000"
 JEV_ANSWER = {"answers": {"intent": {"choice": "music", "confidence": 0.9,
                                      "probabilities": {"music": 0.9, "call": 0.1}}},
               "usage": {"input_tokens": 1000}}
@@ -192,7 +193,7 @@ def upstream():
 # Strings that must never appear in anything the proxy writes: the upstream and Stripe
 # keys, what the user said, what was on their screen, and anything smuggled in a query string.
 SECRET_MARKERS = (FAKE_JEV_KEY, FAKE_GEMINI_KEY, FAKE_STRIPE_KEY, FAKE_WEBHOOK_SECRET,
-                  "SAID-OUT-LOUD", "SCREEN-PIXELS", "QUERY-SECRET")
+                  FAKE_ELEVEN_KEY, "SAID-OUT-LOUD", "SCREEN-PIXELS", "QUERY-SECRET")
 
 
 def assert_no_leak(text: str, tokens: list[str]) -> None:
@@ -236,3 +237,50 @@ def make_proxy(tmp_path, upstream, log_buffer, capfd):
 def jev_body(marker: str = "SAID-OUT-LOUD-play-me-some-music") -> dict:
     return {"state": f"The user said: {marker}", "model": "jev-latest",
             "questions": {"intent": {"type": "choice", "options": ["music", "call"]}}}
+
+
+# ------------------------------------------------------------------ MicMic for iPhone
+
+
+@pytest.fixture(scope="session")
+def apple_pki(tmp_path_factory):
+    """A fake Apple PKI whose root is the only one the test proxies trust."""
+    from apple_fakes import FakePKI
+    pki = FakePKI()
+    pki.roots_dir = pki.write_root(tmp_path_factory.mktemp("apple-roots"))
+    return pki
+
+
+@pytest.fixture
+def apple_leak_check(log_buffer):
+    """Nothing Apple signed for a test, and no transaction id or app account token made
+    for it, may appear in what the proxy logged."""
+    from apple_fakes import SECRET_IDS, SIGNED
+    start, n_signed, n_ids = log_buffer.tell(), len(SIGNED), len(SECRET_IDS)
+    yield
+    text = log_buffer.getvalue()[start:]
+    for jws in SIGNED[n_signed:]:
+        for part in jws.split("."):
+            assert part[:32] not in text, "a JWS reached the log"
+    for secret in SECRET_IDS[n_ids:]:
+        assert secret not in text, "a transaction id or account token reached the log"
+
+
+CONSENT = {"terms_version": "2026-10-03", "privacy_version": "2026-10-03",
+           "ai_disclosure_version": "2026-10-03",
+           "providers": ["typesafe", "google_gemini", "elevenlabs"],
+           "accepted_at": "2026-09-24T15:00:00+03:00", "locale": "he-IL",
+           "method": "checkbox", "age_18": True}
+
+
+def ios_signup(p, consent: dict | None = None, **body_over):
+    """An iPhone sign-up with the consent of PURCHASES_ACCOUNT.md 4.3."""
+    body = {"device_name": "iPhone", "app_version": "1.0.0", "platform": "ios",
+            "consent": dict(CONSENT) if consent is None else consent}
+    body.update(body_over)
+    s, d, raw, h = p.request("POST", "/v1/devices", body)
+    if s == 201:
+        from apple_fakes import SECRET_IDS
+        p.tokens.append(d["token"])
+        SECRET_IDS.append(d["apple_account_token"])
+    return s, d

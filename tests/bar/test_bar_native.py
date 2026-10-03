@@ -220,6 +220,43 @@ def test_load_and_replay():
     pump(0.2)
 
 
+def test_hint_and_send():
+    """set_hint (a tapped turn: how to send it, and Send), replayed onto a page that
+    loads late, cleared by the next state; the page's Send click reaches on_send."""
+    b = MicMicBar(SERVER)
+    b.set_state("listening", "")
+    b.set_hint("ctrl+opt+m")                        # before the page exists
+    ok = wait_for(lambda: b._ready, 10)
+    check("page loads (hint)", ok)
+    pump(0.3)
+    got = js(b, "[document.getElementById('taphint').textContent,"
+                " document.getElementById('barsend').hidden].join('|')")
+    check("a hint sent before the page loaded is replayed",
+          got is not None and "⌃⌥ M" in got and got.endswith("|false"), got)
+    calls = []
+    b.on_send = lambda: calls.append("send")
+    js(b, "document.getElementById('barsend').click(); 1")
+    wait_for(lambda: calls, 2)
+    check("clicking Send in the page calls on_send once", calls == ["send"], calls)
+    check("and the bar forgets the hint", b._m_hint is None, b._m_hint)
+    b.set_hint("right-command")
+    pump(0.2)
+    check("set_hint while listening is kept for replay", b._m_hint == "right-command", b._m_hint)
+    b.set_state("thinking", "")
+    pump(0.2)
+    hidden = js(b, "document.getElementById('barsend').hidden && !document.getElementById('taphint').textContent")
+    check("the next state clears it, here and in the page", b._m_hint is None and hidden is True,
+          (b._m_hint, hidden))
+    b.set_hint("right-command")                     # late: the turn already moved on
+    pump(0.2)
+    check("a hint arriving after the turn moved on is dropped", b._m_hint is None, b._m_hint)
+    b.on_send = None
+    b._on_message("send")                           # no listener wired: nothing breaks
+    check("send with no on_send is harmless", True)
+    b.close()
+    pump(0.2)
+
+
 def test_warm_latency(b):
     set_ui(b, "en")
     warm, occl = [], []
@@ -622,13 +659,15 @@ def test_static_no_activation():
 def main():
     proc = ensure_server()
     app = AppKit.NSApplication.sharedApplication()
-    # The listener is an LSUIElement app; an accessory policy is the same thing here.
-    app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+    # The listener is a regular app (in the Dock, since 2026-10-03): the same policy
+    # here, so the focus checks hold for the app as it ships.
+    app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyRegular)
     app.finishLaunching()
     try:
         print("\n-- static"); test_static_no_activation()
         print("\n-- placement (pure)"); test_pure_placement()
         print("\n-- load and replay"); test_load_and_replay()
+        print("\n-- tap hint and Send"); test_hint_and_send()
         b, ok = fresh_bar()
         check("bar built and warm", ok)
         print("\n-- warm latency"); test_warm_latency(b)

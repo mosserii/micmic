@@ -1,5 +1,5 @@
 /* ---- first-run onboarding ---------------------------------------------------
-   Three screens inside MicMic.app's window (?panel=1, 380x560), shown once on a Mac
+   Two screens inside MicMic.app's window (?panel=1, 380x560), shown once on a Mac
    nobody has been set up on. onboarding.js loads this sheet only then. Every rule is
    scoped to .ob or body.onboarding, so once the overlay is gone nothing here matches
    and the page is exactly the page without it. The materials are the page's own:
@@ -15,7 +15,6 @@ body.onboarding.panel .field{opacity:calc(var(--blob-alpha) * .8)}
   --ob-key:linear-gradient(180deg,#fefdfc,#f0ece7);--ob-key-ink:#4d463f;
   --ob-key-edge:rgba(40,28,16,.09);
   --ob-key-shadow:0 1px 0 rgba(40,28,16,.10),0 3px 5px -2px rgba(70,50,30,.28),inset 0 1px 0 #fff;
-  --ob-deck:linear-gradient(180deg,rgba(86,66,44,.07),rgba(86,66,44,.13));
   --ob-cta:#26805f;--ob-cta-ink:#fff;--ob-tick-ink:#fff;
   position:fixed;inset:0;z-index:50;display:flex;flex-direction:column;
   padding:10px 20px 16px;text-align:center;color:var(--ink);
@@ -24,13 +23,11 @@ body.onboarding.panel .field{opacity:calc(var(--blob-alpha) * .8)}
   --ob-key:linear-gradient(180deg,#3b3632,#2d2926);--ob-key-ink:#ece4da;
   --ob-key-edge:rgba(255,255,255,.07);
   --ob-key-shadow:0 1px 0 rgba(0,0,0,.55),0 3px 6px -2px rgba(0,0,0,.7),inset 0 1px 0 rgba(255,255,255,.08);
-  --ob-deck:linear-gradient(180deg,rgba(0,0,0,.18),rgba(0,0,0,.30));
   --ob-cta:#57c69d;--ob-cta-ink:#062b1e;--ob-tick-ink:#062b1e}}
 :root[data-theme="dark"] .ob{
   --ob-key:linear-gradient(180deg,#3b3632,#2d2926);--ob-key-ink:#ece4da;
   --ob-key-edge:rgba(255,255,255,.07);
   --ob-key-shadow:0 1px 0 rgba(0,0,0,.55),0 3px 6px -2px rgba(0,0,0,.7),inset 0 1px 0 rgba(255,255,255,.08);
-  --ob-deck:linear-gradient(180deg,rgba(0,0,0,.18),rgba(0,0,0,.30));
   --ob-cta:#57c69d;--ob-cta-ink:#062b1e;--ob-tick-ink:#062b1e}
 [dir="rtl"] .ob{--ob-dx:-28px}
 .ob.in{opacity:1}
@@ -45,18 +42,11 @@ body.onboarding.panel .field{opacity:calc(var(--blob-alpha) * .8)}
 .ob [hidden]{display:none!important}
 .ob-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 
-/* ---- progress: three short strokes, centred between the window buttons and the
-   language pill */
-.ob-top{flex:none;height:34px;display:flex;align-items:center;justify-content:center}
-.ob-prog{display:flex;gap:6px;direction:ltr}
-[dir="rtl"] .ob-prog{flex-direction:row-reverse}
-.ob-prog i{display:block;width:14px;height:4px;border-radius:99px;
-  background:color-mix(in oklab,var(--ink) 14%,transparent);
-  transition:width .55s var(--ob-ease),background-color .45s ease}
-.ob-prog i.done{background:color-mix(in oklab,var(--live) 45%,transparent)}
-.ob-prog i.on{width:30px;background:var(--live)}
+/* ---- the strip the window buttons and the language pill sit in. The one progress
+   there is, "1 of 4", is step 1's own (below): Try it is the last screen. */
+.ob-top{flex:none;height:34px}
 
-/* ---- the three screens share one frame: picture, headline, one line, footer, so
+/* ---- the screens share one frame: picture, headline, one line, footer, so
    nothing but the content moves between them */
 .ob-steps{position:relative;flex:1;min-height:0}
 .ob-step{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
@@ -67,11 +57,6 @@ body.onboarding.panel .field{opacity:calc(var(--blob-alpha) * .8)}
   transition:opacity .5s ease .08s,transform .7s var(--ob-ease) .04s,visibility 0s}
 /* a floor, not a ceiling: a long language wraps the permission rows taller */
 .ob-hero{position:relative;flex:none;width:100%;min-height:240px;padding:8px 0;display:grid;place-items:center}
-/* step 1 now carries the language choice above this picture too, so its own floor
-   gives back the room the demo never needed: without it, a taller language (Hebrew,
-   Arabic, wrapped Russian pills) pushed the centred column up into the progress dots
-   and down into the footer. */
-.ob-step[data-n="1"] .ob-hero{min-height:160px}
 /* a pool of the brand's green under whatever the picture is */
 .ob-hero::before{content:"";position:absolute;left:50%;top:50%;width:300px;height:220px;
   transform:translate(-50%,-50%);border-radius:50%;pointer-events:none;
@@ -84,23 +69,32 @@ body.onboarding.panel .field{opacity:calc(var(--blob-alpha) * .8)}
 .ob-hint{margin-top:5px;max-width:32ch;font-size:13px;line-height:1.4;color:var(--muted);
   opacity:.78;text-wrap:balance}
 
-/* ---- 0. the language choice: sits above the demo, so the rest of step 1 (and
-   everything after it) already paints in the language she just picked -------- */
-.ob-lang{flex:none;width:100%;max-width:320px;margin-bottom:6px}
-.ob-lang-t{font-size:12.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;
-  color:var(--muted);margin-bottom:8px;text-wrap:balance}
-.ob-lopts{display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
-.ob-lopt{cursor:pointer;font-size:14.5px;font-weight:500;line-height:1;color:var(--ink);
-  padding:9px 15px;border-radius:999px;white-space:nowrap;
+/* ---- 1. the language: step 1's first question, answered by choosing one. The
+   choices sit where a permission's Allow button does, two by two and all the same
+   width: four in a row did not fit 340px, and three and one read as a leftover. */
+.ob-lopts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;width:min(100%,290px)}
+.ob-lopt{cursor:pointer;font-size:15px;font-weight:500;line-height:1;color:var(--ink);
+  padding:11px 12px;border-radius:999px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
   background:var(--glass);border:1px solid var(--glass-line);
   transition:background .18s ease,border-color .18s ease,transform .15s ease}
 .ob-lopt:hover{background:color-mix(in oklab,var(--live) 12%,var(--glass))}
 .ob-lopt:active{transform:scale(.96)}
 .ob-lopt[aria-checked="true"]{background:color-mix(in oklab,var(--live) 22%,transparent);
   border-color:color-mix(in oklab,var(--live) 55%,transparent)}
-/* the status line of the local model download: shown here under the language choice,
-   and again on step 3 (below) while it is still running */
-.ob-asr{margin-top:9px;font-size:12.5px;line-height:1.4;color:var(--muted);text-wrap:balance}
+/* the status line of the local model download: under the language choice, and again
+   on Try it (below) while it is still running */
+.ob-asr,.ob-movednote{margin-top:9px;font-size:12.5px;line-height:1.4;color:var(--muted);text-wrap:balance}
+
+/* ---- the Terms line under the language screen's Continue: two short lines at most
+   in every language (the full width, small type), and only on that screen, so every
+   other screen keeps the whole frame it had. */
+.ob-legal{display:none;flex:none;margin:0 auto;max-width:100%;font-size:11px;line-height:1.35;
+  color:var(--muted);text-wrap:balance}
+.ob-legal.on{display:block;animation:obIn .45s var(--ob-ease)}
+.ob-legal-link{font-size:inherit;line-height:inherit;color:var(--ink);background:none;border:0;
+  padding:0;margin:0;cursor:pointer;text-decoration:underline;text-underline-offset:2px;
+  text-decoration-color:color-mix(in oklab,var(--ink) 35%,transparent)}
+.ob-legal-link:hover{text-decoration-color:currentColor}
 
 /* ---- footer: skip on the reading side, the one action on the other ---------- */
 .ob-foot{flex:none;height:52px;display:flex;align-items:center;justify-content:space-between;gap:12px}
@@ -141,113 +135,13 @@ body.onboarding.panel .field{opacity:calc(var(--blob-alpha) * .8)}
   80%,100%{box-shadow:0 0 0 9px color-mix(in oklab,var(--live) 0%,transparent)}}
 @keyframes obIn{from{opacity:0;transform:translateY(4px) scale(.97)}to{opacity:1;transform:none}}
 @keyframes obSpin{to{transform:rotate(360deg)}}
-
-/* ---- 1. the demo: the bar above, the keyboard below, and the right Option key
-   pressing, words arriving, letting go, an answer. Driven by onboarding.js through
-   data-p, one phase at a time, so it can be restarted and kept in step. ---------- */
-.ob-demo{position:relative;width:300px;display:flex;flex-direction:column;align-items:center;gap:20px}
-.ob-bar{position:relative;width:300px;height:66px;border-radius:21px;
-  display:flex;align-items:center;gap:12px;padding-inline:14px 16px;text-align:start;
-  background:color-mix(in srgb,var(--ground) 66%,transparent);
-  -webkit-backdrop-filter:blur(26px) saturate(190%);backdrop-filter:blur(26px) saturate(190%);
-  border:1px solid var(--glass-line);
-  box-shadow:0 22px 44px -20px var(--shade),0 2px 8px -4px rgba(0,0,0,.08),
-    inset 0 1.5px 0 -0.5px var(--glass-edge);
-  transition:opacity .6s ease,transform .6s var(--ob-ease)}
-.ob-demo[data-p="idle"] .ob-bar,.ob-demo[data-p="rest"] .ob-bar{opacity:.55;transform:scale(.965)}
-.ob-morb{position:relative;flex:none;width:36px;height:36px;border-radius:50%;
-  display:grid;place-items:center;background:var(--glass);border:1px solid var(--glass-line);
-  box-shadow:0 6px 14px -6px var(--shade),inset 0 1.5px 1px -1px var(--glass-edge),
-    inset 0 -10px 14px -12px rgba(0,0,0,.5)}
-.ob-morb::after{content:"";position:absolute;inset:0;border-radius:50%;pointer-events:none;
-  background:radial-gradient(40% 28% at 31% 19%,rgba(255,255,255,.95),rgba(255,255,255,0) 70%)}
-.ob-mcore{position:relative;width:16px;height:16px;color:var(--muted);opacity:.65;
-  transition:color .35s ease,opacity .35s ease,transform .35s var(--ob-ease)}
-.ob-mcore svg,.ob-ocore svg{width:100%;height:100%;fill:currentColor}
-.ob-mring,.ob-marc{position:absolute;inset:-4px;border-radius:50%;border:2px solid transparent;
-  opacity:0;transition:opacity .3s ease}
-.ob-mring{border-color:color-mix(in oklab,var(--live) 50%,transparent)}
-.ob-marc{border-color:color-mix(in oklab,var(--warm) 70%,transparent);
-  border-top-color:transparent;border-left-color:transparent}
-.ob-demo[data-p="press"] .ob-mcore{color:var(--live);opacity:1}
-.ob-demo[data-p="press"] .ob-mring{opacity:1;animation:obBreath 1.3s ease-in-out infinite}
-.ob-demo[data-p="work"] .ob-mcore{color:var(--warm);opacity:1;transform:scale(.8)}
-.ob-demo[data-p="work"] .ob-marc{opacity:1;animation:obSpin 1s linear infinite}
-.ob-demo[data-p="result"] .ob-mcore{color:var(--live);opacity:1}
 @keyframes obBreath{0%,100%{transform:scale(1)}50%{transform:scale(1.14)}}
 
-.ob-btext{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:3px}
-.ob-l1,.ob-l2{display:grid;min-width:0}
-.ob-l1>*,.ob-l2>*{grid-area:1/1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ob-l1{font-size:17px;line-height:22px;height:22px}
-.ob-l2{font-size:12.5px;line-height:16px;height:0;transition:height .35s var(--ob-ease)}
-.ob-demo[data-p="work"] .ob-l2,.ob-demo[data-p="result"] .ob-l2{height:16px}
-.ob-ph{color:var(--muted);opacity:0;transition:opacity .3s ease}
-.ob-demo[data-p="press"]:not([data-w]) .ob-ph{opacity:.8}
-.ob-words{transition:color .45s ease,opacity .45s ease;unicode-bidi:plaintext}
-.ob-words b{font-weight:400;display:inline-block;opacity:0;transform:translateY(6px);filter:blur(4px);
-  transition:opacity .38s ease,transform .5s var(--ob-ease),filter .45s ease}
-.ob-words b.in{opacity:1;transform:none;filter:none}
-.ob-demo[data-p="result"] .ob-words{color:var(--muted);font-size:13px}
-.ob-demo[data-p="rest"] .ob-words,.ob-demo[data-p="idle"] .ob-words{opacity:0}
-.ob-work{color:var(--warm);opacity:0;transition:opacity .25s ease}
-.ob-demo[data-p="work"] .ob-work{opacity:1}
-.ob-work::after{content:"...";display:inline-block;width:1.2em;text-align:start;
-  animation:obDots 1.2s steps(4,end) infinite}
-@keyframes obDots{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}}
-.ob-res{display:inline-flex;align-items:center;gap:5px;font-weight:500;color:var(--ink);
-  opacity:0;transform:translateY(4px);transition:opacity .4s ease,transform .5s var(--ob-ease)}
-.ob-res svg{flex:none;width:13px;height:13px;color:var(--live)}
-.ob-demo[data-p="result"] .ob-res{opacity:1;transform:none}
-/* when the answer is up it is the line that matters: it takes the big row */
-.ob-demo[data-p="result"] .ob-l1{height:17px;line-height:17px}
-.ob-demo[data-p="result"] .ob-l2{font-size:15px;line-height:20px;height:20px}
-.ob-demo[data-p="result"] .ob-res svg{width:15px;height:15px}
-
-/* the keyboard: a real Mac's bottom right corner, always left to right because the
-   keys do not move when the language does. Every key is whole: a space bar sliced off
-   by the edge and a right arrow half faded out read as a layout that did not fit. */
-.ob-kbd{position:relative;width:300px;height:70px;border-radius:17px;direction:ltr;
-  display:flex;align-items:center;justify-content:center;
-  background:var(--ob-deck);
-  box-shadow:inset 0 1px 2px rgba(0,0,0,.10),inset 0 -1px 0 rgba(255,255,255,.28)}
-.ob-row{position:relative;display:flex;gap:6px;align-items:flex-end}
-.ob-key{position:relative;flex:none;height:50px;border-radius:9px;
-  display:flex;flex-direction:column;justify-content:space-between;align-items:flex-start;
-  padding:7px 8px 6px;color:var(--ob-key-ink);
-  font:500 13px/1 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;
-  background:var(--ob-key);border:1px solid var(--ob-key-edge);box-shadow:var(--ob-key-shadow);
-  transition:transform .14s ease,color .14s ease}
-.ob-key em{position:relative;font-style:normal;font-size:15px;line-height:1}
-.ob-key small{position:relative;font-size:9.5px;line-height:1;letter-spacing:.02em;opacity:.8}
-.ob-mod{width:70px}
-.ob-fn{width:56px}
-.ob-wide{width:110px}
-.ob-letter{width:50px}
-.ob-hot{border-color:color-mix(in oklab,var(--live) 50%,transparent)}
-.ob-hot::before{content:"";position:absolute;inset:-1px;border-radius:inherit;opacity:0;
-  background:linear-gradient(180deg,color-mix(in oklab,var(--live) 70%,#fff),var(--live));
-  transition:opacity .14s ease}
-.ob-hot::after{content:"";position:absolute;inset:-1px;border-radius:inherit;opacity:0;
-  box-shadow:0 0 0 3px color-mix(in oklab,var(--live) 26%,transparent),
-    0 10px 26px -6px color-mix(in oklab,var(--live) 75%,transparent);
-  transition:opacity .2s ease}
-.ob-ripple{position:absolute;inset:-2px;border-radius:10px;border:2px solid var(--live);opacity:0}
-.ob-demo[data-p="press"] .ob-hot{transform:translateY(2px) scale(.975);color:#fff}
-.ob-demo[data-p="press"] .ob-hot::before,.ob-demo[data-p="press"] .ob-hot::after{opacity:1}
-.ob-demo[data-p="press"] .ob-ripple{animation:obRipple .9s ease-out}
-@keyframes obRipple{0%{opacity:.7;transform:scale(1)}100%{opacity:0;transform:scale(1.55,1.7)}}
-.ob-arrows{display:flex;gap:5px;align-items:flex-end}
-.ob-col{display:flex;flex-direction:column;gap:3px}
-.ob-col .ob-half{height:23.5px}
-.ob-half{width:34px;height:23.5px;border-radius:6px;padding:0;justify-content:center;align-items:center}
-.ob-half svg{width:7px;height:7px;fill:currentColor;opacity:.7}
-.ob-up svg{transform:rotate(90deg)}.ob-down svg{transform:rotate(-90deg)}.ob-right svg{transform:scaleX(-1)}
-
-/* ---- 2. one permission at a time: its picture, "1 of 3", its name, one line why,
-   one button. The picture is the state: glass while it can be asked, a turning ring
-   while macOS's dialog is up, green with a tick once it is on, amber if she said no. */
-.ob-step[data-n="2"] .ob-hero{min-height:176px}
+/* ---- 1. one question at a time: its picture, "1 of 4", its name, one line why, one
+   action (the languages, or the Allow button). The picture is the state: glass while it
+   can be asked, a turning ring while macOS's dialog is up, green with a tick once it is
+   on, amber if she said no. */
+.ob-step[data-n="1"] .ob-hero{min-height:176px}
 .ob-pcard{position:relative;width:112px;height:112px;border-radius:32px;display:grid;place-items:center;
   color:var(--muted);background:var(--glass);border:1px solid var(--glass-line);
   -webkit-backdrop-filter:blur(30px) saturate(200%);backdrop-filter:blur(30px) saturate(200%);
@@ -259,6 +153,7 @@ body.onboarding.panel .field{opacity:calc(var(--blob-alpha) * .8)}
   mix-blend-mode:screen;opacity:.7}
 .ob-pglyph{grid-area:1/1;display:none;width:46px;height:46px}
 .ob-pglyph svg{width:100%;height:100%;fill:currentColor}
+.ob-pcard[data-k="language"] .ob-pglyph[data-k="language"],
 .ob-pcard[data-k="microphone"] .ob-pglyph[data-k="microphone"],
 .ob-pcard[data-k="speech"] .ob-pglyph[data-k="speech"],
 .ob-pcard[data-k="accessibility"] .ob-pglyph[data-k="accessibility"]{display:block}
@@ -281,7 +176,7 @@ body.onboarding.panel .field{opacity:calc(var(--blob-alpha) * .8)}
 .ob-ptick svg{width:18px;height:18px}
 .ob-pcard[data-s="granted"] .ob-ptick{opacity:1;transform:none}
 .ob-pcard[data-s="granted"] .ob-ptick path{animation:obDraw .45s ease-out .12s backwards}
-/* "1 of 3", with the three as small numbered dots: done ones green, skipped ones hollow */
+/* "1 of 4", with the four as small numbered dots: done ones green, skipped ones hollow */
 .ob-pof{display:inline-flex;align-items:center;gap:10px;margin-top:2px;
   font-size:12.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}
 .ob-pdots{display:inline-flex;gap:5px;direction:ltr}
@@ -294,7 +189,7 @@ body.onboarding.panel .field{opacity:calc(var(--blob-alpha) * .8)}
 .ob-pdots i.done{color:var(--ob-tick-ink);background:color-mix(in oklab,var(--live) 70%,transparent);
   border-color:transparent}
 .ob-pdots i.skip{border-style:dashed}
-.ob-step[data-n="2"] .ob-title{margin-top:10px}
+.ob-step[data-n="1"] .ob-title{margin-top:10px}
 .ob-pdo{margin-top:16px;min-height:46px;display:flex;align-items:center;justify-content:center}
 .ob-allow,.ob-movego{font-size:16px;font-weight:500;line-height:1.15;color:var(--ob-cta-ink);max-width:100%;
   padding:14px 26px;border-radius:999px;border:0;cursor:pointer;text-wrap:balance;
@@ -317,14 +212,14 @@ body.onboarding.panel .field{opacity:calc(var(--blob-alpha) * .8)}
   transition:background .18s ease,transform .15s ease}
 .ob-on:hover{background:color-mix(in oklab,var(--live) 27%,transparent)}
 .ob-on:active{transform:scale(.96)}
-/* step 3, without Accessibility: the way to turn it on sits with the line that says so */
+/* Try it, without Accessibility: the way to turn it on sits with the line that says so */
 .ob-nokey{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;column-gap:8px;row-gap:4px}
 .ob-nokey .ob-axon{display:inline-flex;padding:6px 11px}
 @keyframes obDraw{from{stroke-dashoffset:24}to{stroke-dashoffset:0}}
 .ob svg .ck{fill:none;stroke:currentColor;stroke-width:2.7;stroke-linecap:round;
   stroke-linejoin:round;stroke-dasharray:24;stroke-dashoffset:0}
 
-/* ---- 3. the real thing -------------------------------------------------- */
+/* ---- 2. try it: the real thing, and how ------------------------------------ */
 .ob-orb{position:relative;width:128px;height:128px;border-radius:50%;border:0;padding:0;
   background:none;cursor:pointer;display:grid;place-items:center;color:var(--muted)}
 .ob-orb>*{pointer-events:none}
@@ -345,6 +240,7 @@ body.onboarding.panel .field{opacity:calc(var(--blob-alpha) * .8)}
 .ob-orb:active .ob-shell{transform:scale(.97)}
 .ob-oring{position:absolute;inset:-4px;border-radius:50%;border:2px solid transparent;
   transition:border-color .4s ease}
+.ob-ocore svg{width:100%;height:100%;fill:currentColor}
 .ob-ocore{position:relative;width:38%;height:38%;color:var(--muted);opacity:.6;
   filter:drop-shadow(0 2px 5px rgba(0,0,0,.22));animation:obIdle 3.4s ease-in-out infinite;
   transition:color .4s ease,opacity .4s ease,transform .5s var(--ob-ease)}
@@ -397,15 +293,24 @@ body.onboarding.panel .field{opacity:calc(var(--blob-alpha) * .8)}
   transition:opacity .3s ease}
 .ob-orb:hover .ob-orbt{background:color-mix(in oklab,var(--live) 24%,transparent)}
 .ob-step.ok .ob-orbt,.ob-orb[data-live="thinking"] .ob-orbt{opacity:0}
-.ob-step[data-n="3"] .ob-hero{padding-bottom:40px}
+.ob-step[data-n="2"] .ob-hero{min-height:212px;padding-bottom:40px}
 /* waiting for her: a slow ring goes out from the circle, like a thing to press */
-.ob-step[data-n="3"]:not(.ok) .ob-orb[data-live="idle"] .ob-rip{animation:obCall 2.6s ease-out infinite}
-.ob-step[data-n="3"]:not(.ok) .ob-orb[data-live="idle"] .ob-rip+.ob-rip{animation-delay:1.3s}
+.ob-step[data-n="2"]:not(.ok) .ob-orb[data-live="idle"] .ob-rip{animation:obCall 2.6s ease-out infinite}
+.ob-step[data-n="2"]:not(.ok) .ob-orb[data-live="idle"] .ob-rip+.ob-rip{animation-delay:1.3s}
 @keyframes obCall{0%{opacity:.5;transform:scale(1)}70%,100%{opacity:0;transform:scale(1.45)}}
 .ob-orb[data-live="listening"] .ob-ocore{color:var(--live);opacity:1;animation:obIdle 1.1s ease-in-out infinite}
 .ob-orb[data-live="listening"] .ob-oring{border-color:color-mix(in oklab,var(--live) 70%,transparent)}
 
-/* step 3: the key is another dictation app's (Handy on right Option) */
+/* her key, drawn as a key inside "Hold [⌘] and say": always left to right (⌘⇧M) */
+.ob-kcap{display:inline-block;direction:ltr;unicode-bidi:isolate;min-width:1.9em;margin:0 .14em;
+  padding:3px 7px 4px;border-radius:7px;vertical-align:.06em;
+  font:500 .92em/1.15 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;text-align:center;
+  color:var(--ob-key-ink);background:var(--ob-key);border:1px solid var(--ob-key-edge);
+  box-shadow:var(--ob-key-shadow)}
+/* how: hold it, let go to send, or tap it. One short line under what to say. */
+.ob-howto{margin-top:12px}
+
+/* Try it: the key is another dictation app's (Handy on right Option) */
 .ob-clash{margin-top:10px;max-width:320px;padding:10px 14px;border-radius:16px;
   background:color-mix(in oklab,var(--warm) 12%,transparent);
   border:1px solid color-mix(in oklab,var(--warm) 38%,transparent)}
@@ -439,8 +344,8 @@ body.onboarding.panel .field{opacity:calc(var(--blob-alpha) * .8)}
 /* ---- short windows: the panel can be dragged smaller than 560 --------------- */
 @media (max-height:520px){
   .ob-hero{min-height:212px}
-  .ob-step[data-n="2"] .ob-hero{min-height:150px}
-  .ob-demo{transform:scale(.9)}
+  .ob-step[data-n="1"] .ob-hero{min-height:150px}
+  .ob-step[data-n="2"] .ob-hero{min-height:180px}
   .ob-title{font-size:23px}
 }
 

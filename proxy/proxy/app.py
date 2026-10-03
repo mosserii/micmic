@@ -8,11 +8,17 @@
     POST /v1/checkout                             a Stripe Checkout URL for Pro
     POST /v1/portal                               a Stripe billing portal URL
     POST /v1/stripe/webhook                       Stripe events, signature checked
+    POST /v1/tts                                  a spoken reply, streamed PCM (tts.py)
+    POST /v1/consent                              the terms and AI-data consent, again
+    POST /v1/apple/transaction                    an iPhone's signed StoreKit transaction
+    POST /v1/apple/notifications                  App Store Server Notifications V2
+    POST /v1/account/delete                       delete this device's account and data
     GET  /health, /healthz                        liveness, no auth, no database
     GET  /ready                                   the database answers
-    GET  /, /privacy, /terms, /checkout/*         the public pages (pages.py)
+    GET  /, /privacy, /terms, /support, /checkout/*   the public pages (pages.py)
 
-Every other /v1 route needs `Authorization: Bearer <device token>`.
+Every other /v1 route needs `Authorization: Bearer <device token>`, except the two
+webhooks, which are signed by Stripe and by Apple.
 
 Metering, per token per UTC day:
   * Jev calls count against FREE_DAILY_CALLS / PRO_DAILY_CALLS. This is the number
@@ -57,9 +63,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 from urllib.parse import urlsplit
 
-from . import billing, pages
+from . import apple, billing, pages, tts
 from .config import Config
-from .store import Store, hash_token
+from .store import PRO_STATUSES, Store, hash_token, pro_source
 
 log = logging.getLogger("micmic.proxy")
 
@@ -69,6 +75,16 @@ DRAIN_MAX = 16 * 1024 * 1024
 DIGITS = re.compile(r"^[0-9]{1,12}$")
 MAX_SIGNUP_BODY = 4 * 1024
 MAX_WEBHOOK_BODY = 1024 * 1024
+MAX_APPLE_TX_BODY = 16 * 1024
+MAX_APPLE_NOTIFICATION_BODY = 64 * 1024
+MAX_SMALL_BODY = 4 * 1024
+PLATFORMS = ("mac", "ios")
+APPLE_TX_SOURCES = ("purchase", "update", "restore", "launch")
+# Where an iPhone user cancels an Apple subscription (we cannot cancel it for her).
+APPLE_MANAGE_URL = "https://apps.apple.com/account/subscriptions"
+VERSION_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+CLIENT_TIME_RE = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$")
 BUSY = (b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n"
         b"Content-Length: 17\r\nRetry-After: 1\r\nConnection: close\r\n\r\n"
         b'{"error": "busy"}')
@@ -147,6 +163,77 @@ def clean_gemini(body: dict, max_output: int) -> bool:
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class ConsentError(Exception):
+    def __init__(self, status: int, body: dict):
+        super().__init__(body.get("error", ""))
+        self.status, self.body = status, body
+
+
+def check_consent(obj, cfg: Config, platform: str) -> dict:
+    """The consent object the app sends (PURCHASES_ACCOUNT.md 4.3), checked, as the
+    tokens columns it is stored in. consent_at is added by the caller from the server
+    clock: the phone's own time is kept, never trusted."""
+    if not isinstance(obj, dict):
+        raise ConsentError(400, {"error": "bad_request"})
+    keys = ("terms_version", "privacy_version", "ai_disclosure_version")
+    versions = {k: obj.get(k) for k in keys}
+    if not all(isinstance(v, str) and VERSION_RE.match(v) for v in versions.values()):
+        raise ConsentError(400, {"error": "bad_request"})
+    providers = obj.get("providers")
+    if not (isinstance(providers, list) and 0 < len(providers) <= 16
+            and all(isinstance(x, str) and x in cfg.consent_providers for x in providers)):
+        raise ConsentError(400, {"error": "bad_request"})
+    at = obj.get("accepted_at")
+    if not (isinstance(at, str) and len(at) <= 40 and CLIENT_TIME_RE.match(at)):
+        raise ConsentError(400, {"error": "bad_request"})
+    locale = obj.get("locale", "")
+    if not (isinstance(locale, str) and len(locale) <= 16 and locale.isprintable()):
+        raise ConsentError(400, {"error": "bad_request"})
+    method = obj.get("method", "checkbox")
+    if method != "checkbox":
+        raise ConsentError(400, {"error": "bad_request"})
+    age = obj.get("age_18")
+    if age is not None and not isinstance(age, bool):
+        raise ConsentError(400, {"error": "bad_request"})
+    if platform == "ios" and age is not True:
+        # The iPhone app is 18+ (Gemini API terms); no iPhone device exists without it.
+        raise ConsentError(400, {"error": "consent_required"})
+    required = cfg.consent_required()
+    if any(versions[k] < required[k] for k in keys):
+        raise ConsentError(409, {"error": "consent_outdated", "consent_required": required})
+    return {"consent_terms": versions["terms_version"],
+            "consent_privacy": versions["privacy_version"],
+            "consent_ai": versions["ai_disclosure_version"],
+            "consent_providers": ",".join(dict.fromkeys(providers)),
+            "consent_client_at": at, "consent_locale": locale, "consent_method": method,
+            "consent_age18": None if age is None else int(age)}
+
+
+def brain_forget(cfg: Config, authorization: str) -> tuple[int | None, dict]:
+    """POST {BRAIN_URL}/v1/brain/forget with the caller's own token (contract route).
+    (status, body), or (None, {}) when the brain could not be reached in time."""
+    u = urlsplit(cfg.brain_url or "")
+    cls = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
+    conn = cls(u.hostname or "", u.port or (443 if u.scheme == "https" else 80),
+               timeout=cfg.brain_timeout)
+    try:
+        conn.request("POST", u.path.rstrip("/") + "/v1/brain/forget", body=b'{"v": 1}',
+                     headers={"Authorization": authorization, "X-MicMic-Contract": "1",
+                              "Content-Type": "application/json"})
+        resp = conn.getresponse()
+        raw = resp.read(64 * 1024)
+        try:
+            body = json.loads(raw) if raw else {}
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            body = {}
+        return resp.status, body if isinstance(body, dict) else {}
+    except Exception as e:  # noqa: BLE001
+        log.warning("brain forget unreachable: %s", type(e).__name__)
+        return None, {}
+    finally:
+        conn.close()
 
 
 class UpstreamTimeout(Exception):
@@ -268,6 +355,19 @@ def _reset(now: datetime) -> datetime:
     return midnight + timedelta(days=1)
 
 
+def _month_reset(now: datetime) -> datetime:
+    return datetime(now.year + (now.month == 12), now.month % 12 + 1, 1, tzinfo=timezone.utc)
+
+
+def _tts_bucket(scope: str, now: datetime) -> str:
+    """Spoken characters: one lifetime pool (free), a calendar month and a day (Pro)."""
+    if scope == "total":
+        return "total"
+    if scope == "month":
+        return now.strftime("m%Y-%m")
+    return _day(now)
+
+
 def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -287,7 +387,12 @@ class ProxyServer(ThreadingHTTPServer):
         self.clock = clock
         self.jev_pool = UpstreamPool(cfg.jev_upstream, cfg.jev_timeout)
         self.gemini_pool = UpstreamPool(cfg.gemini_upstream, cfg.gemini_timeout)
+        self.eleven = tts.ElevenUpstream(cfg.eleven_upstream, cfg.tts_first_byte_timeout,
+                                         cfg.tts_timeout)
+        self.tts_cache = tts.Cache(cfg.tts_cache_dir, cfg.tts_cache_max_bytes,
+                                   cfg.tts_cache_secret)
         self.pages = pages.render(cfg)
+        self.apple = apple.Apple(cfg)
         self._slots = threading.BoundedSemaphore(max(1, cfg.max_connections))
         handler = type("BoundHandler", (Handler,), {"timeout": cfg.idle_timeout})
         super().__init__((cfg.host, cfg.port), handler)
@@ -296,6 +401,13 @@ class ProxyServer(ThreadingHTTPServer):
         super().server_close()
         self.jev_pool.close()
         self.gemini_pool.close()
+        self.eleven.close()
+
+    def handle_error(self, request, client_address):
+        # The stock version prints a traceback and the client's address to stderr, which
+        # the host keeps as logs. The exception text can quote a key or what someone
+        # said, so only its type is logged, like every route-level catch.
+        log.error("unhandled error on a connection: %s", type(sys.exc_info()[1]).__name__)
 
     def process_request(self, request, client_address):
         if not self._slots.acquire(blocking=False):
@@ -451,7 +563,11 @@ class Handler(BaseHTTPRequestHandler):
         token = h[7:].strip()
         if not token or len(token) > 256:
             return None
-        return self.server.store.plan_for(token)
+        return self.server.store.plan_for(token, self._now_s(),
+                                          self.server.cfg.apple_expiry_leeway)
+
+    def _now_s(self) -> int:
+        return int(self.server.clock().timestamp())
 
     def _read_body(self, limit: int) -> tuple[bytes | None, int, dict | None]:
         """(raw, status, error). status is 0 when the body is in."""
@@ -597,7 +713,11 @@ class Handler(BaseHTTPRequestHandler):
         self._sent = False
         path = self.path.split("?", 1)[0]
         service = {"/v1/devices": self._devices, "/v1/checkout": self._checkout,
-                   "/v1/portal": self._portal, "/v1/stripe/webhook": self._webhook}.get(path)
+                   "/v1/portal": self._portal, "/v1/stripe/webhook": self._webhook,
+                   "/v1/tts": self._tts, "/v1/consent": self._consent,
+                   "/v1/apple/transaction": self._apple_transaction,
+                   "/v1/apple/notifications": self._apple_notifications,
+                   "/v1/account/delete": self._account_delete}.get(path)
         if service is not None:
             try:
                 status, tok = service()
@@ -749,17 +869,37 @@ class Handler(BaseHTTPRequestHandler):
         if not name or not version:
             self._json(400, {"error": "bad_request"})
             return 400, None
+        # Additive, optional (PURCHASES_ACCOUNT.md 4.3): a Mac without them signs up
+        # exactly as before; an iPhone cannot exist without a recorded consent.
+        platform = body.get("platform", "mac")
+        if platform not in PLATFORMS:
+            self._json(400, {"error": "bad_request"})
+            return 400, None
+        consent = None
+        if body.get("consent") is not None:
+            try:
+                consent = check_consent(body["consent"], cfg, platform)
+            except ConsentError as e:
+                self._json(e.status, e.body)
+                return e.status, None
+            consent["consent_at"] = self._now_s()
+        elif platform == "ios":
+            self._json(400, {"error": "consent_required"})
+            return 400, None
         now = self.server.clock()
         addr = hashlib.sha256(("signup:" + self._client_addr()).encode()).hexdigest()
         made = self.server.store.register_device(
             name, version, addr, _day(now), cfg.max_devices_per_ip_per_day,
-            cfg.max_devices_per_day)
+            cfg.max_devices_per_day, platform, consent)
         if made is None:
             self._json(429, {"error": "too_many_devices"},
                        {"Retry-After": _seconds_to(_reset(now), now)})
             return 429, None
         token, device_id = made
-        self._json(201, {"token": token, "device_id": device_id, "plan": "free"})
+        out = {"token": token, "device_id": device_id, "plan": "free"}
+        if platform == "ios":
+            out["apple_account_token"] = self.server.store.apple_account_token(hash_token(token))
+        self._json(201, out)
         return 201, hash_token(token)
 
     def _account(self, t0: float) -> None:
@@ -772,6 +912,7 @@ class Handler(BaseHTTPRequestHandler):
         a = store.account(h)
         now = self.server.clock()
         day = _bucket(cfg, plan, now)
+        apple_sub = store.apple_for_device(a["device_id"], self._now_s(), cfg.apple_expiry_leeway)
         sub = None
         if a["stripe_subscription_id"] and a["sub_status"] and a["sub_period_end"]:
             sub = {"status": a["sub_status"],
@@ -789,12 +930,193 @@ class Handler(BaseHTTPRequestHandler):
                       # promises them. Jev calls over calls-per-request, rounded up.
                       "requests": {"used": -(-store.used(h, "jev", day)
                                               // max(1, cfg.jev_calls_per_request)),
-                                   "limit": cfg.daily_requests(plan)}},
+                                   "limit": cfg.daily_requests(plan)},
+                      # Spoken characters in the natural voice (POST /v1/tts): the
+                      # lifetime pool on free, the calendar month on Pro.
+                      "tts": self._tts_usage(h, plan, now)},
             "resets_at": None if _total(cfg, plan) else _iso(_reset(now)),
             "scope": "total" if _total(cfg, plan) else "day",
             "subscription": sub,
+            # Added for MicMic for iPhone (PURCHASES_ACCOUNT.md 5.1), all additive.
+            "platform": a["platform"],
+            "pro_source": pro_source(a["plan"], a["stripe_subscription_id"], a["sub_status"],
+                                     apple_sub),
+            "apple": self._apple_view(apple_sub),
+            "apple_account_token": store.apple_account_token(h),
+            "consent": ({"terms_version": a["consent_terms"],
+                         "privacy_version": a["consent_privacy"],
+                         "ai_disclosure_version": a["consent_ai"],
+                         "accepted_at": _iso(datetime.fromtimestamp(a["consent_at"],
+                                                                    timezone.utc))}
+                        if a["consent_at"] else None),
+            "consent_required": cfg.consent_required(),
         })
         self._access("/v1/account", 200, t0, h)
+
+    @staticmethod
+    def _apple_view(s: dict | None) -> dict | None:
+        if s is None:
+            return None
+        ts = lambda v: _iso(datetime.fromtimestamp(v, timezone.utc)) if v else None  # noqa: E731
+        return {"original_transaction_id_hash": apple.id_hash(s["original_tx_id"]),
+                "product_id": s["product_id"], "status": s["status"],
+                "expires_at": ts(s["expires_at"]), "grace_until": ts(s["grace_until"]),
+                "auto_renew": bool(s["auto_renew"]), "environment": s["environment"]}
+
+    def _tts_usage(self, h: str, plan: str, now: datetime) -> dict:
+        cfg = self.server.cfg
+        scope, limit = cfg.tts_limits(plan)[0]
+        return {"used": self.server.store.used(h, "tts", _tts_bucket(scope, now)),
+                "limit": limit, "scope": scope}
+
+    def _tts_limit_response(self, scope: str, limit: int, now: datetime) -> None:
+        if scope == "total":
+            self._json(429, {"error": "tts_limit", "scope": "total", "limit": limit,
+                             "resets_at": None})
+            return
+        reset = _month_reset(now) if scope == "month" else _reset(now)
+        self._json(429, {"error": "tts_limit", "scope": scope, "limit": limit,
+                         "resets_at": _iso(reset)},
+                   {"Retry-After": _seconds_to(reset, now)})
+
+    def _tts(self) -> tuple[int, str | None]:
+        """One spoken reply. Never logs the words (see tts.py)."""
+        cfg, store, cache = self.server.cfg, self.server.store, self.server.tts_cache
+        who = self._auth()
+        if who is None:
+            self._drop_body()
+            self._unauthorized()
+            return 401, None
+        h, plan = who
+        if not cfg.tts_enabled:
+            self._drop_body()
+            self._json(503, {"error": "tts_disabled"}, {"Retry-After": "600"})
+            return 503, h
+        if not cfg.tts_configured:
+            # No ELEVENLABS_API_KEY on this server: a clean, final answer the app
+            # understands (it speaks on the Mac and rests the cloud voice for an hour),
+            # never an attempt upstream without a key.
+            self._drop_body()
+            self._json(503, {"error": "not_configured", "message": "voice not configured"},
+                       {"Retry-After": "3600"})
+            return 503, h
+        body, status, err = self._read_json(tts.MAX_BODY)
+        if err is not None:
+            self._json(status, err)
+            return status, h
+        try:
+            req = tts.check(body, cfg)
+        except tts.BadRequest as e:
+            self._json(400, {"error": e.code})
+            return 400, h
+        now = self.server.clock()
+        key_id, seed = cache.ids(cfg.tts_model, req)
+        if req["cache"]:
+            pcm = cache.get(key_id, seed)
+            if pcm is not None:
+                # Served from the volume: nothing upstream, nothing on her meter.
+                self._send(200, pcm, {"X-Audio-Format": tts.AUDIO_HEADER, "X-Cache": "hit"},
+                           "application/octet-stream")
+                log.info("tts hit chars=%d", len(req["upstream_text"]))
+                return 200, h
+        chars = len(req["upstream_text"])
+        caps = [(_tts_bucket(scope, now), limit) for scope, limit in cfg.tts_limits(plan)]
+        granted, full = store.consume_all(h, "tts", caps, chars)
+        if not granted:
+            scope = next(sc for sc, _ in cfg.tts_limits(plan) if _tts_bucket(sc, now) == full)
+            self._tts_limit_response(scope, dict(cfg.tts_limits(plan))[scope], now)
+            return 429, h
+        keep = (req["cache"] and cache.enabled
+                and store.seen(key_id, int(time.time())) >= cfg.tts_cache_min_seen)
+
+        def refund():
+            for bucket, _ in caps:
+                store.refund(h, "tts", bucket, chars)
+
+        payload = json.dumps({"text": req["upstream_text"], "model_id": cfg.tts_model,
+                              "language_code": req["lang"]}).encode()
+        up = self.server.eleven
+        started = time.monotonic()
+        try:
+            up_status, resp, conn = up.open(req["voice_id"], payload, cfg.eleven_key or "")
+        except tts.UpstreamTimeout:
+            log.warning("upstream tts timeout before any audio")
+            if cfg.refund_on_timeout:
+                refund()
+            self._json(504, {"error": "upstream_timeout"})
+            return 504, h
+        except Exception as e:  # noqa: BLE001
+            refund()
+            log.warning("upstream tts unreachable: %s", type(e).__name__)
+            self._json(502, {"error": "upstream_error"})
+            return 502, h
+        if up_status != 200:
+            # The error body can quote the key or the words: read and dropped unseen.
+            try:
+                resp.read(64 * 1024)
+            except Exception:  # noqa: BLE001
+                pass
+            up.release(conn, resp, False)
+            refund()
+            log.warning("upstream tts status %d", up_status)
+            if up_status in (429, 503, 529):
+                self._json(503, {"error": "upstream_busy"}, {"Retry-After": "1"})
+                return 503, h
+            if up_status in (400, 404, 413, 422):
+                self._json(400, {"error": "upstream_rejected_request"})
+                return 400, h
+            self._json(502, {"error": "upstream_error"})
+            return 502, h
+        # Audio is coming: relayed chunk by chunk, so the first sound in the app is
+        # ElevenLabs' first byte plus one hop, not the whole render.
+        self._sent = True
+        try:
+            self.connection.settimeout(cfg.idle_timeout)
+        except OSError:
+            pass
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Audio-Format", tts.AUDIO_HEADER)
+        self.send_header("X-Cache", "miss")
+        self.end_headers()
+        got: list[bytes] = []
+        total, complete, client_gone = 0, False, False
+        try:
+            for chunk in up.stream(resp, conn, started):
+                total += len(chunk)
+                if total > tts.MAX_AUDIO:
+                    break
+                if keep:
+                    got.append(chunk)
+                try:
+                    self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
+                    self.wfile.flush()
+                except OSError:
+                    client_gone = True
+                    break
+            else:
+                complete = True
+        except tts.UpstreamTimeout:
+            log.warning("upstream tts timeout mid-stream")
+        except Exception as e:  # noqa: BLE001
+            log.warning("upstream tts stream failed: %s", type(e).__name__)
+        up.release(conn, resp, complete)
+        if not complete:
+            # No final chunk: the app sees a cut stream and speaks the rest locally.
+            # The characters stay counted: ElevenLabs has already billed them.
+            self.close_connection = True
+            return (499 if client_gone else 502), h
+        if keep and total:
+            cache.put(key_id, seed, b"".join(got))     # before the end: the next ask hits
+        try:
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except OSError:
+            self.close_connection = True
+        log.info("tts miss chars=%d%s", chars, " stored" if keep and total else "")
+        return 200, h
 
     def _checkout(self) -> tuple[int, str | None]:
         self._drop_body()
@@ -803,10 +1125,15 @@ class Handler(BaseHTTPRequestHandler):
             self._unauthorized()
             return 401, None
         h, plan = who
+        acct = self.server.store.account(h)
+        if acct["platform"] == "ios":
+            # Guideline 3.1.1: digital features unlocked in the iPhone app are sold with
+            # In-App Purchase only. Never a Stripe URL to an iPhone.
+            self._json(403, {"error": "use_in_app_purchase"})
+            return 403, h
         if plan == "pro":
             self._json(409, {"error": "already_pro"})
             return 409, h
-        acct = self.server.store.account(h)
         try:
             url = billing.create_checkout(self.server.cfg, acct, _window(self.server.clock()))
         except billing.PaymentsUnavailable:
@@ -861,6 +1188,191 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"received": True})
         return 200, None
 
+    # ---------------------------------------------------------- iPhone: consent
+
+    def _consent(self) -> tuple[int, str | None]:
+        """The consent again: after a version bump, or to resend one not yet synced."""
+        cfg, store = self.server.cfg, self.server.store
+        who = self._auth()
+        if who is None:
+            self._drop_body()
+            self._unauthorized()
+            return 401, None
+        h, _ = who
+        body, status, err = self._read_json(MAX_SMALL_BODY)
+        if err is not None:
+            self._json(status, err)
+            return status, h
+        try:
+            consent = check_consent(body.get("consent"), cfg, store.account(h)["platform"])
+        except ConsentError as e:
+            self._json(e.status, e.body)
+            return e.status, h
+        consent["consent_at"] = self._now_s()
+        store.set_consent(h, consent)
+        self._json(200, {"ok": True})
+        return 200, h
+
+    # ---------------------------------------------------------- iPhone: Apple
+
+    def _apple_transaction(self) -> tuple[int, str | None]:
+        """A StoreKit 2 transaction the phone posts (purchase, update, restore, launch).
+        Verified against Apple's roots; never logged, not even in part."""
+        cfg, store, ap = self.server.cfg, self.server.store, self.server.apple
+        who = self._auth()
+        if who is None:
+            self._drop_body()
+            self._unauthorized()
+            return 401, None
+        h, _ = who
+        if not ap.configured:
+            self._drop_body()
+            self._json(503, {"error": "apple_unavailable"}, {"Retry-After": "600"})
+            return 503, h
+        body, status, err = self._read_json(MAX_APPLE_TX_BODY)
+        if err is not None:
+            self._json(status, err)
+            return status, h
+        source = body.get("source", "update")
+        if source not in APPLE_TX_SOURCES or not isinstance(body.get("jws"), str):
+            self._json(400, {"error": "bad_request"})
+            return 400, h
+        try:
+            tx = ap.verify_transaction(body["jws"])
+        except apple.Rejected as e:
+            log.info("apple tx source=%s rejected: %s %s", source, e.code, e.status or "-")
+            self._json(400, {"error": e.code})
+            return 400, h
+        except apple.RetryLater:
+            log.warning("apple tx source=%s: revocation check unavailable", source)
+            self._json(503, {"error": "apple_verify_retry", "retry_after_s": 30},
+                       {"Retry-After": "30"})
+            return 503, h
+        except apple.AppleUnavailable:
+            self._json(503, {"error": "apple_unavailable"}, {"Retry-After": "600"})
+            return 503, h
+        device_id = store.account(h)["device_id"]
+        res = store.apple_apply_transaction(device_id, tx, self._now_s(),
+                                            cfg.apple_max_devices_per_sub,
+                                            cfg.apple_expiry_leeway)
+        log.info("apple tx env=%s source=%s sub=%s: %s", tx["environment"], source,
+                 apple.short_id(tx["original_tx_id"]), res["outcome"])
+        if res["outcome"] != "pro":
+            self._json(409, {"error": res["outcome"]})
+            return 409, h
+        self._json(200, {"plan": "pro", "source": "apple",
+                         "expires_at": _iso(datetime.fromtimestamp(res["expires_at"],
+                                                                   timezone.utc)),
+                         "environment": tx["environment"], "auto_renew": res["auto_renew"]})
+        return 200, h
+
+    def _apple_notifications(self) -> tuple[int, str | None]:
+        """App Store Server Notifications V2. No bearer token: Apple's signature is the
+        authentication. Idempotent by notificationUUID; a storage error is a 500 so
+        Apple retries."""
+        cfg, store, ap = self.server.cfg, self.server.store, self.server.apple
+        if not ap.configured:
+            self._drop_body()
+            self._json(503, {"error": "apple_unavailable"})
+            return 503, None
+        body, status, err = self._read_json(MAX_APPLE_NOTIFICATION_BODY)
+        if err is not None:
+            self._json(status, err)
+            return status, None
+        payload = body.get("signedPayload")
+        if not isinstance(payload, str) or not payload:
+            self._json(400, {"error": "bad_request"})
+            return 400, None
+        try:
+            n = ap.verify_notification(payload)
+        except apple.Rejected as e:
+            log.warning("apple notification rejected: %s", e.status or e.code)
+            code = "bad_request" if e.code == "bad_request" else "bad_signature"
+            self._json(400, {"error": code})
+            return 400, None
+        except apple.RetryLater:
+            self._json(503, {"error": "apple_verify_retry"}, {"Retry-After": "30"})
+            return 503, None
+        except apple.AppleUnavailable:
+            log.warning("apple notification for an environment this deploy cannot check")
+            self._json(503, {"error": "apple_unavailable"})
+            return 503, None
+        outcome = store.apple_notification(n, self._now_s(), cfg.apple_product_ids,
+                                           cfg.apple_max_devices_per_sub,
+                                           cfg.apple_expiry_leeway)
+        if n["type"] == "TEST":
+            log.info("apple TEST notification ok env=%s", n["environment"])
+        else:
+            log.info("apple notification %s/%s env=%s sub=%s: %s", n["type"],
+                     n["subtype"] or "-", n["environment"],
+                     apple.short_id((n["tx"] or {}).get("original_tx_id")), outcome)
+        self._json(200, {"received": True})
+        return 200, None
+
+    # ---------------------------------------------------------- account deletion
+
+    def _account_delete(self) -> tuple[int, str | None]:
+        """Delete my account and data (App Store guideline 5.1.1(v)). In this order, so a
+        failure halfway never leaves data she can no longer reach: a Mac's Stripe
+        subscription is cancelled, then the brain forgets the device (called with her
+        own token while the row still exists), then every row about the device goes in
+        one transaction. Any failure before that last step deletes nothing."""
+        cfg, store = self.server.cfg, self.server.store
+        who = self._auth()
+        if who is None:
+            self._drop_body()
+            self._unauthorized()
+            return 401, None
+        h, _ = who
+        body, status, err = self._read_json(MAX_SMALL_BODY)
+        if err is not None:
+            self._json(status, err)
+            return status, h
+        if body.get("confirm") is not True:
+            self._json(400, {"error": "confirm_required"})
+            return 400, h
+        a = store.account(h)
+        if not cfg.brain_url and a["platform"] == "ios" and cfg.environment != "development":
+            # The brain keeps an iPhone's notes and preferences. On any deploy (anything
+            # but local development, so a misspelt ENVIRONMENT is covered too), deleting
+            # an iPhone account without telling the brain to forget them would leave
+            # them behind while the app and the Support and Privacy pages say they are
+            # gone, so refuse honestly and delete nothing until BRAIN_URL is set.
+            log.warning("account deletion refused: BRAIN_URL is not set for an iPhone device")
+            self._json(503, {"error": "deletion_unavailable"})
+            return 503, h
+        if (a["stripe_subscription_id"] and a["sub_status"] in PRO_STATUSES
+                and not a["sub_cancel_at_period_end"]):
+            try:
+                billing.cancel_for_deletion(cfg, a["stripe_subscription_id"])
+            except billing.PaymentsUnavailable:
+                self._json(503, {"error": "payments_unavailable"})
+                return 503, h
+            except billing.StripeFailed:
+                self._json(502, {"error": "payments_error"})
+                return 502, h
+        brain = "not_used"
+        if cfg.brain_url:
+            b_status, b_body = brain_forget(cfg, self.headers.get("Authorization", ""))
+            log.info("brain forget answered %s", b_status if b_status else "nothing")
+            if b_status == 501:
+                self._json(503, {"error": "deletion_unavailable"})
+                return 503, h
+            if b_status != 200 or b_body.get("erased") is not True:
+                self._json(503, {"error": "brain_unavailable", "retry_after_s": 30},
+                           {"Retry-After": "30"})
+                return 503, h
+            brain = "erased"
+        res = store.delete_account(h, self._now_s(), cfg.apple_expiry_leeway)
+        if res is None:                          # deleted by a call that raced this one
+            self._unauthorized()
+            return 401, None
+        log.info("account deleted brain=%s", brain)
+        self._json(200, {"deleted": True, "brain": brain,
+                         "apple_subscription_active": res["apple_subscription_active"],
+                         "manage_url": APPLE_MANAGE_URL})
+        return 200, h
+
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
@@ -872,6 +1384,7 @@ def main() -> int:
     if errors:
         return 2
     srv = ProxyServer(cfg)
+    ap = srv.apple
 
     def _stop(*_):
         # A container host stops the service with SIGTERM. Leave serve_forever the same
@@ -881,6 +1394,13 @@ def main() -> int:
     log.info("micmic proxy on %s:%d (%s), gemini %s, payments %s, db %s", cfg.host,
              cfg.port, cfg.environment, "configured" if cfg.gemini_key else "NOT configured",
              "configured" if cfg.payments_configured else "NOT configured", cfg.db_path)
+    log.info("apple %s (Production %s, %d root certificates, environments %s), brain %s",
+             "configured" if ap.configured else "NOT configured",
+             "on" if ap.production_on else "off", len(ap.roots), ",".join(ap.verifiers),
+             "set" if cfg.brain_url else "not set")
+    if cfg.environment != "development" and not cfg.brain_url:
+        log.warning("BRAIN_URL is not set: iPhone account deletion answers 503 "
+                    "deletion_unavailable until it is")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

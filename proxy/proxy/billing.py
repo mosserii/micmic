@@ -190,3 +190,22 @@ def handle_event(store: Store, event: dict) -> str:
             bool(obj.get("cancel_at_period_end")) or bool(obj.get("cancel_at")))
 
     return store.record_event(eid, etype)
+
+
+def cancel_for_deletion(cfg: Config, subscription_id: str) -> None:
+    """Cancel a Mac device's Stripe subscription at once, before its account is deleted
+    (owner decision D4: the person asked for everything to go). A subscription Stripe no
+    longer has counts as cancelled. Stripe keeps its own invoices, as tax law requires."""
+    if not cfg.stripe_secret_key:
+        raise PaymentsUnavailable()
+    try:
+        stripe.Subscription.cancel(subscription_id, api_key=cfg.stripe_secret_key,
+                                   idempotency_key=f"delete-account:{subscription_id}")
+    except stripe.InvalidRequestError as e:
+        if getattr(e, "code", None) == "resource_missing":
+            return
+        log.warning("stripe cancel for deletion failed: %s", type(e).__name__)
+        raise StripeFailed() from e
+    except stripe.StripeError as e:
+        log.warning("stripe cancel for deletion failed: %s", type(e).__name__)
+        raise StripeFailed() from e

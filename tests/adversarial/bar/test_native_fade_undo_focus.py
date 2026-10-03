@@ -258,7 +258,8 @@ def test_focus_kept_through_real_undo_round_trip():
 def main():
     httpd, th = start_server()
     app = AppKit.NSApplication.sharedApplication()
-    app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+    # Regular, like the listener since 2026-10-03 (in the Dock): focus must hold there.
+    app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyRegular)
     app.finishLaunching()
     try:
         print("\n-- undo exactly as fade starts"); test_undo_exactly_as_fade_starts()

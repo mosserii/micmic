@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MicMic support</title>
+<meta name="description" content="Help with MicMic for iPhone and Mac: contact us, delete your account, cancel MicMic Pro.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/static/icon.png" type="image/png">
+<style>{{css}}</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap top-in">
+    <a class="brand" href="/"><img src="/static/icon.svg" alt="" width="30" height="30">MicMic</a>
+    <nav class="nav" aria-label="Pages">
+      <a href="/">Home</a>
+      <a href="/privacy">Privacy</a>
+      <a href="/terms">Terms</a>
+      <a href="/support" aria-current="page">Support</a>
+    </nav>
+  </div>
+</header>
+<main class="doc">
+  <h1>Support</h1>
+  <p class="meta">MicMic is made by {{operator}}.</p>
+
+  <h2 id="contact">Talk to a person</h2>
+  <p>Write to us{{contact_inline}}. A person reads every message and answers, usually within two working days. It helps to say whether you use MicMic on iPhone or on Mac, and which version you have (in MicMic, Settings, then About).</p>
+
+  <h2 id="about">What MicMic is</h2>
+  <p>MicMic is an AI voice assistant for iPhone and Mac. You say what you want and it does it for you: messages and calls (you confirm before anything is sent or dialed on iPhone), timers, alarms, reminders, calendar events, music, and answers to questions. To understand you, it sends the text of what you say to the AI services named in our <a href="/privacy">privacy policy</a>. MicMic is for adults aged 18 or over.</p>
+
+  <h2 id="delete">Delete your account and data</h2>
+  <p><strong>On iPhone:</strong> open MicMic, tap Settings, then Account, then <strong>Delete my account and data</strong>, and confirm. This deletes, right away and for good, your MicMic account on our server and its usage, the notes and preferences MicMic keeps for you in the cloud, and your record of agreeing to the terms. Things MicMic made in your own apps, like events, reminders, alarms and messages you sent, stay where they are.</p>
+  <p><strong>On Mac:</strong> write to us{{contact_inline}} and we will delete your device&#39;s records. If you subscribed, write from the email you gave Stripe; otherwise tell us the name of your Mac and roughly when you installed MicMic, so we find the right records. Deleting MicMic&#39;s folder in Library/Application Support/MicMic removes what it kept on your Mac.</p>
+  <p>Deleting your account does not cancel a subscription bought through Apple. Cancel it first, as described below.</p>
+
+  <h2 id="cancel">Cancel MicMic Pro</h2>
+  <p><strong>On iPhone</strong>, MicMic Pro is a subscription billed by Apple to your Apple Account. To cancel it:</p>
+  <ul>
+    <li>open the Settings app on your iPhone, tap your name, then Subscriptions, then MicMic Pro, then Cancel Subscription; or</li>
+    <li>in MicMic, tap Settings, then Plan, then Manage subscription; or</li>
+    <li>go to <a href="https://apps.apple.com/account/subscriptions">apps.apple.com/account/subscriptions</a>.</li>
+  </ul>
+  <p>Cancel at least 24 hours before the renewal date so you are not charged for the next month. MicMic Pro stays on until the end of the period you paid for. Refunds for App Store purchases are handled by Apple: ask at <a href="https://reportaproblem.apple.com">reportaproblem.apple.com</a>.</p>
+  <p><strong>On a new iPhone</strong>, or after installing MicMic again, tap Settings, then Plan, then <strong>Restore purchases</strong>, signed in with the same Apple Account.</p>
+  <p><strong>On Mac</strong>, open MicMic&#39;s Settings, then Manage subscription, which opens Stripe&#39;s billing page, and cancel there. MicMic Pro stays on until the end of the period you paid for.</p>
+
+  <h2 id="legal">Terms and privacy</h2>
+  <p>Using MicMic means agreeing to our <a href="/terms">terms of use</a>. Our <a href="/privacy">privacy policy</a> says what MicMic sends, to whom, what we keep and for how long.</p>
+</main>
+<footer class="foot">
+  <div class="wrap foot-in">
+    <a class="brand" href="/"><img src="/static/icon.svg" alt="" width="24" height="24">MicMic</a>
+    <nav class="foot-nav" aria-label="Footer">
+      <a href="/">Home</a>
+      <a href="/privacy">Privacy</a>
+      <a href="/terms">Terms</a>
+      <a href="/support">Support</a>
+      {{contact}}
+    </nav>
+    <p class="foot-op">Made by {{operator}}.</p>
+  </div>
+</footer>
+</body>
+</html>

@@ -38,6 +38,14 @@ os.environ.pop("MICMIC_ALLOW_SEND", None)
 _STATE = tempfile.mkdtemp(prefix="micmic-test-screenshot2-state-")
 os.environ["MICMIC_STATE_DIR"] = _STATE
 atexit.register(lambda: shutil.rmtree(_STATE, ignore_errors=True))
+# The crosshair is only opened with Screen Recording granted (router lane L2: without
+# it, her own Control-Shift-Command-4 and the clipboard, tests/test_router_fallbacks.py).
+# This suite is about the crosshair, so it runs as a Mac that has the grant; the
+# terminal running it may not. Any capture stays out of her real folders.
+os.environ["MICMIC_FAKE_SCREEN_RECORDING"] = "granted"
+_SHOTS = tempfile.mkdtemp(prefix="micmic-test-screenshot2-shots-")
+os.environ["MICMIC_SHOTS_DIR"] = _SHOTS
+atexit.register(lambda: shutil.rmtree(_SHOTS, ignore_errors=True))
 
 from savta import router                       # noqa: E402
 from savta import profile as prof              # noqa: E402

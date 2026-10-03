@@ -1254,3 +1254,41 @@ def tidy_title(text: str, names: list[str]) -> str:
 
 DEICTIC = re.compile(r"^\W*(?:this|that|it|these|those|this one|that one|את זה|זה|הזה|"
                      r"هاد|هاي|هذا|هذه|это|вот это)\W*$", re.IGNORECASE)
+
+
+# ---------------------------------------------------------------- "about", from her words
+# When the about span was asked and Jev picked none (seen live: with a small contact list
+# "remind me tomorrow at 9 to call the bank" came back with no span, 4 of 4 times), what
+# it is about is what is left of her sentence once the asking words and the time spans
+# are taken out. Code only: no extra call, and the request to Jev is unchanged.
+_ASK_LEAD = re.compile(
+    r"^\W*(?:(?:hey\s+)?micmic\W+)?(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?"
+    r"(?:remind\s+me|set\s+(?:a|me\s+a)\s+reminder|make\s+a\s+reminder)\b"
+    r"|^\W*(?:תזכיר(?:י)?|תזכרי|הזכיר(?:י)?)\s+לי\b"
+    r"|^\W*(?:ذكّريني|ذكريني|ذكرني|ذكّرني|فكّريني|فكريني)\b"
+    r"|^\W*(?:пожалуйста\s+)?напомни(?:те)?(?:\s+мне)?\b", re.IGNORECASE)
+_EDGE_FILL = re.compile(r"^(?:\s|,|\.|and\b|please\b|ו(?=\s))+|(?:\s|,|\.|!|\?|please\b)+$",
+                        re.IGNORECASE)
+_ONLY_FILL = re.compile(r"^(?:at|in|on|for|by|to|about|that|the|a|it|me|ב|ל|ש|في|على|в|на|через)?$",
+                        re.IGNORECASE)
+
+
+def about_from_words(utterance: str, spans: dict | None, lang: str = "english") -> str | None:
+    """What a reminder is about, from her own words: her sentence without the asking
+    lead ("remind me", "תזכירי לי") and without the duration, clock and day spans Jev
+    picked. None when nothing worth a label is left."""
+    t = " " + re.sub(r"\s+", " ", utterance or "").strip() + " "
+    t = " " + _ASK_LEAD.sub("", t.strip()).strip() + " "
+    for k in ("duration", "clock", "day"):
+        sp = ((spans or {}).get(k) or "").strip()
+        if not sp:
+            continue
+        i = t.lower().find(sp.lower())
+        if i >= 0:
+            t = t[:i] + " " + t[i + len(sp):]
+    t = re.sub(r"\s+", " ", t).strip()
+    for _ in range(3):
+        t = _EDGE_FILL.sub("", t).strip()
+    if len(re.sub(r"\W", "", t)) < 2 or _ONLY_FILL.match(t) or DEICTIC.match(t):
+        return None
+    return t

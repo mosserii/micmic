@@ -66,14 +66,24 @@ os.environ.pop("MICMIC_ALLOW_SEND", None)
 # them. Her taste profile was mostly this file's traffic.
 #
 # savta/paths.py resolves every piece of state through MICMIC_STATE_DIR when it is
-# set, and COPIES the real file in on first access. So the suite starts from her real
-# profile, memory and trace, and every write goes to the copy. It has to be set
-# before savta is imported: the paths are resolved at import time.
+# set. It has to be set before savta is imported: the paths are resolved at import time.
+#
+# paths.state() also COPIES a legacy file in on first access (profile.json,
+# memory.json, trace.jsonl, notes.txt at the repo root). In the main checkout those
+# are the owner's own dev files, in a worktree they do not exist: the same suite then
+# sent different requests depending on where it ran (her name, city and habits ride in
+# every understand() call), so a replay recorded in one missed in the other, and her
+# real habits went into requests and recordings. The suite starts from its own fixture
+# state everywhere: no legacy file is ever read (tests/test_micmic.py only; the app's
+# own migration is untouched).
 import shutil as _shutil                      # noqa: E402
 import tempfile as _tempfile                  # noqa: E402
 _STATE = _tempfile.mkdtemp(prefix="micmic-test-state-")
 os.environ["MICMIC_STATE_DIR"] = _STATE
 atexit.register(lambda: _shutil.rmtree(_STATE, ignore_errors=True))
+from savta import paths as _paths            # noqa: E402
+_REAL_STATE_PATH = _paths.state
+_paths.state = lambda name, legacy=None: _REAL_STATE_PATH(name)
 # Better recognition's model (675 MB): the downloader's seam holds any job at 0 bytes,
 # in a scratch dir, and savta/asr_models.py's tripwire is checked when the suite ends.
 _ASR = _tempfile.mkdtemp(prefix="micmic-test-asr-")
@@ -116,6 +126,56 @@ replay.install()
 # t_weather_never_from_a_model) put the real one back for their own duration.
 REAL_DUE_BRIEFING = router.due_briefing
 router.due_briefing = lambda: False
+
+# Her habits (savta/memory.py) ride in every understand() request as
+# "what_she_usually_asks_for": the top places, songs, apps by (count, last time),
+# with `last` in whole seconds. Two places asked once each tie on the count, and
+# then which of them is listed first depended on whether the two turns happened to
+# land in the same wall-clock second: a replayed turn takes milliseconds, a live one
+# about a second, so the same request came out in a different order run to run
+# (tests/recordings held four orderings of the 0zf Eilat request). The habit clock
+# is virtual here instead: it moves only when a Jev or Gemini round trip happens, by a
+# fixed ROUND_TRIP, never with the wall clock. So a replayed run, a recording run and
+# a slow or fast Mac all list her habits in the same order, every time.
+from savta import memory as _habits           # noqa: E402
+from savta.llm import LLM as _LLM             # noqa: E402
+
+
+class _HabitClock:
+    # Seconds per model round trip. 0.1 is the one value whose habit orders match every
+    # request already in tests/recordings (358 of 358; 0.05-2.0 otherwise left 192-195
+    # misses), so the suite replays without a single new live call. Change it and the
+    # habit orders move: re-record (MICMIC_REPLAY_ALLOW_LIVE=1) once, then stable again.
+    ROUND_TRIP = 0.1
+
+    def __init__(self, start: float):
+        self._t = start
+        self._lock = __import__("threading").Lock()
+
+    def time(self) -> float:
+        with self._lock:
+            return self._t
+
+    def tick(self) -> None:
+        with self._lock:
+            self._t += self.ROUND_TRIP
+
+
+HABIT_CLOCK = _HabitClock(2_000_000_000.0)     # past any `last` a real memory.json holds
+_habits.time = HABIT_CLOCK
+
+
+def _ticking(fn):
+    def call(*a, **k):
+        try:
+            return fn(*a, **k)
+        finally:
+            HABIT_CLOCK.tick()
+    return call
+
+
+Jev._ask = _ticking(Jev._ask)
+_LLM._post_once = _ticking(_LLM._post_once)
 
 # ---------------------------------------------------------------- wall two
 # Keep honest references to the functions whose safety gate is under test,
@@ -231,6 +291,10 @@ REAL_ADD_REMINDER = mac.add_reminder
 mac.add_reminder = lambda t, *a, **k: (REMINDERS.append(t), (True, "ok"))[1]
 mac.facetime = lambda n, number="", video=True: (CALLED.append((n, number)), (True, "ok"))[1]
 mac.end_call = lambda: (HUNGUP.append(1), (True, "quit"))[1]
+# The countdown to her emergency contact (owner decision 2026-10-03) never runs out on
+# its own in a test: a section that wants the call fires it by hand
+# (router._fire_emergency), so no timer can dial in a later section.
+router.EMERGENCY_WINDOW = 3600.0
 # The suite must not depend on whether whoever runs it happened to lock their Mac.
 # The normal case is an unlocked screen; the one section that cares flips this itself.
 mac.screen_locked = lambda: False
@@ -962,7 +1026,7 @@ def t_follow_ups_over_a_playing_film(j):
                                (short_named, "forrest")):
                 router.MEM = router.Memory()
                 router.handle(s.j, first, speak=False)
-                YT_QUERIES.clear(); CLOSED.clear()
+                YT_QUERIES.clear(); CLOSED.clear(); TABS_CLOSED.clear()
                 r = router.handle(s.j, utt, speak=False)
                 check(f"{utt!r}: the name rode along in the same understanding",
                       "instead" in s.spans[-1], str(s.spans[-1]))
@@ -971,10 +1035,12 @@ def t_follow_ups_over_a_playing_film(j):
                       and YT_QUERIES[0].startswith(words)
                       and not _d(r).get("after_rejection") and _d(r).get("corrected"),
                       f"did={r['did']} queries={YT_QUERIES} detail={short(_d(r))}")
+                # The film it replaces is closed by its own tab, never by Cmd-W to
+                # whatever is in front (router lane L2, P1-4).
                 check(f"{utt!r}: Jev picks the real film from the new results, which "
                       f"replaces the one playing",
-                      _d(r).get("video_id") == "g1" and CLOSED == [1],
-                      f"picked={_d(r).get('title')} closed={CLOSED}")
+                      _d(r).get("video_id") == "g1" and TABS_CLOSED == ["h1"] and not CLOSED,
+                      f"picked={_d(r).get('title')} tabs={TABS_CLOSED} cmd_w={CLOSED}")
             check("the search she follows up on is the corrected one",
                   router.MEM.play_query == "forrest", repr(router.MEM.play_query))
 
@@ -1012,11 +1078,13 @@ def t_follow_ups_over_a_playing_film(j):
                   r["did"] in ("playing", "exhausted") and not _d(r).get("corrected"),
                   f"did={r['did']} detail={short(_d(r))}")
 
-            CLOSED.clear()
+            CLOSED.clear(); TABS_CLOSED.clear()
+            playing = dict(router.MEM.last_played or {})
             r = router.handle(s.j, "stop", speak=False)
-            check("a bare 'stop' still stops what is playing",
-                  r["did"] == "stopped" and CLOSED == [1] and router.MEM.last_played is None,
-                  f"did={r['did']} closed={CLOSED}")
+            check("a bare 'stop' still stops what is playing: its own tab, never Cmd-W",
+                  r["did"] == "stopped" and TABS_CLOSED == [playing.get("id")] and not CLOSED
+                  and router.MEM.last_played is None,
+                  f"did={r['did']} tabs={TABS_CLOSED} cmd_w={CLOSED}")
 
         # ---- the question in Hebrew ----------------------------------------------
         reset_state(); wiki_terms.clear()
@@ -1947,8 +2015,12 @@ def t_calling(j: Jev):
         mac.SEND_FOR_REAL, mac.CALL_FOR_REAL = prev
     LAUNCHED.clear()
     ok, msg = REAL_FACETIME("Miriam", "+972-50-123-4567")
+    # FaceTime shows the number with its own Call button and nothing rings until she
+    # presses it, so the dial path answers (False, "facetime_confirm <digits>") (lane
+    # L3 contract; the router says "FaceTime is ready to call ...", never "calling").
     check("a call carries the person's number into the dial path",
-          ok and "972501234567" in str(msg).replace("-", ""), repr(msg))
+          ok is False and str(msg).startswith("facetime_confirm")
+          and "972501234567" in str(msg).replace("-", ""), repr(msg))
     check("and it goes out as a facetime URL, not an app activation",
           any(str(c[-1]).startswith("facetime") and "972501234567" in str(c[-1])
               for c in LAUNCHED), str(LAUNCHED))
@@ -2057,8 +2129,11 @@ def t_emergency(j):
     for utt in ("I fell", "נפלתי ואני לא יכולה לקום", "תתקשרי לאמבולנס"):
         router.PENDING = None; router.AWAITING = None
         r = router.handle(j, utt, speak=False)
+        # Owner decision 2026-10-03: the number to dial, then her contact on a countdown
+        # (or, for a bare request for the ambulance, an offer to call her).
         check(f"{utt[:32]!r} reaches the emergency path",
-              r["did"] == "emergency", f"did={r['did']}")
+              r["did"] in ("emergency", "emergency_number"), f"did={r['did']}")
+        router.cancel_emergency()
     for utt in ("I need help finding the file", "מה את יכולה לעשות", "תשימי לי מוזיקה"):
         router.LAST_EMERGENCY = None   # each of these starts from a quiet machine
         router.PENDING = None; router.AWAITING = None
@@ -2143,8 +2218,13 @@ def t_emergency_undo(j):
     router.LAST_EMERGENCY = None
     CALLED.clear(); HUNGUP.clear()
     r = router.handle(j, "I fell and I cannot get up", speak=False)
-    check("a fall dials immediately", r["did"] == "emergency" and len(CALLED) == 1,
+    # Owner decision 2026-10-03: the number to dial first, then a 3-second countdown
+    # she can stop. Fired by hand here (EMERGENCY_WINDOW is an hour in tests).
+    check("a fall says the number and counts down to the call",
+          r["did"] == "emergency" and not CALLED and router.EMERGENCY_PENDING is not None,
           f"did={r['did']} calls={len(CALLED)}")
+    router._fire_emergency()
+    check("the countdown dials once", len(CALLED) == 1, f"calls={len(CALLED)}")
 
     for utt in ("I cannot get up", "help me", "נפלתי"):
         router.PENDING = None; router.AWAITING = None
@@ -2172,6 +2252,7 @@ def t_emergency_undo(j):
 
     router.PENDING = None; router.AWAITING = None
     r = router.handle(j, "I fell again and I cannot get up", speak=False)
+    router._fire_emergency()
     check("a real fall after a retraction still dials",
           r["did"] == "emergency" and len(CALLED) == 2,
           f"did={r['did']} calls={len(CALLED)}")
@@ -2324,9 +2405,10 @@ def t_a_call_is_only_announced_if_it_happened(j):
     real_ft = _mac.facetime
     _mac.facetime = lambda n, number="", video=True: (False, "no number")
     try:
-        r = router.handle(j, "I fell and I cannot get up", speak=False)
+        router.handle(j, "I fell and I cannot get up", speak=False)
+        r = router._fire_emergency() or {}       # the countdown runs out
         check("a call that fails is not announced as a call",
-              r["did"] != "emergency", f"did={r['did']} say={short(r.get('say'))}")
+              r.get("did") != "emergency", f"did={r.get('did')} say={short(r.get('say'))}")
         check("she is told plainly that it did not go through",
               bool(r.get("say")), short(r.get("say")))
         check("and the do-not-redial latch is NOT armed on a failed call",
@@ -2336,8 +2418,9 @@ def t_a_call_is_only_announced_if_it_happened(j):
 
     # a working call still works, and only then is the latch armed
     reset_state(); router.LAST_EMERGENCY = None
-    r = router.handle(j, "I fell and I cannot get up", speak=False)
-    check("a call that succeeds is announced", r["did"] == "emergency", f"did={r['did']}")
+    router.handle(j, "I fell and I cannot get up", speak=False)
+    r = router._fire_emergency() or {}
+    check("a call that succeeds is announced", r.get("did") == "emergency", f"did={r.get('did')}")
     check("and the latch is armed", router.LAST_EMERGENCY is not None)
     check("in every language, not just Hebrew and English",
           all(k in router.SPEECH for k in ("hebrew", "arabic", "russian", "english")))
@@ -2548,6 +2631,7 @@ def t_screen(j):
     import datetime as _dt
     reset_state()
     real = (router._screen_context, router._screen_shot, router._screen_llm, mac.add_event)
+    real_chrome_page = router._chrome_page
     PROMPTS, EVENTS = [], []
     tomorrow = (_dt.date.today() + _dt.timedelta(days=1)).isoformat()
     state = {"ctx": None, "reply": "You are reading an article about olive harvests."}
@@ -2569,6 +2653,9 @@ def t_screen(j):
     router._screen_llm = lambda prompt, system, image=None, max_tokens=300: (
         PROMPTS.append((prompt, system)), state["reply"])[1]
     mac.add_event = lambda *a, **k: (EVENTS.append(a), (True, "[test stub] added"))[1]
+    # Without Accessibility, a Chrome page is read through Chrome's own AppleScript
+    # (router._chrome_page, part B P1-6). The screen is stubbed here, so is that.
+    router._chrome_page = lambda: None
     SCREEN_DIDS = ("described_screen", "summarized_screen", "translated_screen")
     try:
         state["ctx"] = ctx()
@@ -2643,12 +2730,42 @@ def t_screen(j):
                   f"did={r['did']} pending={router.PENDING}")
             router.PENDING = None
 
-            reset_state()
-            state["ctx"] = ctx(selected="", page=None)
-            r = router.handle(j, "send this to Miriam", speak=False)
-            check("nothing selected and no page offers drag-to-select, and sends nothing yet",
-                  r["did"] in ("screen_select_wait", "screen_select") and router.PENDING is None,
-                  f"did={r['did']} pending={router.PENDING}")
+            # Nothing selected and no page: the crosshair needs Screen Recording. Part B
+            # (P0-11, T19) made the way without it deliberate: her own
+            # Control-Shift-Command-4, then the chat to paste into (screen_clip_wait).
+            # The state is pinned both ways, never read from this Mac's real TCC.
+            real_clip = (_screen_mod.clipboard_count, _screen_mod.wait_for_clipboard_image)
+            prev_sr = os.environ.get("MICMIC_FAKE_SCREEN_RECORDING")
+            try:
+                os.environ["MICMIC_FAKE_SCREEN_RECORDING"] = "granted"
+                reset_state()
+                state["ctx"] = ctx(selected="", page=None)
+                r = router.handle(j, "send this to Miriam", speak=False)
+                check("nothing selected and no page offers drag-to-select, and sends nothing yet",
+                      r["did"] in ("screen_select_wait", "screen_select")
+                      and router.PENDING is None,
+                      f"did={r['did']} pending={router.PENDING}")
+
+                # The owner's clipboard is never watched from a test.
+                _screen_mod.clipboard_count = lambda: 7
+                _screen_mod.wait_for_clipboard_image = (
+                    lambda since, timeout=0, poll=0.3, cancel=None: (False, "cancelled"))
+                os.environ["MICMIC_FAKE_SCREEN_RECORDING"] = "denied"
+                reset_state()
+                state["ctx"] = ctx(selected="", page=None)
+                r = router.handle(j, "send this to Miriam", speak=False)
+                check("without Screen Recording it gives her own keys instead, and sends "
+                      "nothing yet",
+                      r["did"] == "screen_clip_wait" and router.PENDING is None
+                      and "Control-Shift-Command-4" in (r.get("say") or ""),
+                      f"did={r['did']} pending={router.PENDING} say={short(r.get('say'))}")
+            finally:
+                _screen_mod.clipboard_count, _screen_mod.wait_for_clipboard_image = real_clip
+                if prev_sr is None:
+                    os.environ.pop("MICMIC_FAKE_SCREEN_RECORDING", None)
+                else:
+                    os.environ["MICMIC_FAKE_SCREEN_RECORDING"] = prev_sr
+                router.AWAITING = None
 
             reset_state()
             state["ctx"] = ctx(selected="Meet me at the north gate at seven.")
@@ -2734,6 +2851,7 @@ def t_screen(j):
                   f"did={r['did']} events={EVENTS}")
     finally:
         router._screen_context, router._screen_shot, router._screen_llm, mac.add_event = real
+        router._chrome_page = real_chrome_page
         router.AWAITING = None; router.PENDING = None
 
 

@@ -3,9 +3,12 @@ name = "micmic-proxy"
 version = "0.1.0"
 description = "Holds MicMic's upstream keys and meters Jev and Gemini calls per device token."
 requires-python = ">=3.11"
-# Only the Stripe SDK: http.server, http.client and sqlite3 cover everything else, and
-# a server holding paid API keys is better off with as little third-party code as it can.
+# http.server, http.client and sqlite3 cover everything else, and a server holding paid
+# API keys is better off with as little third-party code as it can. Two exceptions, each
+# imported by one module only: Stripe (billing.py) and Apple's App Store Server Library
+# (apple.py), whose signature, certificate chain and OCSP checks are riskier to hand-write.
 dependencies = [
+    "app-store-server-library>=3.1.2",
     "stripe>=15.3.0",
 ]
 

@@ -19,7 +19,7 @@ ASK_DIDS = ("screen_select_wait", "half_heard", "nothing_playing")
 KNOWN_KEYS = {"did", "did_not", "detail", "sends", "must_not_send", "must_ask", "must_not_ask",
               "effects", "no_effects", "say_contains", "say_contains_all", "say_not_contains",
               "say_lang", "say_nonempty", "answer", "rubric", "max_ms", "pending", "sends_not",
-              "refused", "max_turns_hint"}
+              "refused", "max_turns_hint", "no_live"}
 # Fixture names, removed before a language check: a Hebrew reply naming "Gal Ben Ami"
 # or a song title in Latin letters is still a Hebrew reply.
 FIXTURE_NAMES = ("Mom", "Dad", "Dana Cohen", "Gal Ben Ami", "Noa Levi", "David Katz",
@@ -196,6 +196,15 @@ def grade(exp: dict, did: str, say: str, det: dict, asked_back: bool, eff: dict,
             fails.append(f"no {kind} effect")
         elif mt is not True and not any(_m(v, mt) for v in vals):
             fails.append(f"{kind} effect {vals[:3]} want {mt!r}")
+    if exp.get("no_live"):
+        # A live lookup (prices, shares, news, scores) nobody asked for. Checked on the
+        # turn and on every step of a split one: hard-web-001 passed while its reply
+        # opened with ASML's share price, read by a stray step.
+        steps = [s_ for s_ in det.get("results") or [] if isinstance(s_, dict)]
+        stray = [str(s_.get("step"))[:40] for s_ in steps
+                 if isinstance(s_.get("detail"), dict) and s_["detail"].get("live_kind")]
+        if det.get("live_kind") or stray:
+            fails.append(f"live lookup nobody asked for: {det.get('live_kind') or stray}")
     if exp.get("no_effects") and (outward or sends):
         fails.append(f"had effects: {outward} sends={[s.get('to') for s in sends]}")
     if exp.get("say_contains") and not any(lat(w) in lat(say) or w.lower() in sl

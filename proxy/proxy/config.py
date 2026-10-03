@@ -2,7 +2,7 @@
 
 Upstream keys are read from the process environment first. For local development only,
 a gitignored proxy/.env or the workspace .env.local next to the checkout may supply
-them; only the two key names are ever read from those files, nothing else in them.
+them; only the three key names are ever read from those files, nothing else in them.
 """
 from __future__ import annotations
 
@@ -15,6 +15,33 @@ REPO_ROOT = PROXY_ROOT.parent                            # the checkout
 
 JEV_UPSTREAM = "https://api.typesafe.ai/v1/systemone"
 GEMINI_UPSTREAM = "https://generativelanguage.googleapis.com/v1beta/models"
+ELEVEN_UPSTREAM = "https://api.elevenlabs.io"
+# MicMic's voice: Jessica, a premade ElevenLabs voice ("Playful, Bright, Warm"), chosen in
+# micmic-work/voice/ELEVENLABS_V4.md. The client names a voice; only these ids go upstream.
+TTS_VOICES = {"jessica": "cgSgspJ2msm6clMCkdW9"}
+
+# --- MicMic for iPhone (apple.py, PURCHASES_ACCOUNT.md section 5.3)
+APPLE_BUNDLE_ID = "com.betterfly.micmic.ios"
+APPLE_PRODUCT_IDS = ("com.betterfly.micmic.ios.pro.monthly",)
+# Signed by Apple: accepted on every deploy. Sandbox stays on in production because App
+# Review and TestFlight buy with sandbox accounts against the production build.
+APPLE_SIGNED_ENVIRONMENTS = ("Production", "Sandbox")
+# Not signed by Apple (an Xcode StoreKit file): local development only, never production.
+APPLE_UNSIGNED_ENVIRONMENTS = ("Xcode", "LocalTesting")
+# The dates the legal pages show as "Last updated". The phone compiles in the versions it
+# showed; a consent below the *_REQUIRED one is refused with 409 consent_outdated.
+LEGAL_VERSION = "2026-10-03"
+CONSENT_PROVIDERS = ("typesafe", "google_gemini", "elevenlabs")
+
+
+def _voices(raw: str) -> dict[str, str]:
+    """TTS_VOICES="name:voice_id,name:voice_id". The first one is the default."""
+    out: dict[str, str] = {}
+    for part in raw.split(","):
+        name, _, vid = part.partition(":")
+        if name.strip() and vid.strip():
+            out[name.strip().lower()] = vid.strip()
+    return out or dict(TTS_VOICES)
 
 
 def _env_files() -> list[Path]:
@@ -57,6 +84,19 @@ def _float(name: str, default: float | None) -> float | None:
         raise SystemExit(f"{name} must be a number")
 
 
+def _is_date(v: str) -> bool:
+    return len(v) == 10 and v[4] == "-" and v[7] == "-" and (v[:4] + v[5:7] + v[8:]).isdigit()
+
+
+def _app_id() -> int | None:
+    raw = os.environ.get("APPLE_APP_ID", "").strip()
+    if not raw:
+        return None
+    if not raw.isdigit():
+        raise SystemExit("APPLE_APP_ID must be the app's numeric Apple ID")
+    return int(raw)
+
+
 def _flag(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name, "").strip().lower()
     if not raw:
@@ -68,6 +108,13 @@ def _opt(name: str) -> str | None:
     """Stripe and the public URL come from the process environment only, never from
     the local key files read_key() looks in."""
     return os.environ.get(name, "").strip() or None
+
+
+def _list(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    return tuple(x.strip() for x in raw.split(",") if x.strip())
 
 
 def _public_base_url() -> str | None:
@@ -105,6 +152,37 @@ class Config:
     # never gives up first and asks again while this call is still being counted.
     jev_timeout: float = 10.0
     gemini_timeout: float = 40.0
+    # --- the spoken voice (POST /v1/tts, tts.py). ElevenLabs Eleven v4 Turbo, streamed
+    # as 24 kHz 16-bit PCM. The key lives here and nowhere else.
+    eleven_key: str | None = None
+    eleven_upstream: str = ELEVEN_UPSTREAM
+    # The kill switch: TTS_ENABLED=0 answers every /v1/tts with 503 tts_disabled, and
+    # the app speaks with the voice on the Mac at once.
+    tts_enabled: bool = True
+    tts_model: str = "eleven_v4_turbo"
+    tts_voices: dict = None  # type: ignore[assignment]   # set in __post_init__
+    tts_max_chars: int = 600
+    # Characters, metered per device (see README "The voice"). Free: one lifetime pool
+    # sized to the 100 free requests. Pro: a monthly pool and a daily ceiling; past
+    # either, the app speaks with the voice on the Mac until it resets.
+    free_tts_chars: int = 15000
+    pro_monthly_tts_chars: int = 100000
+    pro_daily_tts_chars: int = 10000
+    # No audio from ElevenLabs within this many seconds is an error (the app has long
+    # since fallen back to the local voice); the whole render within tts_timeout.
+    tts_first_byte_timeout: float = 4.0
+    tts_timeout: float = 20.0
+    # The shared cache of rendered lines (tts.py). Size 0 turns it off.
+    tts_cache_dir: Path | None = None
+    tts_cache_max_bytes: int = 256 * 1024 * 1024
+    # A line is stored only once this many requests asked for it: a one-off private
+    # sentence is never written to disk, "Alright." is after its second time.
+    tts_cache_min_seen: int = 2
+    # Mixed into the cache keys and the stored audio's key stream. Optional: without
+    # it the cache still works, and a stolen disk can only confirm a sentence someone
+    # already knows word for word.
+    tts_cache_secret: str = ""
+
     # Only the models MicMic actually uses. A leaked device token must not be able to
     # point the owner's key at the most expensive model Google sells.
     gemini_models: tuple[str, ...] = ("gemini-3.5-flash-lite",)
@@ -155,6 +233,60 @@ class Config:
     stripe_webhook_secret: str | None = None
     stripe_price_pro: str | None = None
 
+    # --- Apple In-App Purchase (apple.py). Without root certificates every Apple route
+    # answers 503 apple_unavailable. Production transactions also need the app's numeric
+    # Apple ID (App Store Connect > App Information); until it is set only Sandbox passes.
+    apple_bundle_id: str = APPLE_BUNDLE_ID
+    apple_app_id: int | None = None
+    apple_product_ids: tuple[str, ...] = APPLE_PRODUCT_IDS
+    apple_environments: tuple[str, ...] = APPLE_SIGNED_ENVIRONMENTS
+    apple_root_certs_dir: Path = PROXY_ROOT / "certs"
+    # OCSP revocation checks of Apple's certificates, online. Tests turn them off.
+    apple_online_checks: bool = True
+    # One subscription unlocks at most this many devices; the least recently linked
+    # one is unlinked past it (it can restore again).
+    apple_max_devices_per_sub: int = 5
+    apple_expiry_leeway: int = 3600
+
+    # --- terms and AI-data consent (POST /v1/devices, POST /v1/consent)
+    terms_version: str = LEGAL_VERSION
+    privacy_version: str = LEGAL_VERSION
+    ai_disclosure_version: str = LEGAL_VERSION
+    # None means the same as the current version.
+    terms_required: str | None = None
+    privacy_required: str | None = None
+    ai_disclosure_required: str | None = None
+    consent_providers: tuple[str, ...] = CONSENT_PROVIDERS
+
+    # --- the iPhone brain, called only by account deletion (POST {brain_url}/v1/brain/forget)
+    brain_url: str | None = None
+    brain_timeout: float = 10.0
+
+    def __post_init__(self):
+        if self.tts_voices is None:
+            self.tts_voices = dict(TTS_VOICES)
+        if self.tts_cache_dir is None:
+            self.tts_cache_dir = Path(self.db_path).parent / "tts-cache"
+        self.terms_required = self.terms_required or self.terms_version
+        self.privacy_required = self.privacy_required or self.privacy_version
+        self.ai_disclosure_required = self.ai_disclosure_required or self.ai_disclosure_version
+
+    def consent_required(self) -> dict:
+        """The oldest versions a consent may name, as /v1/account reports them."""
+        return {"terms_version": self.terms_required,
+                "privacy_version": self.privacy_required,
+                "ai_disclosure_version": self.ai_disclosure_required}
+
+    @property
+    def tts_configured(self) -> bool:
+        return bool(self.eleven_key)
+
+    def tts_limits(self, plan: str) -> list[tuple[str, int]]:
+        """(scope, characters) caps that all apply to one device."""
+        if plan == "pro":
+            return [("month", self.pro_monthly_tts_chars), ("day", self.pro_daily_tts_chars)]
+        return [("total", self.free_tts_chars)]
+
     @property
     def request_deadline(self) -> float:
         return self.request_timeout if self.request_timeout else self.idle_timeout
@@ -178,6 +310,21 @@ class Config:
                 and self.environment != "production":
             errors.append("a live Stripe key is set but ENVIRONMENT is "
                           f"'{self.environment}', not 'production'")
+        known = APPLE_SIGNED_ENVIRONMENTS + APPLE_UNSIGNED_ENVIRONMENTS
+        for env in self.apple_environments:
+            if env not in known:
+                errors.append(f"APPLE_ENVIRONMENTS names '{env}', not one of {', '.join(known)}")
+            elif env in APPLE_UNSIGNED_ENVIRONMENTS and self.environment == "production":
+                # Xcode StoreKit transactions are not signed by Apple: anyone could make one.
+                errors.append(f"APPLE_ENVIRONMENTS allows '{env}' (unsigned) with "
+                              "ENVIRONMENT=production")
+        for name in ("terms_version", "privacy_version", "ai_disclosure_version",
+                     "terms_required", "privacy_required", "ai_disclosure_required"):
+            v = getattr(self, name) or ""
+            if not _is_date(v):
+                errors.append(f"{name.upper()} must be a date like 2026-10-03")
+        if self.brain_url and not self.brain_url.startswith(("https://", "http://")):
+            errors.append("BRAIN_URL must start with https:// or http://")
         return errors
 
     def daily_limit(self, plan: str, kind: str) -> int:
@@ -228,4 +375,35 @@ class Config:
             stripe_secret_key=_opt("STRIPE_SECRET_KEY"),
             stripe_webhook_secret=_opt("STRIPE_WEBHOOK_SECRET"),
             stripe_price_pro=_opt("STRIPE_PRICE_PRO"),
+            eleven_key=read_key("ELEVENLABS_API_KEY"),
+            eleven_upstream=os.environ.get("ELEVEN_UPSTREAM_URL", ELEVEN_UPSTREAM),
+            tts_enabled=_flag("TTS_ENABLED", True),
+            tts_model=os.environ.get("TTS_MODEL", "").strip() or "eleven_v4_turbo",
+            tts_voices=_voices(os.environ.get("TTS_VOICES", "")),
+            tts_max_chars=_int("TTS_MAX_CHARS", 600),
+            free_tts_chars=_int("FREE_TTS_CHARS", 15000),
+            pro_monthly_tts_chars=_int("PRO_MONTHLY_TTS_CHARS", 100000),
+            pro_daily_tts_chars=_int("PRO_DAILY_TTS_CHARS", 10000),
+            tts_cache_dir=(Path(os.environ["TTS_CACHE_DIR"]).expanduser()
+                           if os.environ.get("TTS_CACHE_DIR", "").strip() else None),
+            tts_cache_max_bytes=_int("TTS_CACHE_MAX_MB", 256) * 1024 * 1024,
+            tts_cache_min_seen=_int("TTS_CACHE_MIN_SEEN", 2),
+            tts_cache_secret=_opt("TTS_CACHE_SECRET") or "",
+            apple_bundle_id=_opt("APPLE_BUNDLE_ID") or APPLE_BUNDLE_ID,
+            apple_app_id=_app_id(),
+            apple_product_ids=_list("APPLE_PRODUCT_IDS", APPLE_PRODUCT_IDS),
+            apple_environments=_list("APPLE_ENVIRONMENTS", APPLE_SIGNED_ENVIRONMENTS),
+            apple_root_certs_dir=(Path(os.environ["APPLE_ROOT_CERTS_DIR"]).expanduser()
+                                  if os.environ.get("APPLE_ROOT_CERTS_DIR", "").strip()
+                                  else PROXY_ROOT / "certs"),
+            apple_online_checks=_flag("APPLE_ONLINE_CHECKS", True),
+            apple_max_devices_per_sub=_int("APPLE_MAX_DEVICES_PER_SUB", 5),
+            apple_expiry_leeway=_int("APPLE_EXPIRY_LEEWAY_SECONDS", 3600),
+            terms_version=_opt("TERMS_VERSION") or LEGAL_VERSION,
+            privacy_version=_opt("PRIVACY_VERSION") or LEGAL_VERSION,
+            ai_disclosure_version=_opt("AI_DISCLOSURE_VERSION") or LEGAL_VERSION,
+            terms_required=_opt("TERMS_REQUIRED"),
+            privacy_required=_opt("PRIVACY_REQUIRED"),
+            ai_disclosure_required=_opt("AI_DISCLOSURE_REQUIRED"),
+            brain_url=(_opt("BRAIN_URL") or "").rstrip("/") or None,
         )

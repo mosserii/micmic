@@ -29,9 +29,10 @@ flowchart LR
     proxy -.-> gemini
 ```
 
-- **`native/`** is the app: a menu-bar process with a global hotkey, the microphone and
-  Apple's speech recognizer. It knows nothing about the assistant. It POSTs text to the
-  local server and shows what comes back. The bar and the window are the same web page,
+- **`native/`** is the app: a regular Mac app (in the Dock and Cmd-Tab while it runs, with
+  a menu bar icon too) with a global hotkey, the microphone and Apple's speech
+  recognizer. It knows nothing about the assistant. It POSTs text to the local server
+  and shows what comes back. The bar and the window are the same web page,
   `savta/web/index.html`, hosted in a WKWebView, so there is one UI in four languages.
 - **`savta/`** is the assistant, a plain Python server on `127.0.0.1`. The router owns
   every decision; the actions own every side effect.

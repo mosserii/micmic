@@ -11,6 +11,8 @@ from . import account
 from . import onboarding_api
 from . import login_item
 from . import asr_models
+from . import voice as _voice
+from . import voice_models
 from . import profile as _prof
 
 WEB = Path(__file__).resolve().parent / "web"
@@ -146,6 +148,21 @@ def _valid_hotkey(spec: str) -> bool:
     return len(key) == 1 and key.isalnum()
 
 
+def _valid_backup_hotkey(spec: str) -> bool:
+    """"off", or "mod+...+key" with a letter, a digit or space: what native/listener.py
+    carbon_combo() takes. Never a bare key (it would fire while she types)."""
+    if spec in ("off", "none"):
+        return True
+    parts = [x for x in spec.split("+") if x]
+    if len(parts) < 2:
+        return False
+    *mods, key = parts
+    # parse_combo()'s own modifier names (_MODIFIER_BITS), not the wider _MODS.
+    if any(m not in ("cmd", "shift", "opt", "alt", "ctrl") for m in mods):
+        return False
+    return key == "space" or (len(key) == 1 and key.isalnum())
+
+
 def _ts(payload: dict) -> float | None:
     """The listener's turn id: the epoch seconds it opened at."""
     try:
@@ -161,7 +178,11 @@ def turn_open(payload: dict) -> dict:
     if (payload.get("kind") or "") == "armed":
         return {"paused": False}
     held = _r.pause_pending(_ts(payload))
-    return {"paused": held is not None, "to": (held or {}).get("to")}
+    # Her key during the countdown to her emergency contact stops it (owner decision
+    # 2026-10-03); her yes in this turn can still call.
+    stopped = _r.hold_emergency(_ts(payload))
+    return {"paused": held is not None, "to": (held or {}).get("to"),
+            **({"emergency_stopped": stopped.get("who")} if stopped else {})}
 
 
 def turn_closed(payload: dict) -> dict:
@@ -211,6 +232,11 @@ def _validate_settings(payload: dict) -> tuple[dict, list[str]]:
     if "hotkey" in payload:
         v = str(payload["hotkey"]).strip().lower()
         (ok.__setitem__("hotkey", v) if _valid_hotkey(v) else bad.append("hotkey"))
+    if "backup_hotkey" in payload:
+        # The talk key that needs no permission: a combination with a modifier, or "off".
+        v = str(payload["backup_hotkey"]).strip().lower()
+        (ok.__setitem__("backup_hotkey", v) if _valid_backup_hotkey(v)
+         else bad.append("backup_hotkey"))
     if "allow_send" in payload:
         v = payload["allow_send"]
         (ok.__setitem__("allow_send", v) if isinstance(v, bool) else bad.append("allow_send"))
@@ -220,7 +246,24 @@ def _validate_settings(payload: dict) -> tuple[dict, list[str]]:
     if "open_at_login" in payload:
         v = payload["open_at_login"]
         (ok.__setitem__("open_at_login", v) if isinstance(v, bool) else bad.append("open_at_login"))
+    if "voice" in payload:
+        # Settings > Voice (savta/voice.py). "cloud": each language's engines as
+        # micmic.config.json lists them (the natural cloud voice where it is listed).
+        # "device": the same without the cloud voice. "mac": macOS `say` only.
+        v = str(payload["voice"])
+        (ok.__setitem__("voice", v) if v in _voice.CHOICES else bad.append("voice"))
+    if "voice_tags" in payload:
+        # The audio tags' kill switch (savta/voice_tags.py): false, and no line gets one.
+        v = payload["voice_tags"]
+        (ok.__setitem__("voice_tags", v) if isinstance(v, bool) else bad.append("voice_tags"))
     return ok, bad
+
+
+def voice_status() -> dict:
+    """The "voice" field of /api/config and GET /api/voice: her choice, the engines her
+    language uses (savta/voice.py), which one speaks now, and the state of the voice on
+    the Mac's download for English (the one language Kokoro speaks)."""
+    return {**voice_models.status("english"), **_voice.status()}
 
 
 def speech_language(cfg: dict | None = None) -> str:
@@ -286,6 +329,8 @@ class H(BaseHTTPRequestHandler):
         if self.path.startswith("/api/asr"):
             return self._send(200, json.dumps(
                 asr_models.status(speech_language())).encode())
+        if self.path.startswith("/api/voice"):
+            return self._send(200, json.dumps(voice_status()).encode())
         if self.path.startswith("/api/config"):
             cfg = load_config()
             return self._send(200, json.dumps({
@@ -331,6 +376,12 @@ class H(BaseHTTPRequestHandler):
                 # listener loads the local model once "state" is "ready"; the page
                 # shows the download. Added field; a client that ignores it is on Apple.
                 "asr": asr_models.status(speech_language(cfg)),
+                # The natural voice (savta/voice_models.py): additive, a page that does
+                # not know it keeps the Mac voice.
+                "voice": voice_status(),
+                # The talk key that needs no permission (⌃⌥ M): the combo the
+                # listener registers, and what it reported back (onboarding_api).
+                "backup_hotkey": onboarding_api.backup_hotkey(cfg),
             }, ensure_ascii=False).encode())
         if self.path.startswith("/api/memory"):
             from . import memory as _mem
@@ -527,7 +578,32 @@ class H(BaseHTTPRequestHandler):
                 asr_models.cancel()
                 return self._send(200, json.dumps(asr_models.status(speech_language())).encode())
             return self._send(200, json.dumps(asr_models.install(speech_language())).encode())
-        if self.path.startswith(("/api/onboarding", "/api/permissions", "/api/install/move")):
+        if self.path.startswith("/api/voice"):
+            # {"action": "install"}: download the voice on the Mac (Kokoro, English).
+            # {"action": "cancel"}: stop that download (kept for a resume).
+            # {"action": "use", "voice": "cloud"|"device"|"mac"}: switch, nothing
+            # downloaded (savta/voice.py CHOICES).
+            try:
+                payload = json.loads(self._drain() or b"{}")
+            except Exception:  # noqa: BLE001
+                payload = {}
+            from .router import save_settings, load_settings
+            action = payload.get("action")
+            if action == "cancel":
+                voice_models.cancel()
+            elif action == "install":
+                # Only ever on her click (Settings > Voice > On-device voice (English)):
+                # nothing downloads Kokoro by itself, onboarding included.
+                if load_settings().get("voice") == "mac":
+                    save_settings({"voice": "device"})
+                voice_models.install("english")
+            elif action == "use" and payload.get("voice") in _voice.CHOICES:
+                save_settings({"voice": payload["voice"]})
+                _voice.stop()
+            _voice.warm()
+            return self._send(200, json.dumps(voice_status()).encode())
+        if self.path.startswith(("/api/onboarding", "/api/permissions", "/api/install/move",
+                                 "/api/backup_hotkey_status")):
             return onboarding_api.post(self, self._drain())
         if self.path.startswith("/api/upgrade"):
             return self._account_link("upgrade")
@@ -585,6 +661,8 @@ class H(BaseHTTPRequestHandler):
                 save_settings(changes)
                 if "allow_send" in changes:
                     apply_send_setting()
+                if "voice" in changes:
+                    _voice.warm()
             cfg = load_config()
             return self._send(200, json.dumps(
                 {"saved": sorted(changes), "rejected": rejected,
@@ -790,6 +868,11 @@ def main():
         _restore_timers()
     except Exception:  # noqa: BLE001  (a bad state file must never stop the launch)
         traceback.print_exc()
+    # The natural voice, when she chose it and it is installed: loaded in the background
+    # so her first answer already has it (until then `say` speaks), and again the moment
+    # a download finishes.
+    voice_models.ON_READY.append(lambda lang: _voice.warm(lang))
+    _voice.warm()
     srv = Server(("127.0.0.1", PORT), H)
     print(f"\n  MicMic listening on http://127.0.0.1:{PORT}")
     if not _bundled():

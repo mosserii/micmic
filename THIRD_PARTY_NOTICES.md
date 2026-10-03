@@ -38,6 +38,12 @@ The Python interpreter statically includes these libraries:
 | [Node.js](https://nodejs.org/) | MIT | Fetched (sha256-pinned) the first time a task needs the browser agent. |
 | [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) 0.2.4 (Python binding and native library, includes [ggml](https://github.com/ggml-org/ggml), MIT) | MIT | Fetched from PyPI (sha256-pinned) with Better recognition. |
 | [Parakeet unified-en 0.6B](https://huggingface.co/nvidia/parakeet-unified-en-0.6b), Q8_0 GGUF by [Handy](https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf) | [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/) | Fetched (revision- and sha256-pinned) when English Better recognition is turned on. Licensed by NVIDIA Corporation under the NVIDIA Open Model License. |
+| [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) v1.0, voice af_heart, MLX weights by [mlx-community](https://huggingface.co/mlx-community/Kokoro-82M-bf16) | Apache-2.0 | Fetched (revision- and sha256-pinned) only when she chooses Settings > Voice > On-device voice (English). Never downloaded by default. |
+| [MLX](https://github.com/ml-explore/mlx) 0.32.3 and mlx-metal | MIT | Fetched from PyPI (sha256-pinned) with the on-device voice. |
+| [mlx-audio](https://github.com/Blaizzy/mlx-audio) 0.5.7 (Kokoro model code) | MIT | Fetched from PyPI (sha256-pinned) with the on-device voice. |
+| [NumPy](https://numpy.org/) 2.3.5 | BSD-3-Clause | Fetched from PyPI (sha256-pinned) with the on-device voice. |
+| [espeak-ng](https://github.com/espeak-ng/espeak-ng) 1.52 via [espeakng-loader](https://github.com/thewh1teagle/espeakng-loader) 0.2.4 | GPL-3.0-or-later | Fetched from PyPI (sha256-pinned) with the on-device voice: a separate library MicMic calls through ctypes for letter-to-sound. Its source is at the link. |
+| espeak-to-Kokoro phoneme table from [misaki](https://github.com/hexgrad/misaki) | Apache-2.0 | Copied into savta/voice.py (a short mapping table). |
 
 ## Services the app talks to
 
@@ -46,6 +52,10 @@ These are network services, not software shipped in the app. Their own terms app
 - **Jev** by TypeSafe AI: understands requests. Jev is a trademark of TypeSafe AI.
   MicMic is not affiliated with or endorsed by TypeSafe. See [TRADEMARKS.md](TRADEMARKS.md).
 - **Google Gemini**: splits compound requests and answers knowledge questions.
+- **ElevenLabs**: speaks MicMic's replies in the natural cloud voice (Eleven v4 Turbo), in
+  every language (English, Hebrew, Arabic, Russian), through the MicMic cloud, or directly
+  with your own `ELEVENLABS_API_KEY`. The reply text goes there, never your own voice. Off
+  with Settings > Voice > On-device voice.
 - **wttr.in**: weather.
 - **YouTube, Google and DuckDuckGo** public pages: finding the thing you asked to
   play or open.

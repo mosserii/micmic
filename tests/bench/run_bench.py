@@ -506,6 +506,9 @@ router.GUIDE.speaker = lambda text, lang="english": _rec("said", (lang, text))
 router.due_briefing = lambda: False
 router.CANCEL_WINDOW = 3600.0
 router.SCAM_WINDOW = 3600.0
+# The countdown to her emergency contact never runs out on its own here: a call armed
+# in a turn is that turn's "call" effect (see _effects), like an armed message is a send.
+router.EMERGENCY_WINDOW = 3600.0
 
 # --------------------------------------------------------------- budget + timing
 # jev_hedged: duplicates savta/jev.py sent for a slow question. Each is a billed call,
@@ -632,6 +635,8 @@ def reset_world() -> None:
     router.PENDING = None
     router.AWAITING = None
     router.LAST_EMERGENCY = None
+    if hasattr(router, "cancel_emergency"):
+        router.cancel_emergency()
     router.MEM = router.Memory()
     router._HISTORY.clear()
     try:
@@ -719,6 +724,9 @@ def _effects(snap: dict, out: dict) -> dict:
     add("event", [list(map(str, e)) for e in d["event"]])
     add("timer", [f"{m} min: {t}" for m, t in d["timer"]])
     add("call", d["call"])
+    emg = getattr(router, "EMERGENCY_PENDING", None)
+    if emg is not None and emg is not snap.get("_emergency"):
+        add("call", [f"{emg.get('who')} (after the countdown)"])
     music = d["music"] + [u for u in d["url"] if "youtube" in u or "music.apple" in u or "spotify" in u]
     add("music", music)
     add("web_task", [f"{g} @ {s}" for g, s in d["web_task"]])
@@ -835,6 +843,7 @@ def run_case(j, case: dict, use_judge: bool) -> dict:
                 SCREEN_STATE["ctx"] = _screen_ctx(t["setup"]["screen"])
         snap = {k: len(v) for k, v in REC.items()}
         snap["_launched"] = len(LAUNCHED)
+        snap["_emergency"] = getattr(router, "EMERGENCY_PENDING", None)
         pend_before = router.PENDING
         s0 = dict(STATS)
         t0 = time.time()

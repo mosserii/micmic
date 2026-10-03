@@ -172,9 +172,12 @@ class _Cancelled(Exception):
     pass
 
 
-def _fetch(url: str, dest: Path, size: int, sha: str, job: _Job) -> None:
+def _fetch(url: str, dest: Path, size: int, sha: str, job: _Job,
+           seam: Path | None = None) -> None:
     """Download to dest.part (resumed with Range), check size and SHA-256, then move
-    into place. A file already in place with the right hash is counted and kept."""
+    into place. A file already in place with the right hash is counted and kept.
+    `job` is anything with .done, .cancel; `seam` is where the test markers go
+    (savta/voice_models.py downloads through here too, into its own folder)."""
     if dest.exists() and dest.stat().st_size == size and _sha(dest) == sha:
         job.done += size
         return
@@ -184,7 +187,7 @@ def _fetch(url: str, dest: Path, size: int, sha: str, job: _Job) -> None:
         _truncate(part); have = 0
     job.done += have
     if have < size:
-        _get(url, part, have, job)
+        _get(url, part, have, job, seam)
     if part.stat().st_size != size:
         raise IOError(f"{dest.name}: got {part.stat().st_size} bytes, expected {size}")
     if _sha(part) != sha:
@@ -204,11 +207,12 @@ TEST_TRIPWIRE = "REAL_DOWNLOAD_IN_TEST"
 SEAM_CALLED = "DOWNLOAD_REQUESTED"
 
 
-def _get(url: str, part: Path, have: int, job: _Job) -> None:
+def _get(url: str, part: Path, have: int, job: _Job, seam: Path | None = None) -> None:
+    seam = seam or base()
     if os.environ.get("MICMIC_ASR_NO_DOWNLOAD"):
         # The test seam: the job stays "downloading" at 0 and never touches the network.
         # SEAM_CALLED lets a test see that a download was asked for, and of what.
-        with open(base() / SEAM_CALLED, "a") as f:
+        with open(seam / SEAM_CALLED, "a") as f:
             f.write(url + "\n")
         job.cancel.wait()
         raise _Cancelled()
@@ -216,7 +220,7 @@ def _get(url: str, part: Path, have: int, job: _Job) -> None:
             "127.0.0.1", "localhost"):
         # MICMIC_STATE_DIR is set by tests only (savta/paths.py). A test that forgot the
         # seam above would pull 733 MB: refuse, and leave a tripwire the test checks.
-        (base() / TEST_TRIPWIRE).write_text(url)
+        (seam / TEST_TRIPWIRE).write_text(url)
         raise IOError("a test tried to download a model for real")
     req = urllib.request.Request(url, headers={"User-Agent": "MicMic"})
     if have:

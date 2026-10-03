@@ -470,8 +470,123 @@ def t_remaining():
                        "english") == ["Apple is at 330. A year ago it was 250."])
 
 
+# ================================================================== a price to shop for
+def t_shop_price():
+    """Bench hard-web-001 at d88a599 and in the cats runs: "find me the cheapest flight
+    to new york next tuesday and book it" opened with "ASML Holding is at 1,808 US
+    dollars ..." (3 of 4 repeats). The split's first step read as do_online 0.51 /
+    look_up 0.49 with live_kind price 0.85: under ACT_ON_INTENT it became small talk,
+    small talk with a live kind became look_up, no coin or rate was picked, and the
+    "company named with no word for its shares" fallback sent the topic "new york" to
+    Yahoo, whose first listing is ASML's New York registry shares. A flight's price is
+    found by shopping for it, never read off a market; and a company is only answered
+    when Yahoo's listing is that company."""
+    print("\nt_shop_price")
+    real_run, real_where = router.web.run, router.web.where_to_start
+    router.web.where_to_start = lambda j_, task: ("https://www.google.com/travel/flights",
+                                                  "flights")
+    router.web.run = lambda *a, **k: {"did": "web_done", "steps": [], "url": "u"}
+    market = {"coingecko": json.dumps([{"name": "Bitcoin", "symbol": "btc",
+                                        "current_price": 61000.0}]).encode(),
+              "frankfurter": json.dumps({"date": "2026-10-01", "rates": {"ILS": 3.7}}).encode(),
+              "finance/search": _search([("ASML", "ASML Holding N.V.", "EQUITY"),
+                                         ("BNY", "The Bank of New York Mellon Corporation",
+                                          "EQUITY")]),
+              "chart/ASML": _chart("ASML", "ASML Holding N.V.", [1800.0, 1811.0, 1808.49])}
+    torn = {"choice": "do_online", "confidence": 0.51,
+            "probabilities": {"do_online": 0.51, "look_up": 0.49}}
+    flight = {"intent": torn, "live_kind": "price", "span_term": "new york",
+              "span_term_exists": 0.95, "span_clock_place": "new york",
+              "money_involved": 0.58}
+
+    def no_market(r) -> bool:
+        live_steps = [s for s in (r.get("detail") or {}).get("results") or []
+                      if (s.get("detail") or {}).get("live_kind")]
+        return (not any(p in u for u in URLS for p in ("yahoo", "coingecko", "frankfurter"))
+                and "live_kind" not in (r.get("detail") or {}) and not live_steps
+                and "ASML" not in (r.get("say") or "") and "price" not in (r.get("say") or ""))
+    try:
+        fresh()
+        FEEDS.update(market)
+        r, _ = ask("find me the cheapest flight to new york next tuesday", flight)
+        check("a flight's price, torn between web and look-up: a web task, no market read",
+              r["did"] == "web_working" and no_market(r), f"{r['did']} {r['say']} {URLS}")
+
+        fresh()
+        FEEDS.update(market)
+        r, _ = ask("how much is a flight to rome next week",
+                   {"live_kind": "price", "span_term": "rome", "span_term_exists": 0.95})
+        check("a flight's price read as a sure look-up: still the web, never a market",
+              r["did"] == "web_working" and no_market(r), f"{r['did']} {r['say']} {URLS}")
+
+        for lang, said in (("hebrew", "כמה עולה הטיסה הכי זולה לרומא"),
+                           ("arabic", "قديش سعر أرخص رحلة طيران على روما"),
+                           ("russian", "сколько стоит самый дешёвый билет в рим")):
+            fresh()
+            FEEDS.update(market)
+            r, _ = ask(said, {"live_kind": "price", "span_term": "rome", "span_term_exists": 0.95,
+                              "language": lang}, lang=lang)
+            check(f"{lang}: a ticket's price goes to the web", r["did"] == "web_working"
+                  and no_market(r), f"{r['did']} {r['say']} {URLS}")
+
+        fresh()
+        FEEDS.update(market)
+        asked: list = []
+        real_split = LLM.split_steps
+        LLM.split_steps = lambda u, *a, **k: (asked.append(u), [
+            "find me the cheapest flight to new york next tuesday",
+            "book the cheapest flight to new york next tuesday"])[1]
+        try:
+            r, _ = ask("find me the cheapest flight to new york next tuesday and book it",
+                       {**flight, "is_compound": 0.92})
+        finally:
+            LLM.split_steps = real_split
+        # Owner decision 2026-10-03: "book" is a purchase word, so the sentence is never
+        # split: one search, then "Shall I go ahead and book?" before any booking step.
+        check("the bench sentence: never split, no market read, asks before booking",
+              r["did"] == "confirm_web" and no_market(r) and not asked
+              and "book" in (r.get("say") or ""),
+              f"{r['did']} {r['say']} {r.get('detail')}")
+
+        fresh()
+        FEEDS.update(market)
+        r, _ = ask("how much is new york",
+                   {"live_kind": "price", "span_term": "new york", "span_term_exists": 0.95})
+        check("a place is not a company: Yahoo's ASML listing is not said",
+              r["did"] == "live_not_found" and "ASML" not in (r["say"] or ""),
+              f"{r['did']} {r['say']}")
+
+        fresh()
+        FEEDS.update({**market, "finance/search": _search([("TSLA", "Tesla, Inc.", "EQUITY")]),
+                      "chart/TSLA": _chart("TSLA", "Tesla, Inc.", [400.0, 410.0])})
+        r, _ = ask("how much is tesla",
+                   {"live_kind": "price", "span_term": "tesla", "span_term_exists": 0.95})
+        check("a company with no word for its shares is still answered",
+              r["did"] == "answered" and "Tesla" in (r["say"] or ""), f"{r['did']} {r['say']}")
+
+        fresh()
+        FEEDS.update({**market,
+                      "finance/search": _search([("KO", "The Coca-Cola Company", "EQUITY")]),
+                      "chart/KO": _chart("KO", "The Coca-Cola Company", [70.0, 71.0])})
+        r, _ = ask("how much is coca cola",
+                   {"live_kind": "price", "span_term": "coca cola", "span_term_exists": 0.95})
+        check("  spelled with a hyphen in Yahoo's name, still that company",
+              r["did"] == "answered" and "Coca-Cola" in (r["say"] or ""),
+              f"{r['did']} {r['say']}")
+
+        fresh()
+        FEEDS.update(market)
+        r, _ = ask("how is new york stock doing",
+                   {"live_kind": "price", "span_term": "new york stock",
+                    "span_term_exists": 0.95})
+        check("with a word for shares the stock path is as it was (Yahoo's first listing)",
+              r["did"] == "answered" and "ASML" in (r["say"] or ""), f"{r['did']} {r['say']}")
+    finally:
+        router.web.run, router.web.where_to_start = real_run, real_where
+
+
 def main():
-    for t in (t_scores, t_stocks, t_weather_range, t_stammer, t_remaining):
+    for t in (t_scores, t_stocks, t_weather_range, t_stammer, t_remaining, t_shop_price):
         try:
             t()
         except Exception:  # noqa: BLE001

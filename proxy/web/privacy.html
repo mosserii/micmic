@@ -21,41 +21,156 @@
   </div>
 </header>
 <main class="doc">
-  <p class="draft">First draft, for review by a lawyer before it is relied on.</p>
   <h1>Privacy policy</h1>
-  <p class="meta">Last updated {{updated}}. MicMic is made by {{operator}}.</p>
+  <p class="meta">Version {{version}}. Last updated {{updated}}. This policy covers the MicMic app for Mac and the MicMic app for iPhone, and this website. Using MicMic is also covered by our <a href="/terms">terms of use</a>.</p>
 
   <h2>The short version</h2>
-  <p>MicMic sends what it needs to answer you, and we keep none of it. We keep a count of how many requests each device made each day, and, if you pay, the Stripe references for your subscription. No recordings, no transcripts, no screenshots, no advertising, no selling of data.</p>
+  <p>MicMic sends what it needs to answer you, and to speak the answer, and we keep none of what you say. Our server keeps a count of how many requests each device made and how much it had spoken, and, if you pay, a reference to your subscription. No recordings, no transcripts, no screenshots, no advertising, no tracking across other apps or websites, and no selling of data. We do not use your data to train AI models. When MicMic speaks in its natural cloud voice, the words of its reply go to ElevenLabs, which keeps them by default; choosing On-device voice in Settings keeps them on your device (see <a href="#spoken-replies">Spoken replies</a>). On iPhone, our server also keeps what MicMic remembers for you, such as notes you ask it to keep, until you delete it or stop using MicMic for 30 days (see <a href="#iphone">On iPhone</a>).</p>
 
-  <h2>What reaches our servers</h2>
-  <p>When you speak to MicMic, your voice is turned into text. In English and Hebrew this happens on your Mac: English by a speech model MicMic downloads to your Mac (macOS&#39;s own on-device recognizer is used until it is ready), Hebrew by macOS on your Mac. When macOS has no on-device recognizer for your language, which today is often the case for Arabic and Russian, macOS sends your voice to Apple&#39;s speech service to turn it into text. MicMic itself never keeps a recording. That text, and a short description of what MicMic is doing, is sent to our server to work out what you asked for. When you ask about your screen, the text on the screen, and for some questions a picture of the window in front, is sent too. When you ask MicMic to guide you through something on your screen step by step, the same is sent once for each step, and never while a password field is being typed in (then only the names of the buttons and fields go, without a picture).</p>
+  <h2 id="controller">Who is responsible for your data</h2>
+  <p>{{operator}} is the controller of the personal data described here: the company that decides how and why it is used. {{operator}} is registered in Israel under company number 517172011, with its registered address at 6 Hashachaf, Tel Aviv-Jaffa 6803452, Israel. For any question about your data or this policy, or to use your rights, contact us{{contact_inline}}.</p>
+  <p>We are appointing a representative in the European Union and in the United Kingdom under Article 27 of the GDPR and the UK GDPR, and will name them here. Until then, you can reach us directly at the contact above about any question or request.</p>
+
+  <h2>No account, just a device</h2>
+  <p>MicMic does not ask you to create an account, and does not ask for your name, email address or phone number. The first time it runs, the app gets a random device id and a secret access token from our server. The token stays on your device (on iPhone, in the iPhone&#39;s Keychain) and proves to our server that a request comes from your copy of MicMic. Your plan and your usage belong to that device id.</p>
+
+  <h2 id="mac">On Mac: what reaches our servers</h2>
+  <p>When you speak to MicMic, your voice is turned into text. In English and Hebrew this happens on your Mac: English by a speech model MicMic downloads to your Mac (macOS&#39;s own on-device recognizer is used until it is ready), Hebrew by macOS on your Mac. When macOS has no on-device recognizer for your language, which today is often the case for Arabic and Russian, macOS sends your voice to Apple&#39;s speech service to turn it into text, under Apple&#39;s privacy policy. MicMic itself never uploads or keeps a recording.</p>
+  <p>That text is sent to our server to work out what you asked for, together with what MicMic needs to understand it: the date and time, names from your contacts that it can match a name against (a list of names only, never more than 250 and usually far fewer), what is playing, what just happened in this conversation, a message it is preparing for you, the kinds of things you usually ask for, any saved preference that the request touches, and details you told MicMic about yourself, such as your home city, when a request needs them. Phone numbers and email addresses from your contacts are not sent for this; a number you say out loud is part of the text of your request.</p>
+  <ul>
+    <li><strong>Your screen.</strong> When you ask about your screen, the text on the screen, and for some questions a picture of the window in front, is sent too. When you ask MicMic to guide you through something step by step, the same is sent once for each step, and never while a password field is being typed in (then only the names of the buttons and fields go, without a picture).</li>
+    <li><strong>Websites.</strong> When you ask MicMic to do something on a website for you, such as finding a table or filling in a booking, the text and the buttons and fields of each page are sent to work out the next step. MicMic never types into a password, card or identity document field, and never presses the button that pays.</li>
+    <li><strong>Your messages.</strong> When you ask MicMic to read your messages, it reads them on your Mac, from Messages or WhatsApp, only with the permission you give macOS. The messages it reads to you are spoken as described under <a href="#spoken-replies">Spoken replies</a>.</li>
+    <li><strong>Your device.</strong> When MicMic first connects, it sends the name of your Mac as set in macOS (which often includes your first name) and the app version. We keep them as a label for the device.</li>
+  </ul>
   <p>Our server passes each request on to the service that answers it and hands the answer back. It does not write the request or the answer to disk, and it does not put them in logs.</p>
 
-  <h2>Who else processes it</h2>
+  <h2 id="iphone">On iPhone: what reaches our servers</h2>
+  <p>Before MicMic for iPhone sends anything to our servers, it shows you who receives what and asks for your permission. When you speak to MicMic on iPhone, iOS turns your voice into text. Where iOS can do this on the iPhone it does; for some languages and devices iOS sends your voice to Apple&#39;s speech service, under Apple&#39;s privacy policy. MicMic sends text only, never audio, and never keeps a recording.</p>
+  <p>Each request sends our server what you said or typed, and what MicMic needs to act on it:</p>
   <ul>
-    <li><strong>TypeSafe AI (Jev)</strong> works out what you asked for from the words you said.</li>
-    <li><strong>Google (Gemini API)</strong> answers questions about your screen.</li>
-    <li><strong>Stripe</strong> takes payment for MicMic Pro. Your card details go to Stripe, never to us.</li>
-    <li><strong>Railway</strong> hosts our server.</li>
-    <li><strong>Apple</strong> turns your voice into text when your Mac has no on-device recognizer for your language (see above). This goes from macOS to Apple directly, not through us.</li>
+    <li>The language you chose, your time zone, the local time, your region, the app version and the iPhone model and iOS version.</li>
+    <li>If you let MicMic use your contacts: the names in your address book (and nicknames), each with an id that only your iPhone can turn back into a person, and whether the contact has a phone number or an email. Phone numbers, email addresses and street addresses never leave your iPhone. Your iPhone fills in the number itself when you tap to send or call.</li>
+    <li>If you let MicMic use your location: the city and country you are in, never your exact position. It is used for things like the weather and places near you. The emergency number MicMic shows comes from your iPhone&#39;s region setting, never from your location.</li>
+    <li>If you ask about your calendar or reminders: the events or reminders you ask about.</li>
+    <li>What MicMic is playing, the message it is preparing for you, which permissions you have given it, and the battery level.</li>
+    <li>Something you share with MicMic from another app (text, a link, or a picture), only when you share it.</li>
   </ul>
-  <p>Each handles the data under its own terms.</p>
+  <p>Our server works out the answer and tells your iPhone what to do, for example open a message ready for you to send. Your contacts&#39; names, and the conversation itself, are held in the server&#39;s memory only while a conversation is going on, and are not written to disk. Requests and answers are not written to logs.</p>
+  <p>So that MicMic can remember things for you on iPhone, our server keeps, under your random device id: notes you ask it to keep, preferences you set (such as which app to use for messages), the kinds of things you usually ask for, and the ids it needs to change or cancel a reminder, an event or a timer it made for you. You can delete all of it at any time from the app (see <a href="#delete">Deleting your data</a>).</p>
+  <p>Calendar events, reminders, alarms and timers that MicMic makes are created by your iPhone in your own Calendar, Reminders and Clock, under Apple&#39;s terms. Messages, calls and emails are always handed to the iPhone&#39;s own Messages, Phone, Mail, or the app you chose, and nothing is sent or called until you tap.</p>
 
-  <h2>What we store</h2>
+  <h2 id="website">On this website</h2>
+  <p>This website runs no scripts, sets no cookies, and has no analytics or advertising. It is served by Vercel, which passes each request to our server on Railway. Like any website, they receive your internet address and the usual details your browser sends, such as the page asked for and the browser type, and may keep them in their logs for a limited time under their own policies. Our own server does not log internet addresses. When you buy MicMic Pro on Mac, the checkout pages are Stripe&#39;s, under Stripe&#39;s privacy policy.</p>
+
+  <h2 id="spoken-replies">Spoken replies</h2>
+  <p>MicMic speaks its replies in a natural, computer-generated voice made by ElevenLabs, in every language it speaks: English, Hebrew, Arabic and Russian. The words of each spoken reply, which can include a message it is about to send, a message someone sent you, a name, or what it read on your screen, are sent through our server to ElevenLabs, which turns them into speech. A one-word direction for the tone of voice, such as &quot;softly&quot;, can go with them. ElevenLabs keeps the text and the audio by default, under its own terms. Your own voice is not part of this: what you say is turned into text as described above, and only MicMic&#39;s reply is voiced. Choosing <strong>On-device voice</strong> in Settings keeps every spoken reply on your device: your Mac or iPhone speaks it itself, and nothing MicMic says is sent anywhere to be voiced. When there is no network, or the cloud voice does not answer in time, your device speaks the reply itself.</p>
+  <p>So that common lines such as &ldquo;Alright.&rdquo; are not made again every time, our server keeps the audio of a line once more than one request has asked for it. It is stored under a one-way fingerprint and encrypted with a key made from the words themselves, so it cannot be read back without already knowing the exact sentence, and it is not linked to any device. A reply that reads back your messages, your notes, your screen or a message about to be sent is never kept, and neither is a sentence written for you by Gemini. Your Mac keeps its own copy of such common lines too, so they can play again without a connection.</p>
+
+  <h2 id="on-device">What stays only on your device</h2>
   <ul>
-    <li>For each device: a random device id, a one-way fingerprint of its access token (not the token itself), the device name and app version the app reports, when it was set up, and its plan.</li>
-    <li>How many requests each device made on each day.</li>
-    <li>To stop abuse of free sign-ups: a one-way fingerprint of the internet address a device signed up from, with a count for that day. It is cleared once the day is over.</li>
-    <li>If you subscribe: your Stripe customer and subscription ids, the subscription's status and renewal date. Stripe holds your name, email and payment details.</li>
-    <li>Server logs: the time, the kind of request, its result and a short prefix of the device fingerprint. No request content and no internet address.</li>
+    <li><strong>On Mac</strong>, in MicMic&#39;s folder in Library/Application Support/MicMic: your settings and preferences, your profile and what MicMic has learned you like, your notes, timers, a record of your recent requests (the last 4,000) that helps when something goes wrong, and up to 50 MB of common spoken lines. Your contacts book and your messages are read on your Mac and are not copied to our servers. Deleting that folder removes all of it.</li>
+    <li><strong>On iPhone</strong>: your access token (in the Keychain), your record of agreeing to these documents, the link between each contact id and the real contact, phone numbers, email addresses, your exact location, and your settings. Deleting the app removes them, apart from the access token, which iOS may keep in the Keychain until you use <strong>Delete my account and data</strong>.</li>
   </ul>
+
+  <h2 id="stored">What our server stores</h2>
+  <ul>
+    <li>For each device: a random device id, a one-way fingerprint of its access token (not the token itself), the device name and app version the app reports (on iPhone, the name is always just &ldquo;iPhone&rdquo;), when it was set up, and its plan.</li>
+    <li>On iPhone, a record that you agreed to our terms, this policy and the sharing with the services named here: which versions you agreed to, when, that you confirmed you are 18 or older, and the app language at the time.</li>
+    <li>How many requests each device made, and how many characters of spoken replies it had voiced, in total for the free plan and per day and per month for Pro.</li>
+    <li>On iPhone, what MicMic remembers for you, as described under <a href="#iphone">On iPhone</a>.</li>
+    <li>The audio of common spoken lines, encrypted as described under <a href="#spoken-replies">Spoken replies</a>, and for lines that may be kept, a one-way fingerprint with a count of how often they were asked for. None of this is linked to a device.</li>
+    <li>To stop abuse of free sign-ups: a one-way fingerprint of the internet address a device signed up from, with a count for that day.</li>
+    <li>If you subscribe on Mac: your Stripe customer and subscription ids, the subscription&#39;s status and renewal date, and the ids of the payment events Stripe sent us. Stripe holds your name, email and payment details.</li>
+    <li>If you subscribe on iPhone: what Apple tells us about the subscription, such as its id, the product, its status and when it renews or ends, and a random id we give Apple so that a purchase can be matched to your device. Apple holds your payment details; we never see them.</li>
+    <li>Server logs: the time, the kind of request, its result, how long it took, and the first characters of the device fingerprint or device id (for a payment, the device id and Stripe&#39;s event id). No request content and no internet address.</li>
+    <li>If you email us: your email and what you wrote, so that we can answer you.</li>
+  </ul>
+  <p>Crash reports: MicMic uses no analytics or crash reporting service. If you choose in your iPhone&#39;s settings to share analytics with app developers, Apple may give us crash reports and usage statistics, as Apple describes in its own privacy policy.</p>
+
+  <h2 id="retention">How long we keep it</h2>
+  <ul>
+    <li><strong>What you say, what is on your screen, and MicMic&#39;s answers:</strong> not kept by us. Our server holds a request in memory only while it handles it.</li>
+    <li><strong>An iPhone conversation:</strong> held in our server&#39;s memory while it goes on, together with your contacts&#39; names. A conversation with no new request for 15 minutes ends, and that memory is cleared.</li>
+    <li><strong>What MicMic remembers for you on iPhone</strong> (notes, preferences, the kinds of things you ask for, ids of things it made): until you delete it in the app, and in any case erased automatically once that iPhone has not used MicMic for 30 days.</li>
+    <li><strong>A device&#39;s record, its usage counts, its consent record and its subscription references:</strong> while the device uses MicMic, until you delete them in the app (iPhone) or ask us to delete them (Mac).</li>
+    <li><strong>The sign-up address fingerprint:</strong> deleted once the day it was made is over (in UTC), at the latest when the next device signs up.</li>
+    <li><strong>Fingerprints of spoken lines:</strong> deleted when nobody has asked for that line for 30 days. <strong>Stored audio of common lines:</strong> kept until the store reaches its size limit, then the least recently used lines are deleted first.</li>
+    <li><strong>Ids of payment events</strong> from Stripe or Apple: kept so that the same event is never applied twice. They do not identify your device.</li>
+    <li><strong>Server logs:</strong> kept by our hosting provider, Railway, for the period its service keeps logs, then deleted.</li>
+    <li><strong>Emails to us:</strong> as long as needed to answer you and to keep a record of how we handled your request.</li>
+    <li><strong>Records we must keep by law,</strong> such as payment and tax records: as long as the law requires.</li>
+  </ul>
+  <p>The services listed below keep data under their own policies, as described under <a href="#ai">How the AI services treat your data</a>.</p>
+
+  <h2 id="purposes">Why we use it, and our legal bases</h2>
+  <p>We use your data only to provide MicMic: to answer and carry out your requests, speak the answers, remember what you ask us to remember, count usage against your plan, take payment, keep the service secure and stop abuse, answer you when you contact us, and meet our legal duties. We do not use it for advertising, we do not sell or share it for advertising, we do not use it to train AI models, and we do not make decisions about you by automated means that have legal or similarly significant effects on you.</p>
+  <p>Where the law asks for a legal basis, such as the EU and UK General Data Protection Regulation (GDPR), these are ours:</p>
+  <ul>
+    <li><strong>To provide the service you asked for</strong> (performance of our contract with you, GDPR Article 6(1)(b)): handling your requests, speaking replies, remembering what you asked MicMic to keep, your plan, usage limits and subscription.</li>
+    <li><strong>Your consent</strong> (GDPR Article 6(1)(a)): on iPhone, sending your requests to the AI services named on the consent screen and in this policy, and the permissions you give your device, such as contacts or location. You can withdraw consent at any time (see <a href="#delete">Deleting your data and withdrawing consent</a>); this does not affect what was done before. If what you ask MicMic includes sensitive information, such as something about your health, we process it only to carry out that request, on the basis of your explicit consent (GDPR Article 9(2)(a)).</li>
+    <li><strong>Our legitimate interests</strong> (GDPR Article 6(1)(f)): keeping MicMic secure and working, preventing abuse of the free plan, keeping minimal logs, and establishing or defending legal claims. You can object to this use at any time.</li>
+    <li><strong>Our legal obligations</strong> (GDPR Article 6(1)(c)): keeping payment and tax records, and answering lawful requests from authorities.</li>
+    <li><strong>Vital interests</strong> (GDPR Article 6(1)(d)): when you tell MicMic about an emergency, it may use your emergency contact to help you.</li>
+  </ul>
+  <p>You do not have a legal duty to give us any of this data. Giving it is your choice, but without it MicMic cannot answer you or carry out what you ask.</p>
+
+  <h2 id="processors">Who else processes it</h2>
+  <p>We use these service providers to run MicMic. Each receives only what it needs for its part, and handles it under its contract with us and its own terms and privacy policy.</p>
+  <ul>
+    <li><strong>Railway</strong> (Railway Corporation) hosts our servers and their database, in the United States. Everything that passes through our servers, and everything they store, is on Railway.</li>
+    <li><strong>Vercel</strong> (Vercel Inc.) serves this website and passes its requests to our servers. It receives the requests made to the website and the internet addresses they come from.</li>
+    <li><strong>TypeSafe AI (Jev)</strong> works out what you asked for. It receives the text of your request and the context described above, including names from your contacts, and, when you ask, the text of your screen or of a web page.</li>
+    <li><strong>Google (Gemini API)</strong> writes sentences when one is needed, such as an answer to a question or the wording of a message, and answers questions about your screen or a picture you shared. It receives the text it needs to write that sentence, and the screen text, window picture or shared picture when you ask about one.</li>
+    <li><strong>ElevenLabs</strong> turns MicMic&#39;s spoken replies into speech, unless you choose On-device voice. It receives the words of each spoken reply and a tone of voice.</li>
+    <li><strong>Stripe</strong> takes payment for MicMic Pro on Mac, and may sell it to you as the seller of record. It receives what you enter at checkout, such as your name, email, card and billing address, and your MicMic device id so that the payment reaches your device. Your card details go to Stripe, never to us.</li>
+    <li><strong>Apple</strong> turns your voice into text when your device cannot do it on the device. This goes from macOS or iOS to Apple directly, not through us. On iPhone, Apple also takes payment for MicMic Pro, and tells us the status of your subscription.</li>
+    <li><strong>YouTube and Apple&#39;s iTunes Search</strong> find the songs and videos you ask for. They receive the words being searched for, such as a song title, and the internet address of the computer asking, which on Mac is your Mac and on iPhone is our server.</li>
+  </ul>
+  <p>Some requests are also looked up in public information services: the weather (wttr.in and Open-Meteo), exchange rates (Frankfurter), crypto prices (CoinGecko), stock prices (Yahoo Finance), news (Google News) and Wikipedia. They receive the words being looked up, such as a city, and the internet address of the computer asking. When MicMic opens a website or an app for you, such as YouTube, Apple Music, Spotify, WhatsApp, a search page or a shop, that service sees what you do there under its own terms. The Mac app also checks GitHub for updates, and downloads its optional speech and voice models and the components it needs from Hugging Face, the Python Package Index and the Node.js website, which see your Mac&#39;s internet address.</p>
+  <p>Apple and Stripe, when they take payment, and the services MicMic opens for you, decide themselves how they use your data, under their own privacy policies. We may share data if the law requires it, to protect people&#39;s safety, or to defend our legal rights, and with a successor if MicMic is transferred to another company or person as our terms describe, who must then protect it as this policy does.</p>
+
+  <h2 id="ai">How the AI services treat your data</h2>
+  <p>We do not train AI models on your data, and we do not let anyone train models on it for us. This is what we know about each AI service, and what we do not know:</p>
+  <ul>
+    <li><strong>Google (Gemini API).</strong> We use Google&#39;s paid Gemini API. Under Google&#39;s terms for the paid service, Google does not use what we send to improve its products. Google may keep requests for a limited time to detect abuse, as its terms describe.</li>
+    <li><strong>ElevenLabs.</strong> ElevenLabs keeps the text of spoken replies and the audio it makes by default, under its own terms. We have not obtained a commitment from ElevenLabs that it keeps nothing, and we do not know how long it keeps them or whether its terms let it use them to improve its services. If this matters to you, choose On-device voice.</li>
+    <li><strong>TypeSafe AI (Jev).</strong> We have not yet received TypeSafe&#39;s written terms on how long it keeps requests and whether it uses them to improve its models, so we cannot tell you that today. We will update this policy when we have them.</li>
+  </ul>
+  <p>We send these services no device id, name, email or phone number of yours, so they cannot link a request to you by those. Because of that, we cannot ask them to delete a particular person&#39;s requests, but we will pass on a deletion request where they allow it.</p>
+
+  <h2 id="transfers">Where the data is processed</h2>
+  <p>{{operator}} is in Israel. Our servers are in the United States, and the services listed above process data in the United States and other countries. If you use MicMic from elsewhere, your data is transferred to those countries. The European Commission has decided that Israel protects personal data adequately. For transfers to the United States and other countries without such a decision, we rely on the European Commission&#39;s standard contractual clauses in our agreements with these services, or on the EU-U.S. Data Privacy Framework where a service is certified under it, and on the equivalent safeguards under UK and Swiss law and under Israel&#39;s rules on transferring data abroad. You can ask us for a copy of the safeguards that apply.</p>
+
+  <h2 id="rights">Your rights</h2>
+  <p>Wherever you live, you can ask us what data we hold about your device, ask for a copy of it, ask us to correct it, or ask us to delete it.</p>
+  <ul>
+    <li><strong>In the European Economic Area, the United Kingdom and Switzerland</strong> (GDPR and similar laws), you also have the right to: receive your data in a structured, machine-readable form and have it sent to another service (portability); object to our use of it based on legitimate interests; ask us to restrict how we use it; withdraw your consent at any time; and complain to the data protection authority where you live or work, or where you think the law was broken.</li>
+    <li><strong>In Israel</strong>, under the Protection of Privacy Law, 1981, including its Amendment 13 in force since August 2025, you have the right to see the data about you that we hold, and to ask us to correct or delete data that is wrong, incomplete, unclear or out of date. You can complain to the Privacy Protection Authority.</li>
+    <li><strong>In California and other US states with privacy laws</strong>, you have the right to know what personal information we collect, use and disclose, and to ask us to delete or correct it. We do not sell or share personal information as those laws define it, we do not use sensitive personal information for anything other than providing MicMic to you, and we will not treat you differently for using your rights. The personal information we collect is described above: device identifiers, usage, purchase status, the approximate location and contacts&#39; names you choose to share on iPhone, and the content of your requests, which we do not keep.</li>
+  </ul>
+  <p><strong>How to use your rights.</strong> On iPhone, you can delete everything at once with <strong>Delete my account and data</strong> (see below). For anything else, on Mac or iPhone, email us{{contact_inline}}. Because MicMic has no account with your name, we may ask for something that lets us find the right device and confirm the request is yours, such as details shown in the app or the email you gave Stripe. We answer within one month, and within the time the law of your country sets if it is shorter. If a request is complex, we may extend this where the law allows, and we tell you why. Using your rights is free.</p>
+
+  <h2 id="delete">Deleting your data and withdrawing consent</h2>
+  <p><strong>On iPhone:</strong> open MicMic&#39;s Settings, tap Account, then <strong>Delete my account and data</strong>. This deletes your device&#39;s records on our server, including usage counts, your consent record and everything MicMic remembers for you, and removes the access token from your iPhone. Deleting your data does not cancel a subscription bought through Apple: cancel it in your Apple Account settings first (see our <a href="/terms">terms</a>).</p>
+  <p><strong>Stopping the AI services on iPhone:</strong> in MicMic&#39;s Settings, under Privacy, turn off <strong>Use AI services</strong>. From then on MicMic sends nothing you say to our server or to the services above, and anything that needs them stays off until you turn it back on. Choosing On-device voice under Voice stops only the sharing with ElevenLabs.</p>
+  <p><strong>On Mac:</strong> contact us{{contact_inline}} and we will delete your device&#39;s records. If you subscribed, write from the email you gave Stripe; otherwise tell us the name of your Mac and roughly when you installed MicMic, so we find the right records. Deleting MicMic&#39;s folder in Library/Application Support/MicMic removes what it kept on your Mac. Choosing On-device voice in Settings stops the sharing with ElevenLabs.</p>
+  <p>Data that ElevenLabs, Google, TypeSafe, Apple or Stripe already hold is kept under their own policies; we will pass on a deletion request where they allow it. Records we must keep by law are kept for as long as the law requires.</p>
+
+  <h2 id="children">Children</h2>
+  <p>MicMic is for adults. You must be 18 or older to use it, and it is not directed to children. We do not knowingly collect personal information from anyone under 18. If you believe someone under 18 has used MicMic, contact us{{contact_inline}} and we will delete that device&#39;s records.</p>
+
+  <h2 id="security">Security</h2>
+  <p>Everything between MicMic and our servers is encrypted in transit. Access tokens are stored only as one-way fingerprints, provider keys never leave our server, the database is readable only by the server itself, and stored voice audio is encrypted. We log as little as we can and keep no request content. No system is perfectly secure, but we keep what we hold small so there is little to lose. If a security incident puts your data at risk, we will tell the authorities and you where the law requires it.</p>
 
   <h2>Using your own key</h2>
-  <p>If you give MicMic your own API keys, it talks to those services directly and none of your requests pass through our server.</p>
+  <p>If you give the Mac app your own API keys, it talks to those services directly and none of your requests pass through our server. Those services then handle your data under your own agreement with them.</p>
 
-  <h2>Your choices</h2>
-  <p>You can stop using MicMic at any time. To have a device's records removed, or for any question about your data, contact us{{contact_inline}}.</p>
+  <h2 id="changes">Changes to this policy</h2>
+  <p>We may change this policy. Each version has a version number and a &ldquo;last updated&rdquo; date at the top. If a change is material, for example a new kind of data, a new purpose, or a new service that receives your data, we tell you at least 14 days before it takes effect: in the app or on this site, and by email if we have your address. A change needed to follow the law or to deal with a security risk can take effect sooner, and we tell you as soon as we can. Where a change needs your consent, such as sending your data to a new AI service, the iPhone app asks you again before it sends anything under the change, and we do not use data already collected in a new way without your consent where the law requires it.</p>
+
+  <h2 id="contact">Contact</h2>
+  <p>For any question about your data or this policy, or to use your rights: {{operator}}, 6 Hashachaf, Tel Aviv-Jaffa 6803452, Israel, email{{contact_inline}}.</p>
 </main>
 <footer class="foot">
   <div class="wrap foot-in">

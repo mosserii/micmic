@@ -173,9 +173,19 @@ def test_account_shape_for_a_free_device(proxy):
     proxy.request("POST", "/v1/jev", jev_body(), token=t)
     s, a, _, _ = proxy.request("GET", "/v1/account", token=t)
     assert s == 200
+    # Added for MicMic for iPhone (PURCHASES_ACCOUNT.md 5.1), all additive.
+    token_uuid = a.pop("apple_account_token")
+    assert len(token_uuid) == 36 and token_uuid.count("-") == 4
+    assert {k: a.pop(k) for k in ("platform", "pro_source", "apple", "consent",
+                                  "consent_required")} == {
+        "platform": "mac", "pro_source": None, "apple": None, "consent": None,
+        "consent_required": {"terms_version": "2026-10-03", "privacy_version": "2026-10-03",
+                             "ai_disclosure_version": "2026-10-03"}}
     assert a == {"device_id": d["device_id"], "plan": "free",
                  "usage": {"jev": {"used": 1, "limit": 5}, "gemini": {"used": 0, "limit": 3},
-                           "requests": {"used": 1, "limit": 1}},
+                           "requests": {"used": 1, "limit": 1},
+                           # Added with the natural voice (POST /v1/tts): additive.
+                           "tts": {"used": 0, "limit": 15000, "scope": "total"}},
                  "resets_at": "2026-09-25T00:00:00Z", "scope": "day", "subscription": None}
 
 
@@ -551,7 +561,7 @@ def test_pages_are_self_contained_and_locked_down(make_proxy):
         assert h["X-Content-Type-Options"] == "nosniff"
     for path in ("/privacy", "/terms"):
         html = _page(p, path)[1]
-        assert "First draft, for review by a lawyer" in html
+        assert "First draft, for review by a lawyer" not in html   # banner removed 2026-10-04 (68e3ed5)
         assert "mailto:help@micmic.example" in html
     ok = _page(p, "/checkout/success")[1]
     assert "You're on MicMic Pro." in ok and "You can close this tab and go back to MicMic." in ok

@@ -138,17 +138,27 @@ it yourself and it talks to Jev and Gemini directly, with your own keys. The ful
 **Sent to answer you:** the words you said, as text. Only when you ask about your
 screen, the text on it, and sometimes a picture of the window in front.
 
-**Kept:** a count of how many requests each device made. No recordings, no
-transcripts, no screenshots. No ads, no selling of data.
+**Spoken replies:** MicMic speaks in its natural cloud voice (ElevenLabs Eleven v4 Turbo)
+in every language: English, Hebrew, Arabic and Russian. The words of each reply (not your
+own voice) go through the MicMic cloud to ElevenLabs to be voiced, and ElevenLabs keeps
+them by default. Choosing **On-device voice** in Settings keeps every spoken reply on your
+Mac; for English you can also download an on-device voice there. Offline, or when the
+cloud voice is slow, your Mac speaks the reply itself. The MicMic cloud keeps only the audio of
+common lines like "Alright.", encrypted so it cannot be read back without the exact
+sentence; it never keeps a read-back of your messages, notes or screen. Which languages use
+which voice is one table, `voice_engines` in `micmic.config.json`.
+
+**Kept:** a count of how many requests each device made, and how much of MicMic's replies
+it had voiced. No recordings, no transcripts, no screenshots. No ads, no selling of data.
 
 **On your Mac:** your voice is turned into text on your Mac. In English by a speech model MicMic downloads once (NVIDIA's Parakeet, the one the Handy app uses), in Hebrew by macOS. Where macOS has no on-device recognizer for your language, macOS uses Apple's speech service. Your voice is never written to disk. What MicMic learns about
 you, like your name and who you talk to, stays in a folder on your Mac. Contacts are
 shortlisted to a few dozen before any of them leave it. Every connection to your
 message databases is read-only.
 
-**Your own keys:** set them and nothing goes through our server at all. The privacy policy the
-website serves, [`proxy/web/privacy.html`](proxy/web/privacy.html), names everyone who handles a
-request.
+**Your own keys:** set them and nothing goes through our server at all, the voice included
+(`ELEVENLABS_API_KEY`). The privacy policy the website serves,
+[`proxy/web/privacy.html`](proxy/web/privacy.html), names everyone who handles a request.
 
 ## Download
 
@@ -185,6 +195,7 @@ free-request limit and no subscription. Put the keys in `.env.local` at the repo
 ```bash
 TYPESAFE_API_KEY=...      # required: Jev, from TypeSafe
 GEMINI_API_KEY=...        # optional: answers, screen questions, compound requests
+ELEVENLABS_API_KEY=...    # optional: the natural voice; without it your Mac speaks
 ```
 
 Everything else works without Gemini. More on the app, permissions, logs and the

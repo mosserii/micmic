@@ -118,8 +118,66 @@ listenermod.request_accessibility = _fake_request_ax
 listenermod.open_settings_pane = lambda k: TCC_ASKED.append("pane:" + k)
 listenermod.ask_alert = lambda message, ok, cancel, on_ok: ALERTS.append((message, ok, cancel, on_ok))
 listenermod.fetch_permission_request = lambda: ""
+# This Mac's own apps must not pick the line (the contacts line names a second macOS
+# dialog when WhatsApp is installed: tests/test_consent_lines.py covers both).
+listenermod.whatsapp_installed = lambda: False
+listenermod.request_screen_capture = lambda: TCC_ASKED.append("screen_recording") or False
 listenermod.RECOVERY_POLL = 0.05
 listenermod.PENDING_POLL = 0.05
+
+
+# The backup talk key (⌃⌥ M) is a Carbon hot key. No test may register one for real:
+# every registration goes to this fake, and loading Carbon at all fails the test.
+class FakeCarbon:
+    NO_ERR = 0
+
+    def __init__(self):
+        self.registered: dict = {}          # token -> (code, mods, on_press, on_release)
+        self.calls: list[tuple] = []
+        self.next_status = 0                # what the next RegisterEventHotKey returns
+        self._next = 1
+
+    def register(self, code, mods, on_press, on_release):
+        self.calls.append(("register", code, mods))
+        if self.next_status:
+            return self.next_status, None
+        tok = self._next
+        self._next += 1
+        self.registered[tok] = (code, mods, on_press, on_release)
+        return 0, tok
+
+    def unregister(self, token):
+        self.calls.append(("unregister", token))
+        self.registered.pop(token, None)
+        return 0
+
+    # What Carbon does when the combo goes down and up, on the main thread: the real
+    # handler passes each event's own time (GetEventTime, seconds since boot).
+    def press(self, at=None):
+        for (_c, _m, down, _up) in list(self.registered.values()):
+            down(at)
+
+    def release(self, at=None):
+        for (_c, _m, _down, up) in list(self.registered.values()):
+            up(at)
+
+
+REAL_CARBON: list[str] = []
+
+
+def _no_real_carbon(self):
+    # Recorded as well as raised: register_backup_hotkey logs and survives any error.
+    REAL_CARBON.append("CarbonHotKeys._load")
+    raise AssertionError("a test reached real Carbon (CarbonHotKeys._load)")
+
+
+CARBON = FakeCarbon()
+listenermod.HOTKEYS = CARBON
+listenermod.CarbonHotKeys._load = _no_real_carbon
+MACOS_SHORTCUT = {"name": ""}
+listenermod.macos_shortcut_on = lambda code, mask: MACOS_SHORTCUT["name"]
+BACKUP_POSTS: list[dict] = []
+listenermod.post_backup_hotkey_status = lambda state: BACKUP_POSTS.append(dict(state))
 
 
 class FakeBar:
@@ -135,6 +193,9 @@ class FakeBar:
 
     def set_result(self, say, undo_label):
         self.calls.append(("set_result", say, undo_label))
+
+    def set_hint(self, spec):
+        self.calls.append(("set_hint", spec))
 
     def show(self):
         self.calls.append(("show",))
@@ -487,13 +548,24 @@ def turn_listener(local=None):
     return lst, bar, sent
 
 
+def voice(lst, seconds=0.5, rms=0.05):
+    """The audio tap's count for an open turn: `seconds` of audio this loud (0.05 is
+    an ordinary voice; a quiet room is under 0.002)."""
+    t = lst.turn
+    if t is not None and not t["finish_at"]:
+        lst.count_turn_audio(t, seconds, rms)
+
+
 def hear(lst, seconds=1.0):
-    """What the audio tap does while a turn is open: her samples, kept in memory."""
+    """What the audio tap does while a turn is open: her samples, kept in memory, and
+    the turn's count of what it heard."""
     if lst.turn_samples is not None:
         lst.turn_samples.extend([0.01] * int(48000 * seconds))
+    voice(lst, seconds)
 
 
 def partial(lst, text):
+    voice(lst, 0.5)                     # Apple heard words: she was speaking
     lst.on_result(lst.gen, FakeResult(text), None)
 
 
@@ -945,6 +1017,278 @@ def test_about_and_help_menu_actions():
     finally:
         listenermod.AppKit.NSApp, listenermod.AppKit.NSWorkspace = orig_app, orig_ws
         listenermod.app_version = orig_version
+
+
+# ---------------------------------------------------------------- in the Dock (owner, 2026-10-03)
+def _code_only(src):
+    return "\n".join(line.split("#")[0] for line in src.splitlines())
+
+
+def test_the_app_is_regular_in_the_dock():
+    """MicMic is in the Dock and Cmd-Tab while it runs: main() asks for the Regular
+    activation policy, and nothing in listener.py asks for Accessory any more."""
+    code = _code_only((ROOT / "native" / "listener.py").read_text())
+    main_body = code[code.index("def main() -> None:"):]
+    main_body = main_body[:main_body.index("\nif __name__")]
+    check("main() sets NSApplicationActivationPolicyRegular",
+          "setActivationPolicy_(AppKit.NSApplicationActivationPolicyRegular)" in main_body)
+    check("listener.py never asks for the Accessory policy",
+          "NSApplicationActivationPolicyAccessory" not in code)
+
+
+def test_build_sh_plists_have_no_lsuielement():
+    """Both MicMic.app Info.plists build.sh writes (the release bundle and the dev
+    launcher) leave LSUIElement out, and both name the real app icon."""
+    src = (ROOT / "native" / "build.sh").read_text()
+    plists = re.findall(r"<plist version=\"1\.0\">(.*?)</plist>", src, re.S)
+    apps = [p for p in plists if "<string>MicMic</string>" in p and "CFBundleExecutable" in p]
+    check("build.sh writes two MicMic.app Info.plists", len(apps) == 2, len(apps))
+    for i, p in enumerate(apps):
+        no_comments = re.sub(r"<!--.*?-->", "", p, flags=re.S)
+        check(f"plist {i + 1}: no LSUIElement", "LSUIElement" not in no_comments)
+        check(f"plist {i + 1}: CFBundleIconFile is AppIcon",
+              re.search(r"<key>CFBundleIconFile</key>\s*<string>AppIcon</string>", p) is not None)
+    check("the release bundle copies brand/AppIcon.icns into Resources",
+          'cp "$HERE/../brand/AppIcon.icns" "$RES/AppIcon.icns"' in src)
+    check("brand/AppIcon.icns exists", (ROOT / "brand" / "AppIcon.icns").is_file())
+
+
+class _FakeWS:
+    def __init__(self):
+        self.opened = []
+
+    def openURL_(self, url):
+        self.opened.append(str(url))
+
+
+class _FakeWSClass:
+    def __init__(self, ws):
+        self._ws = ws
+
+    def sharedWorkspace(self):
+        return self._ws
+
+
+class _FakeSettingsPanel(FakePanel):
+    def open_settings(self):
+        self.calls.append(("open_settings",))
+
+
+def test_dock_click_opens_the_window():
+    """A click on the Dock icon (applicationShouldHandleReopen) opens the same window
+    as the menu bar's "Show MicMic window", whether or not a window is already up;
+    with no window at all it falls back to the browser like that item does."""
+    orig_panel, orig_ws = listenermod.LISTENER.panel, listenermod.AppKit.NSWorkspace
+    try:
+        d = listenermod.Delegate.alloc().init()
+        for visible in (False, True):
+            panel = FakePanel()
+            listenermod.LISTENER.panel = panel
+            r = d.applicationShouldHandleReopen_hasVisibleWindows_(None, visible)
+            check(f"Dock click (visible={visible}) shows and activates the window",
+                  panel.calls == [("show", True)] and r is True, (panel.calls, r))
+        listenermod.LISTENER.panel = None
+        ws = _FakeWS()
+        listenermod.AppKit.NSWorkspace = _FakeWSClass(ws)
+        d.applicationShouldHandleReopen_hasVisibleWindows_(None, False)
+        check("no window could be built: the Dock click opens the page in the browser",
+              ws.opened == [listenermod.SERVER], ws.opened)
+        check("closing the last window never quits MicMic",
+              d.applicationShouldTerminateAfterLastWindowClosed_(None) is False)
+    finally:
+        listenermod.LISTENER.panel, listenermod.AppKit.NSWorkspace = orig_panel, orig_ws
+
+
+def test_main_menu_has_quit_edit_and_window():
+    """A regular app owns the menu bar while it is frontmost: About, Settings, Hide,
+    Quit on Cmd-Q (the menu bar icon's own quitApp_), an Edit menu so Cmd-C/V/A work
+    in the typing box, a Window menu that reopens the window, and Help."""
+    d = listenermod.Delegate.alloc().init()       # held: a menu item's target is weak
+    main, services, window, help_menu = listenermod.build_main_menu(d)
+    menus = {str(i.title()): i.submenu() for i in main.itemArray()}
+    check("main menu is MicMic, Edit, Window, Help",
+          list(menus) == ["MicMic", "Edit", "Window", "Help"], list(menus))
+
+    def items(title):
+        return {str(i.title()): i for i in menus[title].itemArray() if not i.isSeparatorItem()}
+    app = items("MicMic")
+    cmd = listenermod.AppKit.NSEventModifierFlagCommand
+    quit_item = app.get("Quit MicMic")
+    check("Quit MicMic is Cmd-Q and runs the same quitApp_ as the menu bar icon",
+          quit_item is not None and quit_item.keyEquivalent() == "q"
+          and quit_item.keyEquivalentModifierMask() == cmd
+          and quit_item.action() == "quitApp:" and quit_item.target() is d,
+          quit_item)
+    check("the app menu has About, Settings… (Cmd-,), Hide, Hide Others, Show All",
+          {"About MicMic", "Settings…", "Hide MicMic", "Hide Others", "Show All"} <= set(app)
+          and app["Settings…"].keyEquivalent() == ","
+          and app["Settings…"].action() == "openSettings:"
+          and app["About MicMic"].action() == "aboutMicMic:"
+          and app["Hide MicMic"].action() == "hide:", sorted(app))
+    check("Services is a real submenu, handed to NSApp",
+          app["Services"].submenu() is services)
+    edit = items("Edit")
+    want = {"Undo": ("undo:", "z"), "Redo": ("redo:", "Z"), "Cut": ("cut:", "x"),
+            "Copy": ("copy:", "c"), "Paste": ("paste:", "v"), "Select All": ("selectAll:", "a")}
+    got = {k: (edit[k].action(), edit[k].keyEquivalent()) for k in want if k in edit}
+    check("Edit has Undo/Redo/Cut/Copy/Paste/Select All on their usual keys", got == want, got)
+    check("Edit items go to the focused field (no fixed target)",
+          all(edit[k].target() is None for k in want if k in edit))
+    win = items("Window")
+    check("Window menu reopens the MicMic window and has Minimize/Close",
+          win.get("Show MicMic Window") is not None
+          and win["Show MicMic Window"].action() == "showPanel:"
+          and win["Show MicMic Window"].target() is d
+          and win["Minimize"].keyEquivalent() == "m" and win["Close"].keyEquivalent() == "w",
+          sorted(win))
+    check("the Window and Help menus are the ones handed to NSApp",
+          menus["Window"] is window and menus["Help"] is help_menu)
+    check("Help opens the MicMic site",
+          items("Help")["MicMic Help"].action() == "openHelp:")
+    titles = [str(i.title()) for m in menus.values() for i in m.itemArray()]
+    check("no em dash in any menu title", not any("—" in t for t in titles))
+
+
+def test_settings_menu_opens_the_pages_settings():
+    orig_panel, orig_ws = listenermod.LISTENER.panel, listenermod.AppKit.NSWorkspace
+    try:
+        d = listenermod.Delegate.alloc().init()
+        panel = _FakeSettingsPanel()
+        listenermod.LISTENER.panel = panel
+        d.openSettings_(None)
+        check("Settings… opens the window's own Settings",
+              panel.calls == [("open_settings",)], panel.calls)
+        listenermod.LISTENER.panel = None
+        ws = _FakeWS()
+        listenermod.AppKit.NSWorkspace = _FakeWSClass(ws)
+        d.openSettings_(None)
+        check("no window: Settings… opens the page in the browser",
+              ws.opened == [listenermod.SERVER], ws.opened)
+    finally:
+        listenermod.LISTENER.panel, listenermod.AppKit.NSWorkspace = orig_panel, orig_ws
+    src = _code_only((ROOT / "native" / "panel.py").read_text())
+    check("panel.open_settings never opens Settings over the first-run screens",
+          "def open_settings" in src and "onboarding" in src)
+
+
+def test_every_quit_runs_one_cleanup():
+    """The menu bar's Quit, Cmd-Q and the Dock's Quit (NSApp terminate: straight to
+    applicationWillTerminate_) all shut the listener down, exactly once."""
+    class FakeApp:
+        def __init__(self):
+            self.terminated = 0
+
+        def terminate_(self, sender):
+            self.terminated += 1
+
+    shut = []
+    orig_shutdown = listenermod.LISTENER.shutdown
+    orig_app = listenermod.AppKit.NSApp
+    try:
+        app = FakeApp()
+        listenermod.AppKit.NSApp = lambda: app
+        listenermod.LISTENER.shutdown = lambda: shut.append(1)
+        d = listenermod.Delegate.alloc().init()
+
+        listenermod._CLEANED_UP = False
+        d.quitApp_(None)
+        d.applicationWillTerminate_(None)      # what terminate: then calls
+        check("menu Quit: shut down once, then terminate",
+              len(shut) == 1 and app.terminated == 1, (shut, app.terminated))
+
+        shut.clear()
+        listenermod._CLEANED_UP = False
+        d.applicationWillTerminate_(None)      # Quit from the Dock, logging out
+        check("Dock Quit: the same shutdown runs", len(shut) == 1, shut)
+    finally:
+        listenermod.LISTENER.shutdown = orig_shutdown
+        listenermod.AppKit.NSApp = orig_app
+        listenermod._CLEANED_UP = False
+
+
+def test_cmd_tab_with_no_window_shows_it():
+    """Cmd-Tab to MicMic with nothing of its own on screen shows the window, without
+    activating again; an alert, the About panel or the window itself already up means
+    nothing to do; the bar and the menu bar icon (untitled) do not count."""
+    titled = listenermod.AppKit.NSWindowStyleMaskTitled
+
+    class W:
+        def __init__(self, visible, mask):
+            self._v, self._m = visible, mask
+
+        def isVisible(self):
+            return self._v
+
+        def styleMask(self):
+            return self._m
+
+    need = listenermod.needs_window_on_activate
+    check("no windows at all: show the window", need([], None) is True)
+    check("only the bar / status item (untitled) up: show the window",
+          need([W(True, 0), W(True, 0)], None) is True)
+    check("a hidden titled window does not count", need([W(False, titled)], None) is True)
+    check("the window (or About) already up: nothing to do",
+          need([W(True, titled)], None) is False)
+    check("an alert is up: nothing to do", need([], object()) is False)
+
+    class FakeApp:
+        def __init__(self, active, windows, modal=None):
+            self._a, self._w, self._m = active, windows, modal
+
+        def isActive(self):
+            return self._a
+
+        def windows(self):
+            return self._w
+
+        def modalWindow(self):
+            return self._m
+
+    orig_panel, orig_app = listenermod.LISTENER.panel, listenermod.AppKit.NSApp
+    d = listenermod.Delegate.alloc().init()
+    try:
+        for name, fake, want in (
+                ("active, nothing up: shown without activating", FakeApp(True, []), [("show", False)]),
+                ("no longer active by then: left alone", FakeApp(False, []), []),
+                ("an alert is up: left alone", FakeApp(True, [], object()), []),
+                ("the window is up: left alone", FakeApp(True, [W(True, titled)]), [])):
+            panel = FakePanel()
+            listenermod.LISTENER.panel = panel
+            listenermod.AppKit.NSApp = lambda fake=fake: fake
+            d.windowForActivation_(None)
+            check("Cmd-Tab: " + name, panel.calls == want, panel.calls)
+        listenermod.LISTENER.panel = None
+        listenermod.AppKit.NSApp = lambda: FakeApp(True, [])
+        d.windowForActivation_(None)
+        check("Cmd-Tab with no window built does not crash", True)
+    finally:
+        listenermod.LISTENER.panel, listenermod.AppKit.NSApp = orig_panel, orig_app
+    orig_at = listenermod._LAUNCHED_AT
+    try:
+        panel = FakePanel()
+        listenermod.LISTENER.panel = panel
+        listenermod._LAUNCHED_AT = time.monotonic()
+        d.applicationDidBecomeActive_(None)
+        check("an activation during launch shows nothing (the display setting decides)",
+              panel.calls == [], panel.calls)
+    finally:
+        listenermod._LAUNCHED_AT = orig_at
+        listenermod.LISTENER.panel = orig_panel
+
+
+def test_overlays_never_activate_the_app():
+    """In the Dock, an activation is visible (MicMic's menu bar takes over the top of
+    the screen), so the hold-to-talk bar and the guide ring still never activate."""
+    for name in ("bar.py", "guide_overlay.py"):
+        code = _code_only((ROOT / "native" / name).read_text())
+        code = "\n".join(l for l in code.splitlines()
+                         if not l.strip().startswith(('"', "'")))
+        bad = [w for w in ("activateIgnoringOtherApps_", "activateWithOptions_",
+                           "makeKeyAndOrderFront_", "setActivationPolicy_") if w in code]
+        check(f"{name} never activates MicMic", not bad, bad)
+    code = _code_only((ROOT / "native" / "guide_overlay.py").read_text())
+    check("guide mode shows the window with activate=False",
+          "panel.show(activate=False)" in code)
 
 
 # ---------------------------------------------------------------- branded menu-bar icon
@@ -1984,6 +2328,532 @@ def test_permission_strings_in_every_language():
     check("every permission line exists in he/en/ar/ru, with no em dash", not bad, bad)
 
 
+
+
+# ---------------------------------------------------------------- the backup talk key
+# The owner (2026-10-03): without Accessibility the right-hand talk key hears nothing, so
+# ⌃⌥ M is always registered as a Carbon hot key, which needs no permission. These
+# drive the REAL register_backup_hotkey / press / release through FakeCarbon.
+def _backup_reset():
+    global CARBON
+    CARBON = FakeCarbon()
+    listenermod.HOTKEYS = CARBON
+    MACOS_SHORTCUT["name"] = ""
+    BACKUP_POSTS.clear()
+
+
+def _wait_posts(n, timeout=2.0):
+    return _wait(lambda: len(BACKUP_POSTS) >= n, timeout)
+
+
+def test_carbon_combo():
+    cc = listenermod.carbon_combo
+    check("ctrl+opt+m is kVK_ANSI_M (0x2E) with Carbon's controlKey|optionKey",
+          cc("ctrl+opt+m") == (0x2E, (1 << 12) | (1 << 11)), cc("ctrl+opt+m"))
+    check("ctrl+opt+space is key 49", cc("ctrl+opt+space")[0] == 49, cc("ctrl+opt+space"))
+    check("cmd+shift+m is key 46 with cmdKey|shiftKey", cc("cmd+shift+m") == (46, (1 << 8) | (1 << 9)))
+    for bad in ("space", "ctrl+nosuchkey", ""):
+        try:
+            cc(bad)
+            ok = False
+        except ValueError:
+            ok = True
+        check(f"carbon_combo refuses {bad!r} (a bare key would fire while she types)", ok)
+
+
+def test_macos_shortcut_table():
+    """taken_by: ANY enabled macOS symbolic hot key on the same keys, not just the known ids."""
+    st = listenermod.shortcut_in_table
+    CTRL_OPT = (1 << 18) | (1 << 19)
+    table = {"61": {"enabled": 1, "value": {"parameters": [32, 49, CTRL_OPT], "type": "standard"}},
+             "60": {"enabled": 1, "value": {"parameters": [32, 49, 1 << 18], "type": "standard"}},
+             "222": {"enabled": 1, "value": {"parameters": [109, 0x2E, CTRL_OPT], "type": "standard"}},
+             "223": {"enabled": 0, "value": {"parameters": [107, 40, CTRL_OPT], "type": "standard"}}}
+    check("⌃⌥ Space: input_sources_next", st(table, 49, CTRL_OPT) == "input_sources_next")
+    check("⌃⌥ M on an id with no name of its own: macos_shortcut_222",
+          st(table, 0x2E, CTRL_OPT) == "macos_shortcut_222", st(table, 0x2E, CTRL_OPT))
+    check("a disabled one does not count", st(table, 40, CTRL_OPT) == "")
+    check("other modifiers on the same key do not count", st(table, 0x2E, 1 << 18) == "")
+    check("an empty or odd table is nothing", st({}, 0x2E, CTRL_OPT) == ""
+          and st({"9": {"enabled": "x"}, "8": None}, 0x2E, CTRL_OPT) == "")
+
+
+def test_backup_hotkey_registers_without_accessibility():
+    _backup_reset()
+    _tcc(mic=3, speech=3, ax=False)
+    lst, bar, sent = turn_listener()
+    lst.register_backup_hotkey()
+    check("⌃⌥ M is registered by default, with Accessibility off",
+          [c for c in CARBON.calls if c[0] == "register"] == [("register", 0x2E, (1 << 12) | (1 << 11))],
+          CARBON.calls)
+    check("its state says registered", lst.backup_state.get("registered") is True
+          and lst.backup_state.get("combo") == "ctrl+opt+m" and not lst.backup_state.get("error"),
+          lst.backup_state)
+    check("the state is posted to the server", _wait_posts(1)
+          and BACKUP_POSTS[-1]["registered"] is True, BACKUP_POSTS)
+    check("nothing asked macOS for anything", TCC_ASKED == [], TCC_ASKED)
+    n = len(CARBON.calls)
+    lst.register_backup_hotkey()
+    check("unchanged, it is not registered again", len(CARBON.calls) == n, CARBON.calls)
+
+
+def test_backup_hotkey_hold_is_a_hold_turn():
+    _backup_reset()
+    lst, bar, sent = closing_listener()
+    lst.register_backup_hotkey()
+    CARBON.press()
+    check("pressed: a key turn opens (turn_open kind hold)",
+          lst.turn is not None and lst.turn["kind"] == "ptt" and OPEN_KINDS == ["hold"],
+          (lst.turn, OPEN_KINDS))
+    CARBON.press()                                  # Carbon repeating, or a double event
+    check("a second press while held is not a second press", OPEN_KINDS == ["hold"]
+          and lst.turn["finish_at"] == 0.0, (OPEN_KINDS, lst.turn))
+    lst.turn["down_at"] -= 1.0                       # held a second
+    partial(lst, "what time is it")
+    CARBON.release()
+    check("released after a hold: the turn is sent on release",
+          lst.turn is not None and lst.turn["mode"] == "hold" and lst.turn["finish_at"] > 0, lst.turn)
+    final(lst, "what time is it", conf=0.9)
+    settle_turn(lst, sent)
+    check("and what she said is sent as a push turn", sent == [("what time is it", "push")],
+          (sent, LOGS[-4:]))
+
+
+def test_backup_hotkey_tap_is_a_tap_turn():
+    _backup_reset()
+    lst, bar, sent = closing_listener()
+    lst.register_backup_hotkey()
+    CARBON.press()
+    CARBON.release()                                # at once: a tap
+    check("a tap keeps listening until the next tap", lst.turn is not None
+          and lst.turn["mode"] == "toggle" and lst.turn["finish_at"] == 0.0, lst.turn)
+    partial(lst, "call dana")
+    CARBON.press()
+    check("the next tap sends it", lst.turn is not None and lst.turn["finish_at"] > 0, lst.turn)
+    CARBON.release()                                # the release of the ending tap
+    check("its release opens nothing new", OPEN_KINDS == ["hold"], OPEN_KINDS)
+    final(lst, "call dana", conf=0.9)
+    settle_turn(lst, sent)
+    check("what she said in the tap turn is sent", sent == [("call dana", "push")], (sent, LOGS[-4:]))
+
+
+# ---------------------------------------------------------------- tap or hold, by the key's clock
+# The owner, 2026-10-03 13:13-13:15, on ⌃⌥ M: quick presses logged "turn open (ptt)" and
+# 2-3 ms later "turn finishing: released", and went out as "okay" / "mm" read from
+# silence. The turn took ~0.4 s to open on the main thread, so the key's release was
+# already waiting in the queue, and hold-or-tap was measured from our handler's clock:
+# every quick tap whose opening was slow read as a hold. It is now measured between the
+# key's own press and release events, the same for the talk key and the backup key.
+def _slow_open(lst, seconds=0.5):
+    """What a slow start_turn looks like to release(): the handler clock moved on."""
+    lst.turn["down_at"] -= seconds
+
+
+def test_a_tap_is_a_tap_by_the_keys_own_clock():
+    for src in ("key", "backup"):
+        _backup_reset()
+        lst, bar, sent = closing_listener()
+        lst.register_backup_hotkey()
+        lst.hotkey_active = "right-command"
+        down = CARBON.press if src == "backup" else (lambda at: lst.press("key", at))
+        up = CARBON.release if src == "backup" else (lambda at: lst.release("key", at))
+        name = "⌃⌥ M" if src == "backup" else "right ⌘"
+        down(1000.00)
+        check(f"{src}: the log names the key that opened the turn",
+              f"turn open (ptt, {name})" in LOGS, LOGS[-3:])
+        _slow_open(lst, 0.5)                          # the turn took 0.5 s to open
+        up(1000.12)                                   # but the key was up after 120 ms
+        check(f"{src}: a 120 ms press is a tap, however late its release was handled",
+              lst.turn is not None and lst.turn["mode"] == "toggle"
+              and lst.turn["finish_at"] == 0.0, (lst.turn, LOGS[-3:]))
+        check(f"{src}: the log says tapped, with the key and how long",
+              any(m.startswith(f"turn: tapped ({name}, 120 ms") for m in LOGS), LOGS[-3:])
+        spec = "ctrl+opt+m" if src == "backup" else "right-command"
+        check(f"{src}: the bar shows how to send it, with her key",
+              ("set_hint", spec) in bar.calls, bar.calls[-3:])
+        partial(lst, "what time is it")
+        down(1003.00)
+        check(f"{src}: the next press sends it", lst.turn is not None
+              and lst.turn["finish_at"] > 0, lst.turn)
+        up(1003.08)
+        check(f"{src}: the release of that press opens nothing", OPEN_KINDS == ["hold"], OPEN_KINDS)
+        final(lst, "what time is it", conf=0.9)
+        settle_turn(lst, sent)
+        check(f"{src}: what she said is sent once", sent == [("what time is it", "push")],
+              (sent, LOGS[-4:]))
+
+
+def test_a_hold_is_a_hold_by_the_keys_own_clock():
+    for src in ("key", "backup"):
+        _backup_reset()
+        lst, bar, sent = closing_listener()
+        lst.register_backup_hotkey()
+        down = CARBON.press if src == "backup" else (lambda at: lst.press("key", at))
+        up = CARBON.release if src == "backup" else (lambda at: lst.release("key", at))
+        down(2000.0)
+        partial(lst, "call dana")
+        up(2001.4)                                    # held 1.4 s, though handled at once
+        check(f"{src}: held 1.4 s is a hold: sent on release",
+              lst.turn is not None and lst.turn["mode"] == "hold"
+              and lst.turn["finish_at"] > 0, lst.turn)
+        check(f"{src}: no tap hint for a held key",
+              not any(c[0] == "set_hint" for c in bar.calls), bar.calls)
+        final(lst, "call dana", conf=0.9)
+        settle_turn(lst, sent)
+        check(f"{src}: and it is sent", sent == [("call dana", "push")], (sent, LOGS[-4:]))
+
+
+def test_backup_key_release_orders():
+    """Carbon reports ⌃⌥ M as one Pressed (M down with ⌃⌥ held) and one Released (M up),
+    whatever the modifiers do. Both orders of letting go, quick and slow, and a stray
+    or doubled release, must land on the same rule."""
+    cases = [
+        ("M up first, modifiers still down, quick", [("p", 10.0), ("r", 10.09)], "toggle"),
+        ("modifiers up first, M up after, quick", [("p", 10.0), ("r", 10.30)], "toggle"),
+        ("M up first after a hold", [("p", 10.0), ("r", 11.2)], "hold"),
+        ("modifiers up first, M held on, then up", [("p", 10.0), ("r", 10.9)], "hold"),
+        ("a stray release before the press", [("r", 9.0), ("p", 10.0), ("r", 10.1)], "toggle"),
+        ("the release reported twice", [("p", 10.0), ("r", 10.1), ("r", 10.11)], "toggle"),
+    ]
+    for label, events, want in cases:
+        _backup_reset()
+        lst, bar, sent = closing_listener()
+        lst.register_backup_hotkey()
+        for kind, at in events:
+            (CARBON.press if kind == "p" else CARBON.release)(at)
+            if kind == "p" and lst.turn is not None:
+                voice(lst, 1.0)
+        got = lst.turn["mode"] if lst.turn is not None else None
+        check(f"backup key, {label}: {want}", got == want and OPEN_KINDS == ["hold"],
+              (got, OPEN_KINDS, LOGS[-3:]))
+
+
+def test_backup_key_repeat_and_a_lost_release():
+    _backup_reset()
+    lst, bar, sent = closing_listener()
+    lst.register_backup_hotkey()
+    CARBON.press(50.0)
+    for i in range(12):                               # held: Carbon repeating the press
+        CARBON.press(50.5 + i * 0.033)
+    check("key repeat while held opens one turn and ends nothing",
+          OPEN_KINDS == ["hold"] and lst.turn is not None and lst.turn["finish_at"] == 0.0,
+          (OPEN_KINDS, lst.turn))
+    partial(lst, "turn it down")
+    CARBON.release(51.5)
+    final(lst, "turn it down", conf=0.9)
+    settle_turn(lst, sent)
+    check("its release sends it once", sent == [("turn it down", "push")], (sent, LOGS[-4:]))
+    # A press whose release never came (another app grabbed it, the Mac slept):
+    lst2, bar2, sent2 = closing_listener()
+    _backup_reset()
+    lst2.register_backup_hotkey()
+    CARBON.press(60.0)
+    voice(lst2, 1.0)
+    lst2.send_now()                                   # the turn ended another way
+    settle_turn(lst2, sent2)
+    check("(that turn is over)", lst2.turn is None, lst2.turn)
+    CARBON.press(70.0)                                # no release in between
+    check("the next press still opens a turn: the key is not left dead",
+          lst2.turn is not None and lst2.turn["kind"] == "ptt" and len(OPEN_KINDS) == 2,
+          (lst2.turn, OPEN_KINDS, LOGS[-3:]))
+
+
+def test_a_press_while_thinking_is_ignored_and_leaves_no_bad_state():
+    _backup_reset()
+    lst, bar, sent = closing_listener()
+    lst.register_backup_hotkey()
+    CARBON.press(1.0)
+    CARBON.release(1.1)                               # a tap
+    partial(lst, "what is the weather")
+    CARBON.press(3.0)                                 # sends
+    CARBON.release(3.1)
+    check("the second tap is sending it", lst.turn is not None and lst.turn["finish_at"] > 0)
+    lst.press("key", 3.3)                             # the talk key, while it thinks
+    lst.release("key", 3.4)
+    CARBON.press(3.5)                                 # and the backup key again
+    CARBON.release(3.6)
+    check("presses while it thinks open nothing and end nothing",
+          OPEN_KINDS == ["hold"] and lst.turn is not None and lst.turn["finish_at"] > 0,
+          (OPEN_KINDS, LOGS[-4:]))
+    check("and say so in the log",
+          sum("pressed while it is being sent, ignored" in m for m in LOGS) == 2, LOGS[-6:])
+    final(lst, "what is the weather", conf=0.9)
+    settle_turn(lst, sent)
+    check("the turn is sent once", sent == [("what is the weather", "push")], (sent, LOGS[-4:]))
+    CARBON.press(9.0)
+    CARBON.release(9.1)
+    check("afterwards a quick press is a tap again (no swallowed release left behind)",
+          lst.turn is not None and lst.turn["mode"] == "toggle", (lst.turn, LOGS[-3:]))
+    lst.send_now()
+    settle_turn(lst, sent)
+    lst.press("key", 12.0)
+    lst.release("key", 12.1)
+    check("and so is the talk key", lst.turn is not None and lst.turn["mode"] == "toggle",
+          (lst.turn, LOGS[-3:]))
+    lst.send_now()
+    settle_turn(lst, sent)
+    lst.press("key", 14.0)                            # held talk key...
+    voice(lst, 1.0)
+    CARBON.press(14.3)                                # ...the backup key meanwhile
+    CARBON.release(14.4)
+    check("the other key pressed during a hold changes nothing",
+          lst.turn is not None and lst.turn["mode"] is None and lst.turn["finish_at"] == 0.0,
+          (lst.turn, LOGS[-3:]))
+    lst.release("key", 15.0)
+    check("and the held key's own release still sends it",
+          lst.turn is not None and lst.turn["mode"] == "hold", (lst.turn, LOGS[-3:]))
+
+
+def test_a_junk_3ms_turn_is_never_sent():
+    """The owner's 13:13:40: open, 3 ms later released, the local model read "okay" out
+    of it, and it went to the server and got a chat reply."""
+    LOGS.clear()
+    lst, bar, sent = closing_listener()
+    lst.local = FakeLocal(("okay", 0.95))
+    lst.press()                                       # no event times: the handler clock
+    _slow_open(lst, 0.5)                              # so it reads as a 0.5 s hold
+    lst.turn_samples.extend([0.0] * 144)              # 3 ms of samples
+    voice(lst, 0.003, rms=0.0005)
+    lst.release()
+    settle_turn(lst, sent)
+    check("a 3 ms turn is not sent, whatever was read out of it", sent == [], sent)
+    check("the local model is not even asked", lst.local.calls == [], lst.local.calls)
+    check("the log says why", any("only 0.00s of audio, not sent" in m for m in LOGS), LOGS[-4:])
+    wait_closes(1)
+    check("the server hears turn_closed with reason nothing",
+          TURN_CLOSES == [(TURN_OPENS[0], "nothing")], (TURN_OPENS, TURN_CLOSES))
+    # A tap and a second tap 0.2 s apart: the same rule.
+    lst, bar, sent = closing_listener()
+    lst.press("key", 5.0)
+    lst.release("key", 5.05)
+    voice(lst, 0.2)
+    lst.press("key", 5.25)
+    lst.release("key", 5.3)
+    final(lst, "mm", conf=0.4)
+    settle_turn(lst, sent)
+    check("two taps 0.2 s apart send nothing", sent == [], (sent, LOGS[-3:]))
+
+
+def test_no_speech_energy_is_never_sent():
+    LOGS.clear()
+    lst, bar, sent = closing_listener()
+    lst.local = FakeLocal(("yeah", 0.93))
+    lst.press("key", 1.0)
+    lst.turn_samples.extend([0.0005] * 48000)
+    voice(lst, 1.2, rms=0.0008)                      # a quiet room, 1.2 s of it
+    lst.release("key", 2.2)
+    final(lst, "")
+    settle_turn(lst, sent)
+    check("a held turn with only room noise is not sent, even read as 'yeah'", sent == [],
+          (sent, LOGS[-4:]))
+    check("the log says why", any("no speech in 1.2s of audio" in m for m in LOGS), LOGS[-4:])
+    check("and one key click is not speech", lst.junk_reason(
+        {"heard_s": 1.0, "voiced_s": 0.043, "peak_rms": 0.2}) != "")
+    # A quiet voice Apple still heard words in is hers: never dropped.
+    lst, bar, sent = closing_listener()
+    lst.press("key", 1.0)
+    voice(lst, 1.5, rms=0.002)
+    lst.on_result(lst.gen, FakeResult("call mom"), None)
+    lst.release("key", 2.5)
+    final(lst, "call mom", conf=0.8)
+    settle_turn(lst, sent)
+    check("a quiet voice that Apple heard words in is still sent",
+          sent == [("call mom", "push")], (sent, LOGS[-4:]))
+
+
+def test_send_button_sends_a_tapped_turn():
+    _backup_reset()
+    lst, bar, sent = closing_listener()
+    lst.register_backup_hotkey()
+    CARBON.press(1.0)
+    CARBON.release(1.1)
+    check("tapped: the bar's hint names ⌃⌥ M", ("set_hint", "ctrl+opt+m") in bar.calls, bar.calls)
+    partial(lst, "call dana")
+    lst.send_now()                                    # what the bar's Send click does
+    check("Send ends the turn like a second tap", lst.turn is not None
+          and lst.turn["finish_at"] > 0, lst.turn)
+    after = len(bar.calls)
+    final(lst, "call dana", conf=0.9)
+    settle_turn(lst, sent)
+    check("and sends what she said", sent == [("call dana", "push")], (sent, LOGS[-4:]))
+    check("the bar leaves the hint for thinking", ("set_state", "thinking", "") in bar.calls,
+          bar.calls[after - 3:])
+    lst.send_now()
+    check("Send with no turn open does nothing", lst.turn is None and len(OPEN_KINDS) == 1)
+    # Listen now (the menu) and the window's circle: a tap turn with no key to name.
+    lst, bar, sent = closing_listener()
+    lst.push_to_talk()
+    check("Listen now is a tap turn: its hint has no key", ("set_hint", "") in bar.calls, bar.calls)
+    # A held key and Send: sent at once, and the key's release decides nothing after.
+    lst, bar, sent = closing_listener()
+    lst.press("key", 1.0)
+    partial(lst, "hello")
+    lst.send_now()
+    lst.release("key", 3.0)
+    check("Send during a hold sends it, and the release opens nothing",
+          lst.turn is not None and lst.turn["finish_at"] > 0 and OPEN_KINDS == ["hold"],
+          (lst.turn, OPEN_KINDS))
+    final(lst, "hello", conf=0.9)
+    settle_turn(lst, sent)
+    check("sent once", sent == [("hello", "push")], sent)
+
+
+def test_hint_only_in_bar_mode():
+    lst, bar, sent = closing_listener()
+    lst.cfg = {"display": "panel"}
+    lst.press("key", 1.0)
+    lst.release("key", 1.1)
+    check("display=panel: the bar gets no hint", not any(c[0] == "set_hint" for c in bar.calls),
+          bar.calls)
+
+
+class FakeKeyEvent:
+    """An NSEvent as the talk key's monitor sees it: flagsChanged for a modifier,
+    keyDown/keyUp for a letter, with the event's own timestamp."""
+    def __init__(self, kind, code, flags=0, ts=0.0, repeat=False):
+        self._kind, self._code, self._flags, self._ts, self._rep = kind, code, flags, ts, repeat
+
+    def type(self):
+        return self._kind
+
+    def keyCode(self):
+        return self._code
+
+    def modifierFlags(self):
+        return self._flags
+
+    def timestamp(self):
+        return self._ts
+
+    def isARepeat(self):
+        return self._rep
+
+
+def test_talk_key_monitor_passes_the_events_own_time():
+    """The real _register_tap / _register_combo handlers, fed fake NSEvents: the key's
+    own timestamps reach press/release, so a slow turn opening cannot turn a tap into a
+    hold. No monitor is installed (the _install seam is replaced)."""
+    import AppKit
+    lst, bar, sent = closing_listener()
+    handlers = []
+    lst._install = lambda mask, handler: handlers.append(handler)
+    lst._register_tap("right-command")
+    lst.hotkey_active = "right-command"              # what register_hotkey records
+    h = handlers[-1]
+    FC = AppKit.NSEventTypeFlagsChanged
+    CMD = int(AppKit.NSEventModifierFlagCommand)
+    h(FakeKeyEvent(FC, 54, CMD, ts=500.0))
+    check("right ⌘ down opens a key turn", lst.turn is not None and lst.turn.get("src") == "key"
+          and lst.turn.get("key_at") == 500.0, lst.turn)
+    _slow_open(lst, 0.6)
+    h(FakeKeyEvent(FC, 54, CMD, ts=500.01))           # the same press reported again
+    h(FakeKeyEvent(FC, 54, 0, ts=500.11))
+    check("released 110 ms later by its own clock: a tap", lst.turn is not None
+          and lst.turn["mode"] == "toggle", (lst.turn, LOGS[-3:]))
+    check("its hint names right ⌘", ("set_hint", "right-command") in bar.calls, bar.calls[-3:])
+    h(FakeKeyEvent(FC, 54, CMD, ts=503.0))
+    h(FakeKeyEvent(FC, 54, 0, ts=503.1))
+    check("tapped again: sent (finishing)", lst.turn is None or lst.turn["finish_at"] > 0, lst.turn)
+    settle_turn(lst, sent)
+    # A combination ("cmd+shift+m"): keyDown with its modifiers, a repeat, keyUp.
+    lst, bar, sent = closing_listener()
+    handlers.clear()
+    lst._install = lambda mask, handler: handlers.append(handler)
+    lst._register_combo("cmd+shift+m")
+    h = handlers[-1]
+    KD, KU = AppKit.NSEventTypeKeyDown, AppKit.NSEventTypeKeyUp
+    mods = CMD | int(AppKit.NSEventModifierFlagShift)
+    h(FakeKeyEvent(KD, 46, mods, ts=700.0))
+    h(FakeKeyEvent(KD, 46, mods, ts=700.5, repeat=True))
+    voice(lst, 1.0)
+    h(FakeKeyEvent(KU, 46, 0, ts=700.9))              # the modifiers already let go
+    check("a combination held 0.9 s by its own clock is a hold",
+          lst.turn is not None and lst.turn["mode"] == "hold", (lst.turn, LOGS[-3:]))
+
+
+def test_backup_hotkey_failure_is_reported():
+    _backup_reset()
+    CARBON.next_status = -9878                      # eventHotKeyExistsErr
+    lst, bar, sent = turn_listener()
+    lst.register_backup_hotkey()
+    st = lst.backup_state
+    check("another app holds it: not registered, error taken, the OSStatus kept",
+          st.get("registered") is False and st.get("error") == "taken" and st.get("status") == -9878, st)
+    check("and the server is told", _wait_posts(1) and BACKUP_POSTS[-1]["error"] == "taken", BACKUP_POSTS)
+    check("it is logged", any("another app holds it" in m for m in LOGS), LOGS[-3:])
+    _backup_reset()
+    CARBON.next_status = -50
+    lst, bar, sent = turn_listener()
+    lst.register_backup_hotkey()
+    check("any other failure: error failed", lst.backup_state.get("error") == "failed"
+          and lst.backup_state.get("registered") is False, lst.backup_state)
+
+
+def test_backup_hotkey_macos_shortcut_on_the_same_keys():
+    _backup_reset()
+    MACOS_SHORTCUT["name"] = "input_sources_next"
+    lst, bar, sent = turn_listener()
+    lst.register_backup_hotkey()
+    check("registered, and macOS's own shortcut on the same keys is reported",
+          lst.backup_state.get("registered") is True
+          and lst.backup_state.get("taken_by") == "input_sources_next", lst.backup_state)
+
+
+def test_backup_hotkey_change_and_off_unregister():
+    _backup_reset()
+    lst, bar, sent = turn_listener()
+    lst.register_backup_hotkey()
+    first = next(iter(CARBON.registered))
+    lst.cfg = {"backup_hotkey": "ctrl+opt+k"}
+    lst.register_backup_hotkey()
+    check("a changed combo unregisters the old one first",
+          ("unregister", first) in CARBON.calls and len(CARBON.registered) == 1
+          and next(iter(CARBON.registered.values()))[:2] == (40, (1 << 12) | (1 << 11)),
+          (CARBON.calls, CARBON.registered))
+    # The server's /api/config object form is read the same way.
+    lst.cfg = {"backup_hotkey": {"combo": "off", "registered": True}}
+    lst.register_backup_hotkey()
+    check("off: nothing is registered, and the state says so",
+          not CARBON.registered and lst.backup_state.get("enabled") is False
+          and lst.backup_state.get("registered") is False, (CARBON.registered, lst.backup_state))
+    CARBON.press()
+    check("off: the combo opens no turn", lst.turn is None, lst.turn)
+    lst.cfg = {}
+    lst.register_backup_hotkey()
+    check("back to the default", len(CARBON.registered) == 1, CARBON.registered)
+    lst.shutdown()
+    check("quitting unregisters it", not CARBON.registered, CARBON.registered)
+
+
+def test_backup_hotkey_on_launch_and_settings():
+    _backup_reset()
+    _tcc(mic=0, speech=0, ax=False)
+    lst, began = perm_listener()
+    lst.cfg = {"first_run": True}
+    lst.start_quietly()
+    check("launch with nothing granted still registers it, and asks for nothing",
+          len(CARBON.registered) == 1 and TCC_ASKED == [], (CARBON.registered, TCC_ASKED))
+    _wait_posts(1)
+    BACKUP_POSTS.clear()
+    # A server that restarted lost its copy: the next settings poll re-posts it.
+    listenermod.get_config = lambda: {"backup_hotkey": {"combo": "ctrl+opt+m", "registered": None}}
+    lst.refresh_login_item = lambda cfg: None
+    lst.apply_local_asr = lambda cfg: None
+    lst.refresh_settings()
+    check("a server whose copy is behind is told again", _wait_posts(1)
+          and BACKUP_POSTS[-1]["registered"] is True, BACKUP_POSTS)
+    BACKUP_POSTS.clear()
+    listenermod.get_config = lambda: {"backup_hotkey": {"combo": "ctrl+opt+m", "registered": True,
+                                                         "error": "", "taken_by": ""}}
+    lst.refresh_settings()
+    time.sleep(0.1)
+    check("one that agrees is not posted to again", BACKUP_POSTS == [], BACKUP_POSTS)
+    listenermod.get_config = lambda: {"backup_hotkey": {"combo": "off"}}
+    lst.refresh_settings()
+    check("Settings turning it off unregisters it within a poll", not CARBON.registered, CARBON.registered)
+    check("no test anywhere in this file reached real Carbon", not REAL_CARBON, REAL_CARBON)
+
+
 def main():
     for t in (test_local_model_is_freed_when_idle_and_woken_by_the_next_turn,
               test_turn_open_wakes_the_local_model,
@@ -2025,6 +2895,14 @@ def main():
               test_speech_language_setting_is_followed,
               test_menu_titles_exist_in_every_language,
               test_about_and_help_menu_actions,
+              test_the_app_is_regular_in_the_dock,
+              test_build_sh_plists_have_no_lsuielement,
+              test_dock_click_opens_the_window,
+              test_main_menu_has_quit_edit_and_window,
+              test_settings_menu_opens_the_pages_settings,
+              test_every_quit_runs_one_cleanup,
+              test_cmd_tab_with_no_window_shows_it,
+              test_overlays_never_activate_the_app,
               test_menu_icon_state_mapping,
               test_load_menu_icon_reads_1x_and_2x_and_sets_template,
               test_load_menu_icon_missing_asset_returns_none,
@@ -2062,7 +2940,26 @@ def main():
               test_just_in_time_explains_then_asks,
               test_separate_process_listener_collects_the_click,
               test_contacts_line_before_the_first_read,
-              test_permission_strings_in_every_language):
+              test_permission_strings_in_every_language,
+              test_carbon_combo,
+              test_macos_shortcut_table,
+              test_backup_hotkey_registers_without_accessibility,
+              test_backup_hotkey_hold_is_a_hold_turn,
+              test_backup_hotkey_tap_is_a_tap_turn,
+              test_a_tap_is_a_tap_by_the_keys_own_clock,
+              test_a_hold_is_a_hold_by_the_keys_own_clock,
+              test_backup_key_release_orders,
+              test_backup_key_repeat_and_a_lost_release,
+              test_a_press_while_thinking_is_ignored_and_leaves_no_bad_state,
+              test_a_junk_3ms_turn_is_never_sent,
+              test_no_speech_energy_is_never_sent,
+              test_send_button_sends_a_tapped_turn,
+              test_hint_only_in_bar_mode,
+              test_talk_key_monitor_passes_the_events_own_time,
+              test_backup_hotkey_failure_is_reported,
+              test_backup_hotkey_macos_shortcut_on_the_same_keys,
+              test_backup_hotkey_change_and_off_unregister,
+              test_backup_hotkey_on_launch_and_settings):
         print(f"\n-- {t.__name__}")
         try:
             t()

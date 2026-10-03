@@ -65,17 +65,56 @@ checked) under `MICMIC_REPLAY=record` or `off`. Every other timing check in the 
 (the address-book hang tests, the Wikipedia timeout test) is local - no Jev or Gemini
 round trip - and is unaffected by replay mode.
 
-## Known gap: not every section replays bit-for-bit yet
+## Closed gap: record vs replay (2026-10-03)
 
-A full `record` run passes 677/677 with 0 pre-existing failures. A full `replay` run
-against that recording currently reproduces roughly 76 of ~113 sections exactly (0
-live calls) but MISSES on about 37 sections, almost all of them multi-turn flows
-(sending a message, placing a call, undo, volume-in-context, screen tasks). Two
-back-to-back `replay` runs against the SAME recording ARE identical to each other
-(confirmed twice, with the hash seed pinned) - the divergence is specifically
-record-vs-replay, not replay-vs-replay.
+Replay used to miss from the first multi-turn weather section (0zf) on, and a
+recording run never matched the replay that followed it. The varying input was her
+habits: `savta/memory.py` lists the top places/songs/apps in every `understand()`
+request (`what_she_usually_asks_for`) ranked by `(count, last)`, `last` in whole wall
+seconds. Places asked once each tie on the count, so their order depended on whether
+two turns landed in the same second: milliseconds apart under replay, about a second
+apart live. The recording held four orderings of the 0zf Eilat request.
 
-Ruled out, each verified directly rather than assumed:
+Fixed in `tests/test_micmic.py`, nothing in savta changed:
+
+- **Habit clock.** `savta.memory.time` is a virtual clock that moves only when a Jev or
+  Gemini round trip happens, by `_HabitClock.ROUND_TRIP` (0.1 s), never with the wall
+  clock. Record, replay, a slow or a fast Mac now build the same request. 0.1 is the
+  value whose orders match every request already recorded (358 of 358); other values
+  left 192-195 misses. Changing it (or adding round trips before a section) moves later
+  habit orders: one `MICMIC_REPLAY_ALLOW_LIVE=1` top-up, then stable again.
+- **No legacy state.** `savta.paths.state()` copies `profile.json`, `memory.json`,
+  `trace.jsonl` and `notes.txt` in from the repo root on first access. In the main
+  checkout those are the owner's own dev files, in a worktree they do not exist, so the
+  suite built different requests depending on where it ran (and put her real habits
+  into requests). The suite drops the legacy argument: it starts from its own fixture
+  state everywhere.
+
+Checking it, all dry (0 live calls):
+
+- `MICMIC_REPLAY_DUMP=<file>` writes every request key with its canonical body, so two
+  runs can be compared request for request. Point it outside the repo: the bodies hold
+  the fixture book and whatever state the run started from.
+- `MICMIC_REPLAY_STUB_MISSES=1` answers a miss with a fixed made-up answer instead of
+  raising, so a dry run reaches every request; its checks mean nothing.
+- `MICMIC_REPLAY_DELAY_MS=300` makes every replayed answer wait like a live round trip.
+  A request that changes with it depends on the wall clock.
+
+Result at this change: replay 756 passed, 0 failed, 8 skipped, 358 replayed, 0 live,
+0 misses, with identical request sequences and output across two worktree runs, two
+runs with stand-in repo-root `profile.json`, `memory.json`, `trace.jsonl`,
+`settings.json` and `notes.txt` (the main checkout case), and one at 300 ms per answer.
+(The one check updated alongside: a call handed to FaceTime is
+`(False, "facetime_confirm <digits>")`, never a claimed success, as `mac.facetime`
+documents.)
+
+## History: the record-vs-replay gap before 2026-10-03
+
+A full `replay` run used to MISS on about 37 sections, almost all of them multi-turn
+flows. Two back-to-back `replay` runs against the SAME recording were identical to
+each other - the divergence was record-vs-replay (the habit order above).
+
+Ruled out then, each verified directly rather than assumed:
 - Wall-clock content in the request (fixed above; verified with a scrubbing unit
   check before recording).
 - `PYTHONHASHSEED` randomization (pinned; two `replay` runs with a fixed seed are
@@ -87,18 +126,5 @@ Ruled out, each verified directly rather than assumed:
   background thread the same turn joins before returning): forced synchronous in a
   throwaway run - no change in the failure count.
 
-Not yet found: something else still differs between a live call and a cached reply
-for these specific multi-turn flows. `MICMIC_REPLAY_ALLOW_LIVE=1` reliably converges a
-full run to 668-677 passed (the only stable failure is an unrelated, pre-existing bug:
-"next Friday" resolves to a Sunday when today happens to be a Saturday, in
-`savta/actions/web.py`'s relative-date logic - nothing to do with replay), at a
-fraction of the full recording cost (roughly $0.005-0.01 rather than $0.06), but a
-second clean `replay` run right after does not yet land on 0 misses. Recommended next
-step: convert the ~37 affected sections to the same `scripted_turns`/`_ScriptedJev`
-pattern the multi-turn slot-filling tests already use, which sidesteps the question
-rather than needing it to replay - or narrow down the remaining discrepancy with a
-canon-diff on one of the still-missing keys the next time this is picked up.
-
-For everyday work this already does what it needs to: the majority of the suite runs
-at $0 with 0 live calls, and `MICMIC_REPLAY_ALLOW_LIVE=1` is a cheap top-up for the
-rest until the gap above is closed.
+Found by a canon diff (`MICMIC_REPLAY_DUMP`) on the first missing key: the habit
+order, closed above.

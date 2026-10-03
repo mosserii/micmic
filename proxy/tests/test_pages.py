@@ -4,6 +4,9 @@ import re
 from proxy import pages
 
 PAGES = ("/", "/privacy", "/terms", "/checkout/success", "/checkout/cancel")
+APPLE_EULA = "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/"
+APPLE_REFUNDS = "https://reportaproblem.apple.com"
+APPLE_LINKS = {APPLE_EULA, APPLE_REFUNDS}
 
 
 def _get(p, path):
@@ -46,10 +49,11 @@ def test_pages_load_nothing_from_anywhere_else(make_proxy):
         assert "font-src 'self'" in csp and "script-src" not in csp, path
         assert not re.search(r"url\((?!/static/)", html), path
         assert not re.search(r'src="(?!/static/)', html), path
-        # The only off-site link on any page is the download itself.
+        # The only off-site links: the download, GitHub, and Apple's EULA and refund
+        # page, which the terms must point to for the iPhone app.
         offsite = set(re.findall(r'href="(https?://[^"]+)"', html))
         assert offsite <= {"https://example.com/MicMic.dmg",
-                           "https://github.com/mosserii/micmic"}, path
+                           "https://github.com/mosserii/micmic"} | APPLE_LINKS, path
 
 
 def test_static_paths_cannot_leave_the_static_folder(make_proxy):
@@ -176,3 +180,200 @@ def test_header_has_github_and_a_download_button(make_proxy):
     assert '<div class="top-cta"><a class="button" href="https://example.com/MicMic.dmg">Download</a></div>' in head
     head = _get(make_proxy(), "/")[1].decode("utf-8").split("</header>")[0]
     assert '<div class="top-cta">' not in head      # no link, no header button
+
+
+def _legal(p, path):
+    s, raw, h = _get(p, path)
+    html = raw.decode("utf-8")
+    assert s == 200 and h["Content-Type"] == "text/html; charset=utf-8", path
+    assert "{{" not in html and "<script" not in html.lower(), path
+    assert "—" not in html and "–" not in html, path       # no em or en dashes
+    assert 'href="/privacy"' in html and 'href="/terms"' in html, path
+    assert "noindex" not in html, path                                # App Review reads them
+    return html
+
+
+COMPANY = "registered in Israel under company number 517172011"
+ADDRESS = "6 Hashachaf, Tel Aviv-Jaffa 6803452, Israel"
+
+
+def _section(html: str, anchor: str) -> str:
+    """The text of one <h2 id=anchor> section, up to the next <h2."""
+    start = html.index(f'<h2 id="{anchor}">')
+    end = html.find("<h2", start + 1)
+    return html[start:end if end != -1 else len(html)]
+
+
+def test_terms_page_has_what_the_app_store_needs(make_proxy):
+    """The iPhone app links here from its consent box and from App Store Connect, so
+    the page must carry Apple's subscription disclosures and the EULA reference."""
+    p = make_proxy(support_email="help@example.com", free_daily_calls=300,
+                   jev_calls_per_request=3, pro_price_label="$8/month")
+    html = _legal(p, "/terms")
+    assert "<h1>Terms of use</h1>" in html
+    assert "you are asked to tick a box to agree to these terms" in html
+    # The iPhone subscription: Apple-managed, auto-renew, how to cancel, refunds.
+    assert "In-App Purchase" in html and "auto-renewing monthly subscription" in html
+    assert "at least 24 hours before the end of the current period" in html
+    assert "Settings, tap your name, then Subscriptions" in html
+    assert f'href="{APPLE_EULA}"' in html and f'href="{APPLE_REFUNDS}"' in html
+    # The Mac subscription and the plan numbers come from the running config.
+    assert "through Stripe" in html and "$8/month" in html
+    assert "100 requests to try" in html
+    # What the assistant will and will not do.
+    assert "MicMic never pays." in html
+    assert "nothing is sent and no call is placed until you tap" in html
+    assert "can be wrong" in html and "not a doctor, lawyer, financial adviser" in html
+    # 18+: the Gemini API terms forbid users under 18; App Store rating is overridden to 18+.
+    assert 'id="age"' in html and "at least 18 years old" in html
+    assert "Apple ID" not in html
+    assert "[OWNER:" not in html                       # jurisdiction decided 2026-10-03
+    assert 'href="mailto:help@example.com"' in html
+
+
+def test_terms_say_it_is_not_an_emergency_service_first(make_proxy):
+    """The emergency warning is the first thing on the page after the title, in its
+    own box, and has its own section."""
+    html = _legal(make_proxy(), "/terms")
+    body = html.split("<h1>Terms of use</h1>", 1)[1]
+    first = body[body.index("<p class=\"alert\""):]
+    assert body.index('<p class="alert"') < body.index("<h2")
+    assert first.startswith('<p class="alert" id="not-emergency"><strong>MicMic is not an emergency service.</strong>')
+    assert "always call your local emergency number yourself" in first.split("</p>")[0]
+    sec = _section(html, "emergency")
+    assert "cannot call emergency services for you" in sec
+    assert "fail to call or reach anyone" in sec
+    assert "call your local emergency number yourself, directly" in sec
+    assert ".doc .alert" in html                        # the box is styled, not plain text
+
+
+def test_terms_changes_need_notice_and_keep_a_version(make_proxy):
+    html = _legal(make_proxy(), "/terms")
+    sec = _section(html, "changes")
+    assert "We may change MicMic and these terms at any time" in sec
+    assert "at least 14 days before a material change takes effect" in sec
+    assert "by email if we have your email address" in sec
+    assert "follow the law, a court or a regulator, or to deal with a security risk" in sec
+    assert "If you keep using MicMic after a change takes effect, the changed terms apply" in sec
+    assert "stop using MicMic and cancel any subscription" in sec
+    assert "Apple tells you about a price change" in sec and "at least 30 days" in sec
+    assert '<p class="meta">Version 2026-10-03. Last updated 3 October 2026.' in html
+
+
+def test_terms_operator_law_and_courts(make_proxy):
+    """Owner decisions 2026-10-03: BetterFly AI LTD, Israeli law, Tel Aviv-Jaffa courts,
+    consumers keep their home protections, no arbitration or class waiver."""
+    html = _legal(make_proxy(), "/terms")
+    who = _section(html, "who")
+    assert "BetterFly AI LTD" in who and COMPANY in who and ADDRESS in who
+    law = _section(html, "law")
+    assert "governed by the laws of the State of Israel" in law
+    assert "competent courts of Tel Aviv-Jaffa, Israel, have exclusive jurisdiction" in law
+    assert "does not take away the protection of the mandatory laws of the country where you live" in law
+    assert "do not require arbitration" in law
+    assert "within 30 days" in law
+    liability = _section(html, "liability")
+    assert "the greater of the amount you paid for MicMic in the 12 months" in liability
+    assert "US$50" in liability
+    assert "death or personal injury caused by our negligence" in liability and "fraud" in liability
+    assert "of Israel" in liability and "European Union" in liability
+    general = _section(html, "general")
+    assert "to its owner personally" in general and "English version controls" in general
+    for anchor in ("use", "access", "plans", "refunds", "license", "open-source", "content",
+                   "providers", "availability", "warranty", "indemnity", "third-party"):
+        _section(html, anchor)                          # each section exists
+
+
+def test_terms_carry_apples_minimum_eula_terms(make_proxy):
+    """Apple's Instructions for Minimum Terms of Developer's End-User License Agreement,
+    so the Terms also work if pasted as a custom EULA in App Store Connect."""
+    sec = _section(_legal(make_proxy(support_email="help@example.com"), "/terms"), "apple")
+    for clause in ("Acknowledgement.", "Scope of license.", "Maintenance and support.",
+                   "Warranty.", "Product claims.", "Claims about intellectual property.",
+                   "Legal compliance.", "Developer contact.", "Third-party terms.",
+                   "Third-party beneficiary."):
+        assert f"<strong>{clause}</strong>" in sec, clause
+    assert "between you and BetterFly AI LTD only, not Apple" in sec
+    assert "Apple will refund the purchase price" in sec
+    assert "Apple and its subsidiaries are third-party beneficiaries" in sec
+    assert "United States government embargo" in sec
+    assert ADDRESS in sec and 'href="mailto:help@example.com"' in sec
+
+
+def test_terms_open_source_matches_the_mit_license(make_proxy):
+    """The Mac app's code is MIT (LICENSE at the repo root): the terms must not take
+    back what the license gives, and must not stretch it to the name or the service."""
+    license_text = (pages.PROXY_ROOT.parent / "LICENSE").read_text()
+    assert license_text.startswith("MIT License") and "BetterFly AI LTD" in license_text
+    sec = _section(_legal(make_proxy(), "/terms"), "open-source")
+    assert "under the MIT License" in sec
+    assert "nothing in these terms limits the rights it gives you" in sec
+    assert "does not give you any right to the MicMic name or logo" in sec
+    use = _section(_legal(make_proxy(), "/terms"), "use")
+    assert "parts of MicMic that are not open source" in use
+
+
+def test_privacy_page_covers_mac_and_iphone(make_proxy):
+    p = make_proxy(support_email="help@example.com")
+    html = _legal(p, "/privacy")
+    assert "MicMic app for Mac and the MicMic app for iPhone" in html
+    for who in ("TypeSafe AI (Jev)", "Google (Gemini API)", "ElevenLabs", "Railway",
+                "Apple", "Stripe"):
+        assert f"<strong>{who}</strong>" in html, who
+    assert "ElevenLabs keeps the text and the audio by default" in html
+    assert "paid Gemini API" in html
+    assert "Phone numbers, email addresses and street addresses never leave your iPhone" in html
+    assert "You must be 18 or older to use it" in html
+    assert 'id="delete"' in html and "Delete my account and data" in html
+    assert "Use AI services" in html                       # withdrawing AI consent
+    assert "never from your location" in html              # guideline 5.1.5
+    assert "record that you agreed to our terms" in html
+    assert "Apple ID" not in html                          # Apple Account since 2024
+    assert "does not cancel a subscription bought through Apple" in html
+    assert "California" in html and "data protection authority" in html
+    assert "in the United States" in html
+    assert 'href="mailto:help@example.com"' in html
+
+
+def test_privacy_names_the_controller_and_every_processor(make_proxy):
+    html = _legal(make_proxy(), "/privacy")
+    who = _section(html, "controller")
+    assert "BetterFly AI LTD" in who and COMPANY in who and ADDRESS in who
+    # Article 27 representative: not invented; the page says one is being appointed.
+    assert "Article 27" in who and "[OWNER:" not in who
+    sec = _section(html, "processors")
+    for who in ("Railway", "Vercel", "TypeSafe AI (Jev)", "Google (Gemini API)", "ElevenLabs",
+                "Stripe", "Apple", "YouTube and Apple&#39;s iTunes Search"):
+        assert f"<strong>{who}</strong>" in sec, who
+    assert sec.count("It receives") + sec.count("receive the words") >= 6   # what each gets
+    ai = _section(html, "ai")
+    assert "We do not train AI models on your data" in ai
+    assert "we cannot tell you that today" in ai              # TypeSafe terms not in hand
+    assert _section(html, "transfers").count("standard contractual clauses") == 1
+
+
+def test_privacy_bases_rights_retention_and_changes(make_proxy):
+    html = _legal(make_proxy(), "/privacy")
+    bases = _section(html, "purposes")
+    for art in ("Article 6(1)(b)", "Article 6(1)(a)", "Article 6(1)(f)", "Article 6(1)(c)"):
+        assert art in bases, art
+    rights = _section(html, "rights")
+    for word in ("portability", "object", "restrict", "withdraw your consent",
+                 "data protection authority", "Amendment 13", "Privacy Protection Authority",
+                 "We do not sell or share personal information"):
+        assert word in rights, word
+    retention = _section(html, "retention")
+    # The real numbers from the code: brain idle 900 s, state TTL 30 days, tts_seen 30 days.
+    assert "15 minutes" in retention and retention.count("30 days") == 2
+    assert "stop using MicMic for 30 days" in html                   # the short version too
+    changes = _section(html, "changes")
+    assert "at least 14 days before it takes effect" in changes
+    assert '<p class="meta">Version 2026-10-03. Last updated 3 October 2026.' in html
+    assert "18 or older" in _section(html, "children")
+
+
+def test_legal_pages_without_a_support_email_still_render(make_proxy):
+    for path in ("/privacy", "/terms"):
+        html = _legal(make_proxy(), path)
+        assert "mailto:" not in html, path
+        assert "contact us." in html or "contact us first." in html, path

@@ -35,8 +35,9 @@ Finding the song needs no key: Apple's iTunes Search API
 Music, which is not always the Mac's region (the owner's Mac says en_FR, the store is
 Israel, and a French catalog link for a song the Israeli store lacks will not open).
 
-Every AppleScript goes through mac._osa, looked up when called, so a test that stubs
-it stubs this too.
+Every AppleScript goes through mac._tell (consent-aware: a denied Automation for
+Music or Spotify answers at once, a never-asked one gets MicMic's line first), which
+calls mac._osa looked up when called, so a test that stubs _osa stubs this too.
 """
 from __future__ import annotations
 import json, os, plistlib, re, subprocess, time, unicodedata, urllib.parse, urllib.request
@@ -578,9 +579,18 @@ def _q(s: str) -> str:
     return (s or "").replace("\\", "\\\\").replace('"', '\\"')
 
 
-def library(term: str, limit: int = 12) -> list[dict]:
-    """Songs in her own library matching the words, as Music's own search finds them."""
+def library(term: str, limit: int = 12, ask: bool = False) -> list[dict]:
+    """Songs in her own library matching the words, as Music's own search finds them.
+    [] when Music cannot be read.
+
+    By default (ask False) the library is searched only when Music is ALREADY allowed
+    (mac.automation_ready: granted this run, or on a read of the running app): the
+    catalog link plays the song without it, so a search nobody needs must not launch
+    Music, show MicMic's line or macOS's question, or hold her turn for a minute.
+    ask=True is the old way: launches Music hidden and asks if it must."""
     if not term.strip():
+        return []
+    if not ask and not mac.automation_ready("Music"):
         return []
     script = f'''tell application "Music"
 set rs to search library playlist 1 for "{_q(term)}" only songs
@@ -593,7 +603,7 @@ set out to out & (persistent ID of t) & "{FIELD}" & (name of t) & "{FIELD}" & (a
 end repeat
 return out
 end tell'''
-    ok, text = mac._osa(script, timeout=6.0)
+    ok, text = mac._tell("Music", script, timeout=6.0, ask=ask)
     return parse_library(text) if ok else []
 
 
@@ -719,7 +729,7 @@ set now to name of current track
 end try
 return (player state as text) & "{FIELD}" & now & "{FIELD}" & raised
 end tell'''
-    ok, text = mac._osa(script, timeout=10.0)
+    ok, text = mac._tell("Music", script, timeout=10.0)
     parts = (text or "").split(FIELD)
     state = parts[0] if ok and parts else ""
     info = {"state": state or text[:120], "now": parts[1] if len(parts) > 1 else "",
@@ -811,10 +821,11 @@ def _song_toggle(ax, root, track_id, cap: int = 4000):
 
 
 def _now_playing() -> tuple[str, str]:
-    ok, text = mac._osa('if application "Music" is running then\ntell application "Music"\n'
-                        'set now to ""\ntry\nset now to name of current track\nend try\n'
-                        f'return (player state as text) & "{FIELD}" & now\nend tell\nend if',
-                        timeout=4.0)
+    ok, text = mac._tell("Music",
+                         'if application "Music" is running then\ntell application "Music"\n'
+                         'set now to ""\ntry\nset now to name of current track\nend try\n'
+                         f'return (player state as text) & "{FIELD}" & now\nend tell\nend if',
+                         timeout=4.0, launch=False)
     parts = (text or "").split(FIELD) if ok else []
     return (parts[0], parts[1]) if len(parts) == 2 else ("", "")
 
@@ -889,28 +900,46 @@ _CONTROLS = {"pause": "pause", "stop": "pause", "resume": "play",
              "next": "next track", "previous": "previous track"}
 
 
-def state(app: str) -> str:
+def state(app: str, ask: bool = True) -> str:
     """"playing", "paused", "stopped", or "not_running", for "apple_music" or
-    "spotify"; "" when it could not be read. Never launches the app to find out."""
+    "spotify"; "" when it could not be read. Never launches the app to find out.
+    `ask` False: a player whose Automation was never asked reads as "" with no line
+    and no macOS prompt (a plain "pause" checking what she started herself)."""
     name = {"apple_music": "Music", "spotify": "Spotify"}.get(app)
     if not name:
         return ""
-    ok, out = mac._osa(f'if application "{name}" is running then\n'
-                       f'tell application "{name}" to return (player state as string)\n'
-                       f'else\nreturn "not_running"\nend if')
+    ok, out = mac._tell(name, f'if application "{name}" is running then\n'
+                              f'tell application "{name}" to return (player state as string)\n'
+                              f'else\nreturn "not_running"\nend if', launch=False, ask=ask)
     out = (out or "").strip().lower()
     return out if ok and out in ("playing", "paused", "stopped", "not_running") else ""
 
 
 def control(action: str) -> tuple[bool, str]:
     """pause, resume, restart, forward, back, stop, for whatever Music is playing.
-    `stop` pauses rather than stops, so carrying on later picks up where it was."""
+    `stop` pauses rather than stops, so carrying on later picks up where it was.
+
+    Honest about what happened (P1-8): (True, ...) only when Music took the command.
+    A pause or stop it would not take (Automation denied or declined, a timeout) is
+    (False, "pause_failed:<why>"), and the line for it (LINES "pause_failed") tells
+    her to press the space bar in Music. Nothing is muted instead: MicMic speaks
+    through the same output. Any other action: (False, "<why>")."""
+    return _player_control("Music", action)
+
+
+def _player_control(name: str, action: str) -> tuple[bool, str]:
     cmd = _CONTROLS.get(action)
     if not cmd:
         return False, "unknown"
-    # Never launches Music just to pause it.
-    return mac._osa(f'if application "Music" is running then\ntell application "Music"\n'
-                    f'{cmd}\nend tell\nend if')
+    # Never launches the app just to pause it.
+    ok, msg = mac._tell(name, f'if application "{name}" is running then\n'
+                              f'tell application "{name}"\n{cmd}\nend tell\nend if',
+                        launch=False)
+    if ok:
+        return True, msg
+    if action in ("pause", "stop"):
+        return False, f"pause_failed:{msg}"
+    return False, msg
 
 
 # ---------------------------------------------------------------- Spotify
@@ -931,11 +960,8 @@ def spotify_search(words: str, web: bool = False) -> bool:
 
 
 def spotify_control(action: str) -> tuple[bool, str]:
-    cmd = _CONTROLS.get(action)
-    if not cmd:
-        return False, "unknown"
-    return mac._osa(f'if application "Spotify" is running then\ntell application "Spotify"\n'
-                    f'{cmd}\nend tell\nend if')
+    """As control(), for Spotify: the same honest results (pause_failed, never a mute)."""
+    return _player_control("Spotify", action)
 
 
 def _web(url: str) -> bool:
@@ -1047,6 +1073,23 @@ LINES = {
         "hebrew":  "עצרתי את המוזיקה.",
         "arabic":  "وقّفت الموسيقى.",
         "russian": "Поставила музыку на паузу.",
+    },
+    # control()/spotify_control() said "pause_failed:...": the player would not take
+    # the pause (Automation denied or declined, a timeout). Nothing was muted.
+    "pause_failed": {
+        "english": "I could not pause {app} from here. Press the space bar in {app} to pause it.",
+        "hebrew":  "לא הצלחתי לעצור את {app} מכאן. «תלחצי|תלחץ» על מקש הרווח ב{app} כדי לעצור.",
+        "arabic":  "ما قدرت وقّف {app} من هون. «اكبسي|اكبس» على زر المسافة بـ{app} لتوقيفه.",
+        "russian": "Отсюда не получилось поставить {app} на паузу. Нажмите пробел в {app}, чтобы поставить на паузу.",
+    },
+    # mac.tab_player() said "failed" for a pause: the video in the browser tab could
+    # not be paused from here (Chrome or System Events not allowed, Chrome not in
+    # front). Nothing was muted.
+    "pause_failed_video": {
+        "english": "I could not pause the video from here. Press K in the video to pause it.",
+        "hebrew":  "לא הצלחתי לעצור את הסרטון מכאן. «תלחצי|תלחץ» K בסרטון כדי לעצור.",
+        "arabic":  "ما قدرت وقّف الفيديو من هون. «اكبسي|اكبس» K بالفيديو لتوقيفه.",
+        "russian": "Отсюда не получилось поставить видео на паузу. Нажмите K в видео, чтобы поставить на паузу.",
     },
 }
 

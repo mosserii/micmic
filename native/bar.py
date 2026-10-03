@@ -86,7 +86,7 @@ class MicMicBarWebView(WebKit.WKWebView):
 
 
 class MicMicBarBridge(AppKit.NSObject, protocols=[objc.protocolNamed("WKScriptMessageHandler")]):
-    """The page's messages: "dismiss", "height:<px>", "touch"."""
+    """The page's messages: "dismiss", "height:<px>", "touch", "send"."""
 
     def initWithOwner_(self, owner):
         self = objc.super(MicMicBarBridge, self).init()
@@ -189,6 +189,9 @@ class MicMicBar:
         self._m_state = ("idle", "")
         self._m_heard = ""
         self._m_result = None            # (say, undo_label) or None
+        self._m_hint = None              # a tapped turn's key spec ("" = no key), or None
+        # Called (on the main thread) when she clicks the bar's Send button.
+        self.on_send = None
         # A step-by-step guide is running (the page says "guide:1"): the strip is its
         # card, so it stays up, and a global Esc meant for her app does not take it.
         self._guide = False
@@ -210,7 +213,8 @@ class MicMicBar:
         # Above ordinary floating windows (the MicMic panel, a video's picture in
         # picture): the answer to what she just asked must not open behind them.
         panel.setLevel_(AppKit.NSStatusWindowLevel)
-        # An NSPanel hides whenever its app deactivates. This app is never active, so
+        # An NSPanel hides whenever its app deactivates. The bar never activates MicMic
+        # (it is in the Dock, but she works in another app while the bar is up), so
         # left on, the bar could vanish the moment she clicked into it and back out.
         panel.setHidesOnDeactivate_(False)
         panel.setBecomesKeyOnlyIfNeeded_(True)
@@ -298,6 +302,14 @@ class MicMicBar:
         say = say or ""
         label = None if undo_label is None else str(undo_label)
         self._main(lambda: self._apply_result(say, label))
+
+    def set_hint(self, spec) -> None:
+        """A tapped turn is listening: a line under her words saying how to send it, with
+        her real key ("Tap ⌘ again to send"), and a Send button. spec is the key's spec
+        ("right-command", "ctrl+opt+m", "fn-fn"; "" for no key); None clears it. Any
+        new state clears it too."""
+        spec = None if spec is None else str(spec)
+        self._main(lambda: self._apply_hint(spec))
 
     def set_edge(self, edge: str) -> None:
         """"top" (Spotlight's place) or "bottom": the guide moves the strip out of the
@@ -389,7 +401,15 @@ class MicMicBar:
         if state == "error":
             self._m_result = None
         self._m_state = (state, text)
+        self._m_hint = None              # the page's barState clears it as well
         self._eval("window.barState && window.barState(%s, %s);" % (_js(state), _js(text)))
+        self._arm()
+
+    def _apply_hint(self, spec) -> None:
+        if spec is not None and self._m_state[0] != "listening":
+            return                       # the turn moved on before this arrived
+        self._m_hint = spec
+        self._eval("window.barHint && window.barHint(%s);" % _js(spec))
         self._arm()
 
     def _apply_result(self, say: str, label) -> None:
@@ -407,6 +427,8 @@ class MicMicBar:
         if self._m_result is not None:
             say, label = self._m_result
             self._eval("window.barResult && window.barResult(%s, %s);" % (_js(say), _js(label)))
+        if self._m_hint is not None:
+            self._eval("window.barHint && window.barHint(%s);" % _js(self._m_hint))
 
     # ---------------------------------------------------------------- loading
     def _on_loaded(self) -> None:
@@ -586,6 +608,12 @@ class MicMicBar:
                 self._set_height(float(body.split(":", 1)[1]))
             except ValueError:
                 pass
+        elif body == "send":
+            # Send, in a tapped turn: the listener ends and sends it like a second tap.
+            self._m_hint = None
+            fn = self.on_send
+            if fn is not None:
+                fn()
         elif body == "touch":
             if self._fade_at is not None:
                 self._fade_at = max(self._fade_at, time.monotonic() + TOUCH_HOLD)

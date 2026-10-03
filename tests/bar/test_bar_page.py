@@ -70,19 +70,28 @@ COPY = {  # must match the COPY table in index.html
     "he": {"undo": "ביטול הפעולה", "undoFailed": "לא הצלחתי לבטל את זה",
            "undoNone": "אי אפשר לבטל את זה כרגע",
            "undoNet": "לא הצלחתי להתחבר למחשב, שום דבר לא בוטל", "undone": "בוטל",
-           "ready": "מקשיבה", "think": "רגע"},
+           "ready": "מקשיבה", "think": "רגע", "send": "שליחה",
+           "barTapAgain": "לשליחה: עוד הקשה על {tkey}", "barPressSend": "לשליחה: {tkey}",
+           "barClickSend": "בסיום לוחצים על שליחה"},
     "en": {"undo": "Undo", "undoFailed": "I couldn't undo that",
            "undoNone": "Undo isn't available right now",
            "undoNet": "I couldn't reach the computer, so nothing was undone",
-           "undone": "Undone", "ready": "listening", "think": "one moment"},
+           "undone": "Undone", "ready": "listening", "think": "one moment", "send": "Send",
+           "barTapAgain": "Tap {tkey} again to send", "barPressSend": "Press {tkey} to send",
+           "barClickSend": "Click Send when you're done"},
     "ar": {"undo": "تراجع", "undoFailed": "لم أتمكن من التراجع عن ذلك",
            "undoNone": "التراجع غير متاح الآن",
            "undoNet": "لم أتمكن من الوصول إلى الكمبيوتر، لم يتم التراجع عن أي شيء",
-           "undone": "تم التراجع", "ready": "أستمع", "think": "لحظة"},
+           "undone": "تم التراجع", "ready": "أستمع", "think": "لحظة", "send": "إرسال",
+           "barTapAgain": "انقر {tkey} مرة ثانية للإرسال", "barPressSend": "للإرسال: {tkey}",
+           "barClickSend": "اضغط إرسال لما تخلص"},
     "ru": {"undo": "Отменить", "undoFailed": "Не получилось отменить",
            "undoNone": "Отмена сейчас недоступна",
            "undoNet": "Не удалось связаться с компьютером, ничего не отменено",
-           "undone": "Отменено", "ready": "слушаю", "think": "секунду"},
+           "undone": "Отменено", "ready": "слушаю", "think": "секунду", "send": "Отправить",
+           "barTapAgain": "Нажмите {tkey} ещё раз, чтобы отправить",
+           "barPressSend": "Чтобы отправить: {tkey}",
+           "barClickSend": "Когда закончите, нажмите «Отправить»"},
 }
 
 LONG = {
@@ -417,6 +426,64 @@ def test_turns(browser):
     ctx.close()
 
 
+def test_tap_hint(browser):
+    """A tapped turn (native/bar.py set_hint): one line under her words with her own key,
+    and Send where Undo goes. Clicking Send posts "send"; any next state takes both away."""
+    ISO = lambda k: "\u2066" + k + "\u2069"
+    for lang in ("he", "en", "ar", "ru"):
+        for scheme in ("light", "dark"):
+            ctx, page, errors = open_bar(browser, lang, scheme)
+            c = COPY[lang]
+            page.evaluate("barState('listening','')")
+            check(f"[{lang} {scheme}] no hint and no Send while plain listening",
+                  not visible(page, "#taphint") and not visible(page, "#barsend"))
+            for spec, want in (("right-command", c["barTapAgain"].replace("{tkey}", "⌘")),
+                               ("right-option", c["barTapAgain"].replace("{tkey}", "⌥")),
+                               ("ctrl+opt+m", c["barTapAgain"].replace("{tkey}", ISO("⌃⌥ M"))),
+                               ("", c["barClickSend"])):
+                page.evaluate("s => barHint(s)", spec)
+                check(f"[{lang} {scheme}] hint for {spec or 'no key'!r}",
+                      visible(page, "#taphint") and page.inner_text("#taphint") == want,
+                      page.inner_text("#taphint"))
+            check(f"[{lang} {scheme}] no em dash in the hint", "\u2014" not in page.inner_text("#taphint"))
+            page.evaluate("barHint('ctrl+opt+m'); barHeard('what time is it in tokyo')")
+            h = fit(page)
+            check(f"[{lang} {scheme}] Send is shown, in her language",
+                  visible(page, "#barsend") and page.inner_text("#barsend").strip() == c["send"],
+                  page.inner_text("#barsend"))
+            a, b, w = rect(page, "#taphint"), rect(page, "#barsend"), rect(page, "#heard")
+            check(f"[{lang} {scheme}] hint, words and Send do not overlap",
+                  not overlap(a, b) and not overlap(w, b) and not overlap(a, w), (a, b, w))
+            check(f"[{lang} {scheme}] everything inside the strip",
+                  all(0 <= r["x"] and r["r"] <= 640 and 0 <= r["y"] and r["b"] <= h for r in (a, b, w)),
+                  (a, b, w, h))
+            if lang == "en" and scheme == "light":
+                page.screenshot(path=str(SHOTS / "tap-hint-en.png"))
+            page.click("#barsend")
+            check(f"[{lang} {scheme}] Send posts send to native", "send" in msgs(page), msgs(page))
+            check(f"[{lang} {scheme}] and the hint goes at once",
+                  not visible(page, "#taphint") and not visible(page, "#barsend"))
+            check(f"[{lang} {scheme}] Send never reaches the page's microphone",
+                  not any(m.startswith("micmic:") for m in msgs(page))
+                  and page.evaluate("window.__mic.sr === 0 && window.__mic.gum === 0"))
+            page.evaluate("barState('listening',''); barHint('right-command')")
+            page.evaluate("barState('thinking','')")
+            check(f"[{lang} {scheme}] thinking takes the hint away",
+                  not visible(page, "#taphint") and not visible(page, "#barsend"))
+            page.evaluate("barState('listening',''); barHint('right-command'); barHint(null)")
+            check(f"[{lang} {scheme}] barHint(null) clears it", not visible(page, "#barsend"))
+            page.evaluate("barState('listening',''); barHint('fn-fn')")
+            twice = {"he": "Fn פעמיים", "en": "Fn twice", "ar": "Fn مرتين", "ru": "Fn дважды"}[lang]
+            check(f"[{lang} {scheme}] double Fn says to press it twice",
+                  page.inner_text("#taphint") == c["barPressSend"].replace("{tkey}", twice),
+                  page.inner_text("#taphint"))
+            page.evaluate("barResult('Done.', '')")
+            check(f"[{lang} {scheme}] an answer never shows Send beside Undo",
+                  not visible(page, "#barsend") and visible(page, "#undo"))
+            check(f"[{lang} {scheme}] no page errors", not errors, errors)
+            ctx.close()
+
+
 def test_heights(browser):
     ctx, page, _ = open_bar(browser, "en")
     page.evaluate("barState('listening','')")
@@ -432,7 +499,7 @@ def test_heights(browser):
     page.wait_for_timeout(80)
     check("the next turn shrinks it back to 64", heights(page)[-1] == 64, heights(page))
     check("every message is well formed",
-          all(m == "dismiss" or m == "touch" or (m.startswith("height:") and m[7:].isdigit())
+          all(m in ("dismiss", "touch", "send") or (m.startswith("height:") and m[7:].isdigit())
               for m in msgs(page)), msgs(page))
     ctx.close()
 
@@ -686,7 +753,7 @@ def main():
             try:
                 for t in (test_states, test_rapid_heard, test_long_results, test_mixed_direction,
                           test_escaping, test_turns, test_heights, test_esc_and_keys, test_undo,
-                          test_undo_keyboard, test_no_mic, test_language_follows_panel,
+                          test_undo_keyboard, test_no_mic, test_language_follows_panel, test_tap_hint,
                           test_other_modes_unchanged):
                     print(f"\n-- {t.__name__}")
                     try:

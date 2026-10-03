@@ -47,6 +47,11 @@ os.environ.pop("MICMIC_ALLOW_SEND", None)
 _STATE = tempfile.mkdtemp(prefix="micmic-test-screenshot-state-")
 os.environ["MICMIC_STATE_DIR"] = _STATE
 atexit.register(lambda: shutil.rmtree(_STATE, ignore_errors=True))
+# Screenshots land in screen.shots_dir() (~/Pictures/MicMic); a test run keeps its
+# fake captures in a scratch folder instead of her real one.
+_SHOTS = tempfile.mkdtemp(prefix="micmic-test-screenshot-shots-")
+os.environ["MICMIC_SHOTS_DIR"] = _SHOTS
+atexit.register(lambda: shutil.rmtree(_SHOTS, ignore_errors=True))
 
 from savta import router                       # noqa: E402
 from savta import profile as prof              # noqa: E402
@@ -389,8 +394,9 @@ def t_take_screenshot_unit():
         res = screen.take_screenshot()
         check("a granted, successful capture reports ok with a path",
               res.get("ok") and res.get("path", "").endswith(".png"), short(res))
-        check("it is saved under the Desktop, named MicMic screenshot ...",
-              "Desktop" in res.get("path", "") and "MicMic screenshot" in res.get("path", ""),
+        check("it is saved in screen.shots_dir() (never the Desktop), named MicMic screenshot ...",
+              res.get("path", "").startswith(_SHOTS + os.sep) and "Desktop" not in res.get("path", "")
+              and "MicMic screenshot" in res.get("path", ""),
               short(res))
         check("the picture is copied to the clipboard (mac.copy_file_to_clipboard, "
               "stubbed here; the real one is probed in t_mac_unit)",
@@ -474,11 +480,35 @@ def t_take_alone():
     reset_state()
     u = fake_u(intent="screen", screen_task="not_applicable")
     with with_understand(u), with_frontmost("Safari"), \
-         with_capture({"ok": True, "path": FAKE_PNG}):
+         with_capture({"ok": True, "path": FAKE_PNG, "folder": screen.SHOTS_LABEL,
+                       "clipboard": True}):
         r = router.handle(_j, "take a screenshot", speak=False)
     check("a plain screenshot request is saved, not asked about",
           r["did"] == "screenshot_saved", short(r))
-    check("the reply names the Desktop", "Desktop" in (r.get("say") or ""), short(r.get("say")))
+    say = r.get("say") or ""
+    check("the reply never says Desktop (screenshots are saved in Pictures, MicMic)",
+          "Desktop" not in say, short(say))
+    check("the reply names Pictures and the MicMic folder",
+          "Pictures" in say and "MicMic" in say, short(say))
+    check("the folder and the clipboard result reach the detail",
+          (r.get("detail") or {}).get("folder") == screen.SHOTS_LABEL
+          and (r.get("detail") or {}).get("clipboard") is True, short(r.get("detail")))
+    for lang in ("hebrew", "arabic", "russian", "english"):
+        line = router._SCREEN_SAY["screenshot_saved"][lang]
+        check(f"the {lang} saved line names the MicMic folder, never the Desktop",
+              "MicMic" in line and not any(w in line for w in
+                                           ("Desktop", "שולחן העבודה", "ديسكتوب", "Рабочий стол")),
+              line)
+    reset_state()
+    with with_understand(u), with_frontmost("Safari"), \
+         with_capture({"ok": True, "path": "/x/Screenshots/MicMic screenshot.png",
+                       "folder": "Library/Application Support/MicMic/Screenshots",
+                       "clipboard": False}):
+        r = router.handle(_j, "take a screenshot", speak=False)
+    say = r.get("say") or ""
+    check("saved to MicMic's fallback folder: no place is named rather than a wrong one",
+          r["did"] == "screenshot_saved" and "Pictures" not in say and "Desktop" not in say,
+          short(say))
     check("no Undo is offered for a screenshot",
           "undo" not in r or r.get("undo") in (None, False), short(r.get("undo")))
     check("nothing was sent", not SENT and not WA, f"sent={SENT} wa={WA}")
@@ -508,15 +538,41 @@ def t_take_window_scope():
 
 def t_take_no_permission():
     """6. Screen Recording not granted: told plainly, never silently."""
-    reset_state()
-    u = fake_u(intent="screen")
-    with with_understand(u), with_frontmost("Safari"), \
-         with_capture({"ok": False, "why": "screen_recording"}):
-        r = router.handle(_j, "take a screenshot", speak=False)
-    check("a missing permission is reported as such",
-          r["did"] == "screenshot_no_permission", short(r))
-    check("the reply says how to fix it (Screen Recording)",
-          "Screen Recording" in (r.get("say") or ""), repr(r.get("say")))
+    # Router lane L2 (P0-11): asked before and still off ("denied"): macOS's own
+    # Screenshot app now, and how to let MicMic do it, with the page's button.
+    prev = os.environ.get("MICMIC_FAKE_SCREEN_RECORDING")
+    try:
+        os.environ["MICMIC_FAKE_SCREEN_RECORDING"] = "denied"
+        reset_state()
+        u = fake_u(intent="screen")
+        with with_understand(u), with_frontmost("Safari"), \
+             with_capture({"ok": False, "why": "screen_recording"}):
+            r = router.handle(_j, "take a screenshot", speak=False)
+        check("a missing permission is reported as such",
+              r["did"] == "screenshot_no_permission", short(r))
+        check("the reply says how to fix it (Screen Recording)",
+              "Screen Recording" in (r.get("say") or ""), repr(r.get("say")))
+        check("and never claims a picture was saved",
+              "saved" not in (r.get("say") or "").lower(), repr(r.get("say")))
+        check("the reply carries the Screen Recording pane for the page's button",
+              ((r.get("detail") or {}).get("fix") or {}).get("pane") == "screen_recording",
+              short(r.get("detail")))
+        # Never asked yet, and nobody here to show MicMic's line (a test): no "turn
+        # MicMic on" in a list MicMic is not in; the Screenshot app instead.
+        os.environ["MICMIC_FAKE_SCREEN_RECORDING"] = "not_asked"
+        reset_state()
+        with with_understand(u), with_frontmost("Safari"), \
+             with_capture({"ok": False, "why": "screen_recording"}):
+            r = router.handle(_j, "take a screenshot", speak=False)
+        check("never asked: no 'turn MicMic on' before MicMic is in the list",
+              r["did"] == "screenshot_no_permission"
+              and "turn MicMic on" not in (r.get("say") or "")
+              and "Screenshot" in (r.get("say") or ""), repr(r.get("say")))
+    finally:
+        if prev is None:
+            os.environ.pop("MICMIC_FAKE_SCREEN_RECORDING", None)
+        else:
+            os.environ["MICMIC_FAKE_SCREEN_RECORDING"] = prev
 
 
 def t_take_capture_failed():

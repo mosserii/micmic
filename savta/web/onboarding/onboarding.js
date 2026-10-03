@@ -1,4 +1,4 @@
-/* MicMic's first-run onboarding: three short screens inside the app's own window.
+/* MicMic's first-run onboarding: two short screens inside the app's own window.
 
    index.html loads this only in ?panel=1 and only when /api/config says first_run;
    it then shows only if /api/onboarding agrees (not finished or skipped yet). It uses
@@ -8,15 +8,28 @@
 
      0  Only when MicMic runs from the disk image (or a translocated copy): "Move MicMic
         to Applications", with Move and reopen, and Not now (savta/install_place.py).
-     1  The language, and hold the right Option key and talk: an animated bar and keyboard.
-     2  Microphone, then Speech Recognition, then Accessibility: one at a time, each with
-        one line saying why, one button that asks macOS for exactly that one (nothing is
-        asked before she clicks), and "Not now". Its answer is polled from the server.
-     3  Try it for real: done when the server sees the next utterance. Without the
-        microphone or speech, it says what still works (typing) instead. Without
-        Accessibility the key cannot reach MicMic, so it leads with the circle. When
-        another dictation app (Handy) already uses MicMic's key, one line says so and
-        offers a free one (savta/dictation_apps.py). */
+        Set aside unless MICMIC_MOVE_SCREEN=1 (the disk image window already says it).
+     1  Four questions, "1 of 4" to "4 of 4", one at a time in one frame: the language
+        she will speak (choosing it starts its local model's download), then Microphone,
+        Speech Recognition and Accessibility, each with one line saying why, one button
+        that asks macOS for exactly that one (nothing is asked before she clicks), and
+        "Not now". Its answer is polled from the server. Nothing here names a key: the
+        owner's 1.2.4 fresh install read a "Hold the key and talk" demo shown before the
+        microphone was allowed as "try it now", pressed it, and nothing happened.
+        When the copy on the disk image just put this one in Applications by itself
+        (savta/install_place.relocate_at_launch), the language screen says so in one
+        small line: "MicMic moved itself to Applications."
+        Under the language screen's Continue, one line: "By continuing, you agree to the
+        Terms of Use and the Privacy Policy." Each name is a button that opens that page
+        in her browser (POST /api/onboarding/legal {open}); the window never navigates.
+        Continuing records her agreement ({action:"accept"}; Done and Skip record it on
+        the server too). Not a screen of its own: the owner wants fewer screens.
+     2  Try it for real, and how: hold her key (or tap it) and say "What time is it?".
+        Done when the server sees the next utterance. Without the microphone or speech,
+        it says what still works (typing) instead. Without Accessibility the key cannot
+        reach MicMic, so it leads with the circle and names no key. When another
+        dictation app (Handy) already uses MicMic's key, one line says so and offers a
+        free one (savta/dictation_apps.py). */
 (() => {
   if(window.__onboarding) return;
   window.__onboarding = true;
@@ -25,13 +38,15 @@
   const MOVE_KEY = "micmic.onboarding.move";
   const REDUCE = matchMedia("(prefers-reduced-motion: reduce)");
   const SPEECH = Object.fromEntries(LANGS.map(l => [l.code, l.speech]));   // index.html's list
-  // In this order, one screen each. `allow` is the button that asks for it; `asking`
-  // is the line while macOS's own dialog (or, for Accessibility, its pane) is up.
+  // Step 1, in this order, one question each. `allow` is the button that asks for a
+  // permission; `asking` is the line while macOS's own dialog (or, for Accessibility,
+  // its pane) is up. The language is first, and is answered by choosing one.
   const PERMS = [
     {k:"microphone",    label:"obMic",    why:"obMicWhy",    icon:"mic",  allow:"obAllowMic",    asking:"obAsked"},
     {k:"speech",        label:"obSpeech", why:"obSpeechWhy", icon:"wave", allow:"obAllowSpeech", asking:"obAsked"},
     {k:"accessibility", label:"obAx",     why:"obAxWhy",     icon:"ax",   allow:"obAllowAx",     asking:"obAxAsked"},
   ];
+  const SETUP = [{k:"language", label:"obLangPick", why:"obLangWhy", icon:"globe"}, ...PERMS];
   const SVG = {
     // The REAL brand mark, unmodified (source: brand/menubar/orb-mic.svg, kept
     // in sync by hand): the exact paths from brand/micmic-mark.svg, wrapped in
@@ -42,16 +57,16 @@
     wave:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 10v4M8.25 7v10M12 3.5v17M15.75 7v10M19.5 10v4" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"/></svg>',
     ax:'<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="4.4" r="2.2"/><path d="M4.1 8.4a1.1 1.1 0 0 1 1.3-.9l6.6 1.3 6.6-1.3a1.1 1.1 0 1 1 .4 2.2l-4.9 1v3.2l2 6.4a1.1 1.1 0 0 1-2.1.7L12 15.4l-2 5.6a1.1 1.1 0 0 1-2.1-.7l2-6.4v-3.2l-4.9-1a1.1 1.1 0 0 1-.9-1.3z"/></svg>',
     check:'<svg viewBox="0 0 24 24" aria-hidden="true"><path class="ck" d="M5 12.6l4.3 4.3L19 7.2"/></svg>',
-    tri:'<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2.5 5 7 1.8v6.4z"/></svg>',
+    globe:'<svg viewBox="0 0 24 24" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M3.4 9h17.2M3.4 15h17.2M12 3c-2.7 2.5-4 5.5-4 9s1.3 6.5 4 9c2.7-2.5 4-5.5 4-9s-1.3-6.5-4-9z"/></g></svg>',
     // the Applications folder: a folder with the "A" of its Finder icon
     folder:'<svg viewBox="0 0 24 24" aria-hidden="true"><path class="fo" d="M2.5 6.2c0-1.1.9-2 2-2h4.6c.6 0 1.1.3 1.5.7l1.3 1.5h7.6c1.1 0 2 .9 2 2v9.4c0 1.1-.9 2-2 2h-15c-1.1 0-2-.9-2-2z"/><path class="fa" d="M9.2 16.6 12 9.6l2.8 7M10.3 14h3.4"/></svg>',
     arrow:'<svg viewBox="0 0 24 12" aria-hidden="true"><path d="M1 6h19M15 1.5 20.5 6 15 10.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   };
 
   let root = null, step = 0, perms = null, succeeded = false, closing = false;
-  let permTimer = null, turnTimer = null, demoTimers = [], advanceTimer = null, closeTimer = null;
-  // Step 2's own position (0, 1, 2: which permission is on screen), and which ones she
-  // has clicked for on this run: until she clicks, nothing has been asked.
+  let permTimer = null, turnTimer = null, advanceTimer = null, closeTimer = null;
+  // Step 1's own position (0 the language, then 1, 2, 3: which permission is on screen),
+  // and which ones she has clicked for on this run: until she clicks, nothing is asked.
   let pi = 0, asked = {}, pentered = false;
   let orig = {};
   // The local model for her language (savta/asr_models.py): downloaded in the
@@ -59,8 +74,15 @@
   // only while it is still downloading, from wherever go() last called pollAsr().
   let asrStatus = null, asrTimer = null, asrInstalled = false, asrAt = 0, asrBusy = false;
   // Step 0: whether this copy runs from the disk image, and how the move is going
-  // ("", "moving", "moved", "failed"). Step 3: the dictation app on her key, if any.
+  // ("", "moving", "moved", "failed"). Step 2: the dictation app on her key, if any.
   let move = {needed:false}, moveState = "", clash = null, clashOpen = false;
+  // This copy was just put in Applications by the one on the disk image, silently
+  // (savta/install_place.relocate_at_launch): one small line on the first screen.
+  let movedItself = false;
+  const MOVED_ITSELF = {en:"MicMic moved itself to Applications.",
+                        he:"MicMic עברה בעצמה לתיקיית היישומים.",
+                        ar:"MicMic انتقل بنفسه إلى مجلد التطبيقات.",
+                        ru:"MicMic сам переместился в «Программы»."};
   // Keyboard or pointer, whichever she used last: a focus ring painted on a button she
   // never tabbed to reads as a second border, so focus follows the keyboard only.
   let byKey = false;
@@ -83,9 +105,7 @@
 
   function markup(){
     return `
-    <div class="ob-top">
-      <div class="ob-prog" role="progressbar" aria-valuemin="1" aria-valuemax="3"><i></i><i></i><i></i></div>
-    </div>
+    <div class="ob-top"></div>
     <div class="ob-steps">
       <section class="ob-step" data-n="0">
         <div class="ob-hero">
@@ -102,50 +122,28 @@
       </section>
 
       <section class="ob-step" data-n="1">
-        <div class="ob-lang">
-          <p class="ob-lang-t" data-t="obLangPick"></p>
-          <div class="ob-lopts" role="radiogroup" data-aria="obLangPick">${LANGS.map(l => `
-            <button type="button" role="radio" class="ob-lopt" data-code="${l.code}" aria-checked="false">${l.name}</button>`).join("")}
-          </div>
-          <p class="ob-asr" hidden></p>
-        </div>
         <div class="ob-hero">
-          <div class="ob-demo" data-p="idle" aria-hidden="true">
-            <div class="ob-bar">
-              <span class="ob-morb"><span class="ob-mring"></span><span class="ob-marc"></span>
-                <span class="ob-mcore">${SVG.mic}</span></span>
-              <span class="ob-btext">
-                <span class="ob-l1"><span class="ob-ph" data-t="ready"></span><span class="ob-words"></span></span>
-                <span class="ob-l2"><span class="ob-work" data-t="working"></span>
-                  <span class="ob-res">${SVG.check}<span data-t="obDemoDone"></span></span></span>
-              </span>
-            </div>
-            <div class="ob-kbd">
-              <div class="ob-row"></div>
-            </div>
-          </div>
-        </div>
-        <h2 class="ob-title" tabindex="-1" data-t="ob1Title"></h2>
-        <p class="ob-sub" data-t="ob1Sub"></p>
-        <p class="ob-hint" data-t="ob1Tap"></p>
-      </section>
-
-      <section class="ob-step" data-n="2">
-        <div class="ob-hero">
-          <div class="ob-pcard" data-k="microphone" data-s="checking" role="img">
+          <div class="ob-pcard" data-k="language" data-s="ask" role="img">
             <span class="ob-pring" aria-hidden="true"></span>
-            ${PERMS.map(p => `<span class="ob-pglyph" data-k="${p.k}" aria-hidden="true">${SVG[p.icon]}</span>`).join("")}
+            ${SETUP.map(p => `<span class="ob-pglyph" data-k="${p.k}" aria-hidden="true">${SVG[p.icon]}</span>`).join("")}
             <span class="ob-ptick" aria-hidden="true">${SVG.check}</span>
           </div>
         </div>
-        <p class="ob-pof"><span class="ob-pdots" aria-hidden="true">${PERMS.map((p, i) =>
+        <p class="ob-pof"><span class="ob-pdots" aria-hidden="true">${SETUP.map((p, i) =>
           `<i data-k="${p.k}">${i + 1}</i>`).join("")}</span><span class="ob-pofn" data-t="obPermOf"></span></p>
-        <h2 class="ob-title" tabindex="-1" data-t="obMic"></h2>
-        <p class="ob-sub" data-t="obMicWhy"></p>
-        <p class="ob-pdo"><button type="button" class="ob-allow" data-t="obAllowMic"></button></p>
+        <h2 class="ob-title" tabindex="-1" data-t="obLangPick"></h2>
+        <p class="ob-sub" data-t="obLangWhy"></p>
+        <div class="ob-pdo">
+          <div class="ob-lopts" role="radiogroup" data-aria="obLangPick">${LANGS.map(l => `
+            <button type="button" role="radio" class="ob-lopt" data-code="${l.code}" aria-checked="false">${l.name}</button>`).join("")}
+          </div>
+          <button type="button" class="ob-allow" data-t="obAllowMic" hidden></button>
+        </div>
+        <p class="ob-asr" hidden></p>
+        <p class="ob-movednote" hidden></p>
       </section>
 
-      <section class="ob-step" data-n="3">
+      <section class="ob-step" data-n="2">
         <div class="ob-hero">
           <button type="button" class="ob-orb" data-aria="obListen">
             <span class="ob-halo"></span><span class="ob-rip"></span><span class="ob-rip"></span>
@@ -160,7 +158,8 @@
         <h2 class="ob-title" tabindex="-1" data-t="ob3Title"></h2>
         <p class="ob-sub" data-t="ob3Sub"></p>
         <p class="ob-quote"><span class="ob-qcheck">${SVG.check}</span><span class="ob-qtext" data-t="ob3Phrase"></span></p>
-        <p class="ob-hint ob-nokey" hidden><span data-t="obKeyNeedsAx"></span>
+        <p class="ob-hint ob-howto" hidden data-t="obHow"></p>
+        <p class="ob-hint ob-nokey" hidden><span class="ob-bkey" style="display:none"></span><span data-t="obKeyNeedsAx"></span>
           <button type="button" class="ob-on ob-axon" data-pane="accessibility" data-t="obTurnOn"></button></p>
         <div class="ob-clash" hidden>
           <p class="ob-clash-t"></p>
@@ -180,96 +179,95 @@
         <button type="button" class="ob-next" data-go="done" data-t="obDone" hidden></button>
       </span>
     </div>
+    <p class="ob-legal"></p>
     <p class="ob-sr" aria-live="polite"></p>`;
-  }
-
-  // ------------------------------------------------------------------ the keyboard
-  // The part of a Mac keyboard around the shortcut she has, with that key (or every
-  // key of a combination) the one that presses. Right Option is where a new Mac starts.
-  const KEY = {
-    cmd:   {em:"⌘", sm:"command", w:"ob-mod"},
-    alt:   {em:"⌥", sm:"option",  w:"ob-mod"},
-    ctrl:  {em:"⌃", sm:"control", w:"ob-mod"},
-    shift: {em:"⇧", sm:"shift",   w:"ob-wide"},
-    fn:    {em:"fn", sm:"globe",  w:"ob-fn"},
-  };
-  const ROWS = {
-    "right-option":  [["cmd"], ["alt", 1], "arrows"],
-    "right-command": [["cmd", 1], ["alt"], "arrows"],
-    "right-control": [["alt"], ["ctrl", 1], "arrows"],
-    "right-shift":   [["shift", 1], "arrows"],
-    "fn-fn":         [["fn", 1], ["ctrl"], ["alt"], ["cmd"]],
-  };
-  function keyHTML(k, hot){
-    const d = KEY[k] || {em:String(k).toUpperCase(), sm:"", w:"ob-letter"};
-    return `<span class="ob-key ${d.w}${hot ? " ob-hot" : ""}"><em>${d.em}</em>` +
-      (d.sm ? `<small>${d.sm}</small>` : "") + (hot ? '<span class="ob-ripple"></span>' : "") + "</span>";
-  }
-  function kbdRow(){
-    const spec = window.hotkeySpec ? window.hotkeySpec() : "right-option";
-    // a combination (cmd+shift+m): just its keys, all of them pressed together
-    const row = ROWS[spec] || String(spec).split("+").map(k => [k, 1]);
-    return row.map(k => k === "arrows" ? `
-      <span class="ob-arrows">
-        <span class="ob-key ob-half">${SVG.tri}</span>
-        <span class="ob-col"><span class="ob-key ob-half ob-up">${SVG.tri}</span>
-          <span class="ob-key ob-half ob-down">${SVG.tri}</span></span>
-        <span class="ob-key ob-half ob-right">${SVG.tri}</span>
-      </span>` : keyHTML(k[0], k[1])).join("");
   }
 
   // ------------------------------------------------------------------ copy
   // The copy is written for ⌥, the shortcut a new Mac starts with. Anything else she
   // has picked is the key these screens name instead.
   // Fn is a double tap and a combination is a press, not a key held on the right, so
-  // those get their own sentences, and the tap-once hint (a right-hand key's) goes.
+  // those get their own sentences.
   const TOGGLE = {
-    fn:    {ob1Title:"ob1TitleFn", ob1Sub:"ob1SubFn", ob3Sub:"ob3SubFn", ob1Tap:null},
-    combo: {ob1Title:"ob1TitlePress", ob1Sub:"ob1SubPress", ob3Sub:"ob3SubPress", ob1Tap:null},
+    fn:    {ob3Sub:"ob3SubFn", obHow:"obHowFn"},
+    combo: {ob3Sub:"ob3SubPress", obHow:"obHowPress"},
   };
   function say(k){
     const spec = window.hotkeySpec ? window.hotkeySpec() : "right-option";
     const kind = spec === "fn-fn" ? "fn" : /^right-/.test(spec) ? null : "combo";
-    if(kind && k in TOGGLE[kind]){
-      if(TOGGLE[kind][k] === null) return "";
-      k = TOGGLE[kind][k];
-    }
-    const s = t(k), g = window.hotkeyGlyph ? window.hotkeyGlyph() : "⌥";
+    if(kind && k in TOGGLE[kind]) k = TOGGLE[kind][k];
+    const s = t(k), g = glyph();
     return g === "⌥" || typeof s !== "string" ? s : s.split("⌥").join(g);
+  }
+  function glyph(){ return window.hotkeyGlyph ? window.hotkeyGlyph() : "⌥"; }
+
+  // A line that names her key, with the key drawn as a key: "Hold [⌘] and say".
+  // The key itself always reads left to right (⌘⇧M), whatever the language.
+  function keyed(el, text){
+    const g = glyph(), i = typeof text === "string" ? text.indexOf(g) : -1;
+    if(i < 0){ el.textContent = text; return; }
+    const cap = document.createElement("kbd");
+    cap.className = "ob-kcap";
+    cap.textContent = g.replace(/[\u2066-\u2069]/g, "");
+    el.replaceChildren(text.slice(0, i), cap, text.slice(i + g.length));
   }
 
   function paint(){
     if(!root) return;
     for(const el of qa("[data-t]")) el.textContent = say(el.dataset.t);
-    q('[data-t="ob1Tap"]').hidden = !q('[data-t="ob1Tap"]').textContent;
-    const row = q(".ob-row"), keys = kbdRow();
-    if(row.dataset.keys !== keys){ row.innerHTML = keys; row.dataset.keys = keys; }
     for(const el of qa("[data-aria]")) el.setAttribute("aria-label", t(el.dataset.aria));
     root.setAttribute("aria-label", t("obDialog"));
-    const prog = q(".ob-prog");
-    prog.setAttribute("aria-valuenow", String(Math.max(1, step)));
-    q(".ob-top").style.visibility = step === 0 ? "hidden" : "";
-    prog.setAttribute("aria-valuetext", t("obStep").replace("{n}", step));
     paintPerms();
     paintLangPicks();
     paintAsrLine();
     paintMove();
-    // The words in the demo are the language's own sentence, one span a word.
-    const words = q(".ob-words");
-    words.innerHTML = "";
-    t("obDemoSay").split(/\s+/).forEach((w, i) => {
-      const b = document.createElement("b");
-      b.textContent = w;
-      words.append(b, document.createTextNode(" "));
-    });
-    if(step === 1) runDemo();
+    paintLegal();
   }
   window.onboardingLanguage = paint;
 
-  // ------------------------------------------------------------------ 0. language
-  // She picks it once, here, and MicMic listens and answers only in it from then on
-  // (product decision: no more silently defaulting to English). The choices are the
-  // page's own LANGS (index.html): a language is offered here the day it is added there.
+  // ------------------------------------------------------------------ 1a. the Terms
+  // One line under Continue on the language screen, the two names as link buttons.
+  // Kept in the layout on the other screens (only made invisible), so nothing above
+  // it moves when she goes on.
+  function paintLegal(){
+    const el = q(".ob-legal");
+    // Rebuilt only when the words change (her language): paintPerms runs on every
+    // permission poll, and a rebuild would take the focus off a link she tabbed to.
+    const words = [t("obTerms"), t("obTermsLink"), t("obPrivacyLink")].join("|");
+    if(el.dataset.words !== words){
+      el.dataset.words = words;
+      const parts = String(t("obTerms")).split(/(\{terms\}|\{privacy\})/);
+      el.replaceChildren(...parts.filter(Boolean).map(part => {
+        const doc = part === "{terms}" ? "terms" : part === "{privacy}" ? "privacy" : null;
+        if(!doc) return document.createTextNode(part);
+        const b = document.createElement("button");
+        b.type = "button"; b.className = "ob-legal-link"; b.dataset.doc = doc;
+        b.textContent = t(doc === "terms" ? "obTermsLink" : "obPrivacyLink");
+        return b;
+      }));
+    }
+    const on = step === 1 && pi === 0;
+    el.classList.toggle("on", on);
+    el.setAttribute("aria-hidden", on ? "false" : "true");
+    el.inert = !on;
+  }
+
+  function openLegal(doc){ post("/api/onboarding/legal", {open: doc}).catch(()=>{}); }
+
+  // She went on from the screen that carries the line: that is her agreement. Sent
+  // once per run; the server keeps the first timestamp for a version anyway.
+  let termsSent = false;
+  function acceptTerms(){
+    if(termsSent) return;
+    termsSent = true;
+    post("/api/onboarding/legal", {action: "accept"}).catch(()=>{ termsSent = false; });
+  }
+
+  // ------------------------------------------------------------------ 1. language
+  // The first of step 1's four questions. She picks it once, here, and MicMic listens
+  // and answers only in it from then on (product decision: no more silently defaulting
+  // to English). The choices are the page's own LANGS (index.html): a language is
+  // offered here the day it is added there.
   // The owner's decision (2026-09-28): the local model for the chosen language downloads
   // automatically from here; Apple hears every turn until it is ready, and Settings >
   // Better recognition has Cancel and Try again. A language Apple covers asks for nothing.
@@ -292,19 +290,19 @@
   }
 
   // The first-run download: started the moment a language is settled on. A change
-  // already triggers it above; this covers leaving step 1 with the preselected
-  // language untouched, so the download still starts, exactly once.
+  // already triggers it above; this covers moving on from the language with the
+  // preselected one untouched, so the download still starts, exactly once.
   function ensureAsrInstall(){
     if(asrInstalled) return;
     asrInstalled = true;
     // Polled once the server has the job: a poll sent alongside the POST saw "none" and
-    // never looked again, so the line stayed empty until step 3.
+    // never looked again, so the line stayed empty until Try it.
     post("/api/asr", {action: "install"}).catch(()=>{}).then(pollAsr);
   }
 
-  // ------------------------------------------------------------------ 0b. its status
-  // Fed by /api/asr, shown under the language choice (step 1) and again on step 3
-  // while it is still running. Never blocks moving on: it is just a line of text.
+  // ------------------------------------------------------------------ 1b. its status
+  // Fed by /api/asr, shown under the language choice and again on Try it while it is
+  // still running. Never blocks moving on: it is just a line of text.
   function asrText(){
     if(!asrStatus) return "";
     if(asrStatus.state === "downloading"){
@@ -318,10 +316,17 @@
 
   function paintAsrLine(){
     const text = asrText();
-    for(const el of qa(".ob-asr")){ el.textContent = text; el.hidden = !text; }
+    // Step 1's line belongs to the language: the permission questions stay one line each.
+    for(const el of qa(".ob-asr")){
+      el.textContent = text;
+      el.hidden = !text || (!!el.closest('.ob-step[data-n="1"]') && pi !== 0);
+    }
+    const note = q(".ob-movednote");
+    note.textContent = MOVED_ITSELF[LANG] || MOVED_ITSELF.en;
+    note.hidden = !movedItself || step !== 1 || pi !== 0;
   }
 
-  // The owner's fresh install (2026-09-30): "downloading 93%" stayed on step 3 while
+  // The owner's fresh install (2026-09-30): "downloading 93%" stayed on Try it while
   // /api/asr already said "ready". The line was a chain of polls, each scheduling the
   // next, and one request that never came back (the window was behind System Settings
   // for the Accessibility pane) ended the chain for good. Now no request may take more
@@ -349,37 +354,10 @@
     if(asrStatus && asrStatus.state === "downloading" && Date.now() - asrAt > ASR_STALE) pollAsr();
   }
 
-  // ------------------------------------------------------------------ 1. the demo
-  function runDemo(){
-    demoTimers.forEach(clearTimeout); demoTimers = [];
-    const demo = q(".ob-demo"), words = qa(".ob-words b");
-    const at = (ms, fn) => demoTimers.push(setTimeout(fn, ms));
-    if(REDUCE.matches){
-      // One still frame that says it all: the key down, the words heard.
-      demo.dataset.p = "press"; demo.dataset.w = "1";
-      words.forEach(w => w.classList.add("in"));
-      return;
-    }
-    demo.dataset.p = "idle"; delete demo.dataset.w;
-    words.forEach(w => w.classList.remove("in"));
-    let ms = 650;
-    at(ms, () => { demo.dataset.p = "press"; });
-    ms += 420;
-    words.forEach((w, i) => at(ms + i * 360, () => { w.classList.add("in"); demo.dataset.w = "1"; }));
-    ms += words.length * 360 + 520;
-    at(ms, () => { demo.dataset.p = "work"; });
-    ms += 1150;
-    at(ms, () => { demo.dataset.p = "result"; });
-    ms += 2300;
-    at(ms, () => { demo.dataset.p = "rest"; });
-    ms += 700;
-    at(ms, () => { if(step === 1) runDemo(); });
-  }
-
-  // ------------------------------------------------------------------ 2. permissions
-  // One at a time, in order. Nothing is asked until she clicks: the button posts
-  // /api/permissions/request, the app asks macOS for exactly that one, and its answer
-  // comes back through /api/permissions, polled while this step is up.
+  // ------------------------------------------------------------------ 1c. permissions
+  // One at a time, in order, after the language. Nothing is asked until she clicks: the
+  // button posts /api/permissions/request, the app asks macOS for exactly that one, and
+  // its answer comes back through /api/permissions, polled while this step is up.
   //   ask      never asked (or Accessibility off): the why line, the Allow button
   //   asking   she clicked: macOS's dialog (or the Accessibility pane) is up
   //   granted  a tick, "On", and on to the next by itself
@@ -402,54 +380,78 @@
 
   function paintPerms(){
     if(!root) return;
-    const p = PERMS[pi], st = pstate(p.k);
+    const p = SETUP[pi], lang = p.k === "language";
+    // The language is always answered (one is preselected): its picture is the plain one.
+    const st = lang ? "ask" : pstate(p.k);
     const card = q(".ob-pcard");
     card.dataset.k = p.k; card.dataset.s = st;
-    const s2 = q('.ob-step[data-n="2"]');
-    const title = s2.querySelector(".ob-title"), sub = s2.querySelector(".ob-sub");
+    const s1 = q('.ob-step[data-n="1"]');
+    const title = s1.querySelector(".ob-title"), sub = s1.querySelector(".ob-sub");
     const btn = q(".ob-allow");
     title.dataset.t = p.label;
-    sub.dataset.t = st === "granted" ? "obPermOn" : st === "denied" ? "obPermDenied"
+    sub.dataset.t = lang ? p.why : st === "granted" ? "obPermOn" : st === "denied" ? "obPermDenied"
       : st === "asking" ? p.asking : st === "unknown" ? "obUnknown" : p.why;
-    btn.dataset.t = st === "denied" || (st === "asking" && p.k === "accessibility") ? "obOpenSettings" : p.allow;
+    if(!lang) btn.dataset.t = st === "denied" || (st === "asking" && p.k === "accessibility") ? "obOpenSettings" : p.allow;
     for(const el of [title, sub, btn]) el.textContent = say(el.dataset.t);
-    btn.hidden = st === "granted" || st === "checking" || st === "unknown";
+    q(".ob-lopts").hidden = !lang;
+    btn.hidden = lang || st === "granted" || st === "checking" || st === "unknown";
     btn.classList.toggle("ob-soft", st !== "ask");
     btn.disabled = st === "asking" && p.k !== "accessibility";
     q(".ob-pofn").textContent = t("obPermOf").replace("{n}", pi + 1);
     qa(".ob-pdots i").forEach((d, i) => {
-      const k = PERMS[i].k, ds = pstate(k);
-      d.className = i === pi ? "on" : ds === "granted" ? "done" : i < pi ? "skip" : "";
+      const k = SETUP[i].k, ds = k === "language" ? "granted" : pstate(k);
+      d.className = i === pi ? "on" : i < pi && ds === "granted" ? "done" : i < pi ? "skip" : "";
     });
-    card.setAttribute("aria-label", `${t(p.label)}: ${t(st === "granted" ? "obOn" : "obOff")}`);
-    // Step 3's footer too: Done instead of waiting depends on the answer just polled.
-    if(step >= 2) footer();
-    const nokey = q(".ob-nokey");
-    nokey.hidden = !perms || keyWorks() || succeeded || !canHear();
-    paintNoHear();
-    paintClash();
+    const name = (LANGS.find(l => l.code === LANG) || {}).name || LANG;
+    card.setAttribute("aria-label", lang ? `${t(p.label)} ${name}`
+                                         : `${t(p.label)}: ${t(st === "granted" ? "obOn" : "obOff")}`);
+    paintAsrLine();
+    paintLegal();
+    // Try it's footer too: Done instead of waiting depends on the answer just polled.
+    if(step >= 1) footer();
+    paintTry();
   }
 
-  // Step 3 without the microphone or speech: MicMic cannot hear her, so it says what
-  // still works (typing in the window) instead of waiting for a turn that cannot come.
-  function paintNoHear(){
-    const s3 = q('.ob-step[data-n="3"]'), line = q(".ob-nohear");
+  // Try it: how to talk, and what to say. Without the microphone or speech, MicMic
+  // cannot hear her, so it says what still works (typing in the window) instead of
+  // waiting for a turn that cannot come. Without Accessibility the key cannot reach
+  // MicMic (the owner's fresh install said "Hold ⌥ and say" with it off), so the
+  // circle leads and no key is named.
+  function paintTry(){
+    const s2 = q('.ob-step[data-n="2"]'), line = q(".ob-nohear");
     const off = !canHear() && !succeeded;
     line.hidden = !off;
     if(off) line.textContent = t(perms.microphone === "granted" || perms.microphone === "unknown" ? "obNoSpeech" : "obNoMic");
-    const title = s3.querySelector(".ob-title"), sub = s3.querySelector(".ob-sub");
+    const title = s2.querySelector(".ob-title"), sub = s2.querySelector(".ob-sub");
     if(!succeeded){
       title.dataset.t = off ? "obTypeTitle" : "ob3Title";
       title.textContent = say(title.dataset.t);
-      // The key cannot reach MicMic until Accessibility is on (the owner's fresh
-      // install said "Hold ⌥ and say" with it off), so until then the circle leads.
       sub.dataset.t = keyWorks() ? "ob3Sub" : "ob3SubClick";
-      sub.textContent = say(sub.dataset.t);
+      keyed(sub, say(sub.dataset.t));
     }
     sub.hidden = off; q(".ob-quote").hidden = off;
+    q(".ob-nokey").hidden = !perms || keyWorks() || succeeded || !canHear();
+    paintBackupKey();
+    paintClash();
+    // Hold it, or tap it: said once the key can work, and not while another app's use
+    // of that key is the thing to settle first.
+    q(".ob-howto").hidden = !keyWorks() || succeeded || off || clashOn();
   }
 
   function keyWorks(){ return !!perms && perms.accessibility === "granted"; }
+
+  // Accessibility off, and the backup key (⌃⌥ M, no permission needed) works: the
+  // hint teaches that key, then says Accessibility would make her own key work alone.
+  // Otherwise the old line. index.html's backupKeyLines() decides, for Settings too.
+  function paintBackupKey(){
+    const bl = window.backupKeyLines ? window.backupKeyLines(perms) : null;
+    const talk = q(".ob-nokey .ob-bkey"), line = q('.ob-nokey [data-t="obKeyNeedsAx"]');
+    talk.style.display = bl ? "block" : "none";
+    // Two lines where there was one: a little wider, so step 3 still fits the window.
+    talk.parentNode.style.maxWidth = bl ? "40ch" : "";
+    talk.textContent = bl ? bl.talk : "";
+    line.textContent = bl ? bl.ax : say("obKeyNeedsAx");
+  }
 
   async function pollPerms(){
     try{
@@ -457,18 +459,19 @@
       if(r.ok) perms = await r.json();
     }catch(_){}
     if(!root) return;
-    if(step === 2) settlePerm(); else paintPerms();
+    if(step === 1) settlePerm(); else paintPerms();
   }
 
-  // Where step 2 stands after each answer: a permission already on when its screen
-  // comes up is passed over; one that just turned on shows its tick, then moves on.
+  // Where step 1 stands after each answer: a permission already on when its screen
+  // comes up is passed over (never the language: she always sees that one); one that
+  // just turned on shows its tick, then moves on.
   function settlePerm(){
     if(!perms){ paintPerms(); return; }
     let first = false;
     if(!pentered){
       pentered = first = true;
-      while(pi < PERMS.length && perms[PERMS[pi].k] === "granted") pi++;
-      if(pi >= PERMS.length){ pi = PERMS.length - 1; savePi(); go(3); return; }
+      while(pi > 0 && pi < SETUP.length && perms[SETUP[pi].k] === "granted") pi++;
+      if(pi >= SETUP.length){ pi = SETUP.length - 1; savePi(); go(2); return; }
       savePi();
     }
     const was = q(".ob-pcard").dataset.s;
@@ -476,9 +479,9 @@
     // The screen's action was not known until its state was: by keyboard, focus moves
     // from wherever go() left it to the Allow button, so Enter asks, not "Not now".
     if(first && byKey){ const a = primary(); if(a) a.focus({preventScroll:true}); }
-    if(pstate(PERMS[pi].k) === "granted" && !advanceTimer){
-      if(was !== "granted") announce(`${t(PERMS[pi].label)}: ${t("obOn")}`);
-      advanceTimer = setTimeout(() => { advanceTimer = null; if(step === 2) nextPerm(); },
+    if(pi > 0 && pstate(SETUP[pi].k) === "granted" && !advanceTimer){
+      if(was !== "granted") announce(`${t(SETUP[pi].label)}: ${t("obOn")}`);
+      advanceTimer = setTimeout(() => { advanceTimer = null; if(step === 1) nextPerm(); },
                                 REDUCE.matches ? 500 : 950);
     }
   }
@@ -487,12 +490,13 @@
 
   function nextPerm(){
     clearTimeout(advanceTimer); advanceTimer = null;
+    if(pi === 0){ ensureAsrInstall(); acceptTerms(); }   // moving on from the language settles it
     let n = pi + 1;
-    while(n < PERMS.length && perms && perms[PERMS[n].k] === "granted") n++;
-    if(n >= PERMS.length){ go(3); return; }
+    while(n < SETUP.length && perms && perms[SETUP[n].k] === "granted") n++;
+    if(n >= SETUP.length){ go(2); return; }
     pi = n; savePi();
-    const s2 = q('.ob-step[data-n="2"]');
-    for(const el of s2.querySelectorAll(".ob-title,.ob-sub,.ob-pcard")){
+    const s1 = q('.ob-step[data-n="1"]');
+    for(const el of s1.querySelectorAll(".ob-title,.ob-sub,.ob-pcard")){
       el.classList.remove("ob-swap"); void el.offsetWidth; el.classList.add("ob-swap");
     }
     paintPerms();
@@ -500,12 +504,12 @@
     requestAnimationFrame(() => {
       if(!root) return;
       const act = primary();
-      (byKey && act ? act : s2.querySelector(".ob-title")).focus({preventScroll:true});
+      (byKey && act ? act : s1.querySelector(".ob-title")).focus({preventScroll:true});
     });
   }
 
   async function allow(){
-    const p = PERMS[pi];
+    const p = SETUP[pi];
     asked[p.k] = true;
     paintPerms();
     announce(say(p.asking));
@@ -513,12 +517,7 @@
     pollPerms();
   }
 
-  function settled(){
-    // Every step is either granted or something the page cannot know.
-    return !!perms && PERMS.every(p => ["granted", "unknown"].includes(perms[p.k]));
-  }
-
-  // ------------------------------------------------------------------ 3. try it
+  // ------------------------------------------------------------------ 2. try it
   async function arm(){
     try{ await post("/api/onboarding", {action:"try"}); }catch(_){}
     // The words she is about to say have to be heard in the language she is reading.
@@ -532,16 +531,16 @@
   }
 
   async function pollTurn(){
-    if(succeeded || step !== 3) return;
+    if(succeeded || step !== 2) return;
     try{
       const d = await (await fetch("/api/onboarding", {cache:"no-store"})).json();
-      if(d && d.turn && d.turn.heard && step === 3 && !succeeded) success(d.turn.heard);
+      if(d && d.turn && d.turn.heard && step === 2 && !succeeded) success(d.turn.heard);
       else if(d && "clash" in d) setClash(d.clash);
     }catch(_){}
   }
 
   function live(state){
-    if(!root || step !== 3 || succeeded) return;
+    if(!root || step !== 2 || succeeded) return;
     const s = ["thinking", "listening"].includes(state) ? state : "idle";
     q(".ob-orb").dataset.live = s;
     const pill = q(".ob-pill");
@@ -554,18 +553,18 @@
   function success(heard){
     succeeded = true;
     clearInterval(turnTimer); turnTimer = null;
-    const s3 = q('.ob-step[data-n="3"]');
+    const s2 = q('.ob-step[data-n="2"]');
     delete q(".ob-orb").dataset.live;
-    s3.classList.add("ok");
-    const title = s3.querySelector(".ob-title"), sub = s3.querySelector(".ob-sub");
+    s2.classList.add("ok");
+    const title = s2.querySelector(".ob-title"), sub = s2.querySelector(".ob-sub");
     title.dataset.t = "obSetTitle"; sub.dataset.t = "obSetSub";
-    const qt = s3.querySelector(".ob-qtext");
+    const qt = s2.querySelector(".ob-qtext");
     delete qt.dataset.t; qt.textContent = heard;
     for(const el of [title, sub]){
       el.textContent = say(el.dataset.t);
       el.classList.remove("ob-swap"); void el.offsetWidth; el.classList.add("ob-swap");
     }
-    q(".ob-nokey").hidden = true;
+    q(".ob-nokey").hidden = q(".ob-howto").hidden = true;
     paintClash();
     announce(t("obSetTitle"));
     // Saved now, not on close: the window may be shut from under the celebration.
@@ -575,7 +574,7 @@
     closeTimer = setTimeout(() => close(), REDUCE.matches ? 2600 : 3400);
   }
 
-  // ------------------------------------------------------------------ 3b. the key clash
+  // ------------------------------------------------------------------ 2b. the key clash
   // Another dictation app she uses already answers MicMic's key (Handy on right Option:
   // pressing it ran Handy, and this step waited for ever). One line says so, with the
   // first free key as a button, and the other free ones one click away. Choosing saves
@@ -589,17 +588,18 @@
     const next = c && same(c.key, cur) ? c : null;
     if(JSON.stringify(next) === JSON.stringify(clash)) return;
     clash = next;
-    paintClash();
+    paintTry();
   }
+
+  // Only once the key can work at all: without Accessibility the circle leads and no
+  // key is named (the same rule as the key hint), so one thing is said at a time.
+  function clashOn(){ return !!clash && !succeeded && canHear() && keyWorks(); }
 
   function paintClash(){
     if(!root) return;
-    const box = q(".ob-clash"), s3 = q('.ob-step[data-n="3"]');
-    // Only once the key can work at all: without Accessibility the circle leads and
-    // no key is named (the same rule as the key hint), so one thing is said at a time.
-    const on = !!clash && !succeeded && canHear() && keyWorks();
+    const box = q(".ob-clash"), on = clashOn();
     box.hidden = !on;
-    s3.classList.toggle("clash", on);
+    q('.ob-step[data-n="2"]').classList.toggle("clash", on);
     if(!on) return;
     const nw = clash.suggest ? keyName(clash.suggest) : "";
     q(".ob-clash-t").textContent = t(nw ? "obClash" : "obClashNone")
@@ -631,7 +631,7 @@
     if(window.saveSettings) window.saveSettings({hotkey: spec});
     else post("/api/settings", {hotkey: spec}).catch(()=>{});
     paint();
-    announce(q('.ob-step[data-n="3"] .ob-sub').textContent);
+    announce(q('.ob-step[data-n="2"] .ob-sub').textContent);
   }
 
   // ------------------------------------------------------------------ 0. the move
@@ -670,15 +670,16 @@
   // ------------------------------------------------------------------ flow
   function footer(){
     const show = (sel, on) => { const el = q(sel); if(el.hidden === on) el.hidden = !on; };
-    // Step 2: "Not now" while it can still be asked; once it is answered (or cannot be
-    // checked), a plain Continue. Step 3 without a way to hear her: Done, not a wait.
-    const ps = step === 2 ? pstate(PERMS[pi].k) : "";
-    const decided = ["granted", "denied", "unknown"].includes(ps);
-    show('[data-go="next"].ob-next', step === 1 || (step === 2 && decided));
+    // Step 1: Continue from the language. On a permission, "Not now" while it can still
+    // be asked; once it is answered (or cannot be checked), a plain Continue.
+    // Try it without a way to hear her: Done, not a wait.
+    const perm = step === 1 && pi > 0;
+    const decided = perm && ["granted", "denied", "unknown"].includes(pstate(SETUP[pi].k));
+    show('[data-go="next"].ob-next', step === 1 && (!perm || decided));
     // Step 0: "Not now" is the only other way on; Skip would end the whole setup.
-    show(".ob-ghost", (step === 2 && !decided) || (step === 0 && moveState !== "moved"));
-    show(".ob-pill", step === 3 && !succeeded && canHear());
-    show('[data-go="done"]', step === 3 && (succeeded || !canHear()));
+    show(".ob-ghost", (perm && !decided) || (step === 0 && moveState !== "moved"));
+    show(".ob-pill", step === 2 && !succeeded && canHear());
+    show('[data-go="done"]', step === 2 && (succeeded || !canHear()));
     q(".ob-skip").style.visibility = succeeded || step === 0 ? "hidden" : "";
   }
 
@@ -690,9 +691,9 @@
       const m = q(".ob-movego");
       if(!m.disabled && !m.hidden) return m;
     }
-    if(step === 2){
+    if(step === 1 && pi > 0){
       const a = q(".ob-allow");
-      if(!a.hidden && !a.disabled && pstate(PERMS[pi].k) === "ask") return a;
+      if(!a.hidden && !a.disabled && pstate(SETUP[pi].k) === "ask") return a;
     }
     return qa(".ob-act button").find(b => !b.hidden);
   }
@@ -704,9 +705,9 @@
 
   function go(n){
     if(!root || closing) return;
-    const leaving1 = step === 1;
-    step = Math.max(move.needed ? 0 : 1, Math.min(3, n));
-    if(leaving1 && step !== 1) ensureAsrInstall();
+    const leavingLang = step === 1 && pi === 0;
+    step = Math.max(move.needed ? 0 : 1, Math.min(2, n));
+    if(leavingLang && step !== 1){ ensureAsrInstall(); acceptTerms(); }
     try{ sessionStorage.setItem(STEP_KEY, String(step)); }catch(_){}
     for(const s of qa(".ob-step")){
       const k = Number(s.dataset.n);
@@ -715,26 +716,21 @@
       s.setAttribute("aria-hidden", k === step ? "false" : "true");
       s.inert = k !== step;
     }
-    qa(".ob-prog i").forEach((i, k) => {
-      i.classList.toggle("on", k + 1 === step);
-      i.classList.toggle("done", k + 1 < step);
-    });
-    if(step === 2) pentered = false;
+    if(step === 1) pentered = false;
     paint();
     clearInterval(permTimer); permTimer = null;
     clearInterval(turnTimer); turnTimer = null;
     clearTimeout(advanceTimer); advanceTimer = null;
-    if(step !== 1){ demoTimers.forEach(clearTimeout); demoTimers = []; }
-    if(step >= 2){
+    if(step >= 1){
       pollPerms();
-      permTimer = setInterval(pollPerms, step === 2 ? 700 : 2500);
+      permTimer = setInterval(pollPerms, step === 1 ? 700 : 2500);
     }
-    if(step === 3){
+    if(step === 2){
       arm();
       turnTimer = setInterval(() => { pollTurn(); asrWatch(); }, 700);
       live("idle");
     }
-    if(step === 1 || step === 3) pollAsr();
+    if(step >= 1) pollAsr();
     footer();
     // Focus where the next press should land: the one action, else the headline so a
     // screen reader starts at the top of the new screen.
@@ -755,7 +751,7 @@
     if(!root || closing) return;
     closing = true;
     [permTimer, turnTimer].forEach(clearInterval);
-    [advanceTimer, closeTimer, asrTimer, ...demoTimers].forEach(clearTimeout);
+    [advanceTimer, closeTimer, asrTimer].forEach(clearTimeout);
     try{ sessionStorage.removeItem(STEP_KEY); sessionStorage.removeItem(PERM_KEY); }catch(_){}
     if(orig.state !== undefined) window.panelState = orig.state;
     if(orig.heard !== undefined) window.panelHeard = orig.heard;
@@ -786,7 +782,7 @@
   function focusables(){
     const list = [$("langbtn")];
     if($("lang").dataset.open === "1") list.push(...$("langmenu").querySelectorAll("button"));
-    list.push(...qa(".ob-step.on button, .ob-foot button").filter(b =>
+    list.push(...qa(".ob-step.on button, .ob-foot button, .ob-legal.on button").filter(b =>
       !b.hidden && b.offsetParent !== null && getComputedStyle(b).visibility !== "hidden"));
     return list;
   }
@@ -851,6 +847,7 @@
     let later = false;
     try{ later = sessionStorage.getItem(MOVE_KEY) === "later"; }catch(_){}
     move = d.move && d.move.needed && !later ? d.move : {needed:false};
+    movedItself = !!d.moved_itself;
 
     const css = document.createElement("link");
     css.rel = "stylesheet"; css.href = "/onboarding/onboarding.css";
@@ -870,7 +867,8 @@
       closeLang();
       const b = e.target.closest("button");
       if(!b) return;
-      if(b.dataset.go === "next") step === 2 ? nextPerm() : go(step + 1);
+      if(b.dataset.doc){ openLegal(b.dataset.doc); return; }
+      if(b.dataset.go === "next") step === 1 ? nextPerm() : go(step + 1);
       else if(b.dataset.go === "later") step === 0 ? notNowMove() : nextPerm();
       else if(b.classList.contains("ob-movego")) doMove();
       else if(b.classList.contains("ob-clash-use") || b.classList.contains("ob-clash-key")) chooseKey(b.dataset.v);
@@ -882,7 +880,7 @@
       else if(b.classList.contains("ob-skip")) finish("skip");
       else if(b.classList.contains("ob-lopt")) pickLanguage(b.dataset.code);
       else if(b.classList.contains("ob-allow")) allow();
-      // step 3's "Turn on" for Accessibility: the same one request as step 2's
+      // Try it's "Turn on" for Accessibility: the same one request as step 1's
       else if(b.dataset.pane){
         asked[b.dataset.pane] = true;
         post("/api/permissions/request", {k:b.dataset.pane}).catch(()=>{});
@@ -906,7 +904,7 @@
     window.panelState = (s, text) => { if(orig.state) orig.state(s, text); live(s); };
     window.panelHeard = text => {
       if(orig.heard) orig.heard(text);
-      if(root && step === 3 && !succeeded && text){
+      if(root && step === 2 && !succeeded && text){
         const qt = q(".ob-qtext"); delete qt.dataset.t; qt.textContent = text;
       }
     };
@@ -915,7 +913,7 @@
     try{ resume = Number(sessionStorage.getItem(STEP_KEY)) || 1; }catch(_){}
     if(move.needed) resume = 0;              // before any other step, every time
     setClash(d.clash);
-    try{ pi = Math.max(0, Math.min(PERMS.length - 1, Number(sessionStorage.getItem(PERM_KEY)) || 0)); }catch(_){}
+    try{ pi = Math.max(0, Math.min(SETUP.length - 1, Number(sessionStorage.getItem(PERM_KEY)) || 0)); }catch(_){}
     go(resume);
     requestAnimationFrame(() => requestAnimationFrame(() => root && root.classList.add("in")));
   }

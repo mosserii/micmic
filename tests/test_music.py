@@ -1900,6 +1900,117 @@ def t_youtube_page_fetch():
         ytm._PAGES.clear()
 
 
+def t_podcast():
+    """Bench hard-app-006 at d88a599 and fix-media: "play a podcast" -> "Here you go.
+    Toosii - Favorite Song" (no subject span, so "popular songs" on YouTube). A podcast
+    is never a song: nothing named opens Apple Podcasts (on every Mac); a show she names
+    is searched as a podcast; and when Podcasts will not open she hears so."""
+    fresh()
+    queries: list[str] = []
+    pod_vids = [{"id": "ppppppppppp", "title": "The Daily: Tuesday's episode", "channel":
+                 "The New York Times", "length": "27:10", "views": "80K"}]
+    def fake_yt(q, n=18):
+        queries.append(q)
+        return [dict(v) for v in (pod_vids if "podcast" in q.lower() else SHEERAN_VIDS)]
+    router.yt.search = fake_yt
+    APPS_HERE.append("Podcasts")
+    real_llm = router.LLM_CLIENT
+
+    class _Chat:                       # small talk answered offline, and counted
+        available, last_ms, last_error = True, 0.0, None
+        chats: list = []
+
+        def chat(self, *a, **k):
+            self.chats.append(a[0] if a else "")
+            return "[chat]"
+
+        def __getattr__(self, name):
+            return getattr(real_llm, name)
+    router.LLM_CLIENT = _Chat()
+    try:
+        r, j = turn("play a podcast")
+        check("'play a podcast': Apple Podcasts opens, no song anywhere",
+              r["did"] == "opened_podcasts" and tm.APPS == ["Podcasts"] and not queries
+              and not tm.OPENED and not opened_songs(), f"{r['did']} {r['say']} {tm.APPS} "
+              f"{queries} {tm.OPENED}")
+        check("  says what it did, and how to get a show", "Podcasts" in (r["say"] or "")
+              and (r["detail"] or {}).get("podcast") is True, f"{r['say']} {r['detail']}")
+
+        for intent in ("chitchat", "radio", "watch", "unclear"):
+            fresh()
+            queries.clear()
+            router.yt.search = fake_yt
+            r, _ = turn("can you play a podcast for me", intent=intent)
+            check(f"  read as {intent}: still Podcasts", r["did"] == "opened_podcasts"
+                  and tm.APPS == ["Podcasts"] and not queries, f"{r['did']} {r['say']}")
+
+        fresh()
+        queries.clear()
+        router.yt.search = fake_yt
+        router.prefs._update(lambda d: d.update(music_app="apple_music"))
+        r, _ = turn("play a podcast")
+        check("  with Apple Music as her music app: Podcasts, never a song in Music",
+              r["did"] == "opened_podcasts" and not opened_songs()
+              and not any("play" in s and "track" in s for s in SCRIPTS), f"{r['did']} {SCRIPTS}")
+
+        fresh()
+        queries.clear()
+        router.yt.search = fake_yt
+        r, _ = turn("play the daily podcast", subject="the daily")
+        check("a named show: searched as a podcast, the episode plays",
+              r["did"] == "playing" and queries and "podcast" in queries[0].lower()
+              and "ppppppppppp" in str(tm.OPENED) and (r["detail"] or {}).get("podcast") is True,
+              f"{r['did']} {r['say']} {queries} {tm.OPENED}")
+        fresh()
+        queries.clear()
+        router.yt.search = fake_yt
+        router.prefs._update(lambda d: d.update(music_app="apple_music"))
+        r, _ = turn("play the daily podcast", subject="the daily podcast")
+        check("  even with Apple Music as her music app (a show is not a song in Music)",
+              r["did"] == "playing" and queries and not opened_songs()
+              and queries[0].lower().count("podcast") == 1, f"{r['did']} {queries}")
+
+        for lang, said, word in (("hebrew", "תשימי לי פודקאסט", "פודקאסט"),
+                                 ("arabic", "شغلي بودكاست", "بودكاست"),
+                                 ("russian", "включи подкаст", "подкаст")):
+            fresh()
+            queries.clear()
+            router.yt.search = fake_yt
+            r, _ = turn(said, lang=lang)
+            check(f"{lang}: Podcasts opens, said in {lang}", r["did"] == "opened_podcasts"
+                  and r["lang"] == lang and "Podcasts" in (r["say"] or "")
+                  and not queries, f"{r['did']} {r['say']}")
+
+        fresh()
+        queries.clear()
+        router.yt.search = fake_yt
+        real_open = mac.open_app
+        mac.open_app = lambda a: (False, "Unable to find application named 'Podcasts'")
+        try:
+            r, _ = turn("play a podcast")
+        finally:
+            mac.open_app = real_open
+        check("Podcasts will not open: said honestly, nothing else played",
+              r["did"] == "podcast_unavailable" and not queries and not tm.OPENED
+              and "podcast" in (r["say"] or "").lower(), f"{r['did']} {r['say']}")
+
+        fresh()
+        queries.clear()
+        router.yt.search = fake_yt
+        r, _ = turn("i listened to a great podcast yesterday", intent="chitchat")
+        check("talking about a podcast is not asking for one", r["did"] != "opened_podcasts"
+              and not tm.APPS, f"{r['did']} {tm.APPS}")
+        check("no em dash in the podcast lines",
+              not any("—" in v for t in router._PODCAST_LINES.values() for v in t.values()))
+        check("the podcast lines in all four languages",
+              all(set(t) >= {"english", "hebrew", "arabic", "russian"}
+                  for t in router._PODCAST_LINES.values()))
+    finally:
+        router.yt.search = REAL_YT_SEARCH
+        router.LLM_CLIENT = real_llm
+        APPS_HERE.remove("Podcasts") if "Podcasts" in APPS_HERE else None
+
+
 def main():
     for t in (t_units, t_owner_case_catalog_only, t_measured_span_shapes, t_in_library_plays,
               t_stop_and_undo_pause_music, t_another_one_stays_in_music, t_hebrew,
@@ -1914,7 +2025,7 @@ def main():
               t_warms_apple_music_and_shorter_press_wait,
               t_misheard_artist_youtube, t_exact_artist_no_extra_lookup,
               t_misheard_artist_apple_music, t_youtube_empty_retried_once,
-              t_artist_by_sound_units, t_youtube_page_fetch):
+              t_artist_by_sound_units, t_youtube_page_fetch, t_podcast):
         print(f"\n{t.__name__}")
         try:
             t()

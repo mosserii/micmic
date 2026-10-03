@@ -7,6 +7,7 @@
     python -m proxy.admin revoke dev_<id>             # the device id a user can quote
     python -m proxy.admin revoke --token-stdin        # when you hold the token itself
     python -m proxy.admin plan <hash prefix | dev_id> free|pro
+    python -m proxy.admin delete <hash prefix | dev_id> --yes   # a Mac user's email request
 
 A token is shown exactly once, at mint time, and only its hash is kept. Lose it and
 the fix is to mint another and revoke the old one, which is the point: nothing the
@@ -21,8 +22,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import billing
 from .config import Config
-from .store import PLANS, Store, hash_token
+from .store import PLANS, PRO_STATUSES, Store, hash_token
 
 
 def _one(store: Store, prefix: str) -> str | None:
@@ -60,9 +62,14 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("plan", help="move a token between free and pro")
     p.add_argument("prefix")
     p.add_argument("plan", choices=PLANS)
+    d = sub.add_parser("delete", help="delete a device's account and data, for good "
+                                      "(cancels its Stripe subscription first)")
+    d.add_argument("prefix")
+    d.add_argument("--yes", action="store_true", help="really delete; without it, only show")
     a = ap.parse_args(argv)
 
-    db = Path(a.db).expanduser() if a.db else Config.from_env().db_path
+    cfg = Config.from_env()
+    db = Path(a.db).expanduser() if a.db else cfg.db_path
     store = Store(db)
 
     if a.cmd == "mint":
@@ -84,11 +91,12 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "list":
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         rows = store.list_tokens(day)
-        print(f"{'hash':14} {'device':21} {'plan':5} {'status':8} {'jev':>6} {'gemini':>6}"
-              f"  label")
+        print(f"{'hash':14} {'device':21} {'plan':5} {'status':8} {'os':4} {'pro via':8} "
+              f"{'apple env':10} {'jev':>6} {'gemini':>6}  label")
         for t in rows:
             status = "revoked" if t["revoked_at"] else "active"
             print(f"{t['token_hash'][:12]:14} {t['device_id']:21} {t['plan']:5} {status:8} "
+                  f"{t['platform']:4} {t['pro_source'] or '-':8} {t['apple_env'] or '-':10} "
                   f"{t['jev_today']:>6} {t['gemini_today']:>6}  {t['label']}")
         print(f"{len(rows)} token(s); usage is for UTC {day}")
         return 0
@@ -114,6 +122,37 @@ def main(argv: list[str] | None = None) -> int:
         if h is None or not store.set_plan(h, a.plan):
             return 1
         print(f"{h[:12]} is now {a.plan}")
+        return 0
+
+    if a.cmd == "delete":
+        # Steps 2 and 4 of PURCHASES_ACCOUNT.md 3.3. The brain is iPhone-only, and an
+        # iPhone user deletes from the app, which also erases the brain's notes.
+        h = _one(store, a.prefix)
+        if h is None:
+            return 1
+        acct = store.account(h)
+        live_stripe = bool(acct["stripe_subscription_id"] and acct["sub_status"] in PRO_STATUSES
+                           and not acct["sub_cancel_at_period_end"])
+        if not a.yes:
+            print(f"would delete {h[:12]} {acct['device_id']} ({acct['platform']}, "
+                  f"{acct['label']}){'; cancels its Stripe subscription' if live_stripe else ''}"
+                  "; run again with --yes")
+            return 1
+        if live_stripe:
+            try:
+                billing.cancel_for_deletion(cfg, acct["stripe_subscription_id"])
+            except (billing.PaymentsUnavailable, billing.StripeFailed) as e:
+                print(f"Stripe cancel failed ({type(e).__name__}); nothing deleted",
+                      file=sys.stderr)
+                return 1
+        now = int(datetime.now(timezone.utc).timestamp())
+        res = store.delete_account(h, now, cfg.apple_expiry_leeway)
+        if res is None:
+            print("no device with that hash", file=sys.stderr)
+            return 1
+        print(f"deleted {h[:12]} {res['device_id']}"
+              + ("; it has a live Apple subscription, which only the user can cancel"
+                 if res["apple_subscription_active"] else ""))
         return 0
     return 1
 

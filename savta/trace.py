@@ -109,6 +109,8 @@ def record(utterance: str, u: dict | None, result: dict, *, conversation: str = 
         "cost_usd": result.get("cost_usd"),
         # This turn only: Jev and Gemini round trips and their time on the wire.
         "timing": result.get("timing"),
+        # The cloud voice's audio tag (savta/voice_tags.py), on the turns that had one.
+        **({"voice_tag": result["voice_tag"]} if result.get("voice_tag") else {}),
     })
 
 

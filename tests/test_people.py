@@ -172,6 +172,7 @@ def fresh():
     router._HISTORY.clear()
     router._JUST_SENT.clear()
     router.LAST_EMERGENCY = None
+    getattr(router, "cancel_emergency", lambda: None)()
     router.LLM_CLIENT = LLM
     LLM.splits.clear()
     LLM.split_asked.clear()
@@ -397,9 +398,13 @@ def t_emergency():
             r = say(ScriptedJev({utt: dict(intent="call", emergency=0.95, distress=1.9,
                                            language="hebrew" if "ת" in utt else "english")}),
                     utt)
-        check(f"{utt!r}: nobody is called, and she hears the number to dial",
-              r["did"] == "emergency_number" and not tm.CALLED and num in (r.get("say") or ""),
+        # Owner 2026-10-03: the number first, then (on a real emergency) her contact
+        # after a countdown she can stop. Nobody is called at once either way.
+        check(f"{utt!r}: nobody is called at once, and she hears the number to dial",
+              r["did"] in ("emergency_number", "emergency") and not tm.CALLED
+              and num in (r.get("say") or ""),
               (r["did"], r.get("say"), tm.CALLED))
+        router.cancel_emergency()
     check("no em dash in the line", not any("—" in v for v in
                                             people.LINES["emergency_number"].values()))
     fresh()
@@ -452,6 +457,249 @@ def t_emergency():
     check("units: a number alone is not a call",
           people.emergency_number("set the volume to 100") == ""
           and people.emergency_number("transfer 100 shekels") == "")
+
+
+# ---------------------------------------------------------------- 5c. the emergency line, then her contact
+# Owner decision 2026-10-03. "call emergency services, there's a fire" called Dana at
+# once with no number to dial; "call 911" gave only the number. Now an emergency gets
+# BOTH: the number to call from her phone (by region), then her emergency contact after
+# a 3-second countdown she can stop ("no", "stop", or the key). A bare "call 911" gets
+# the number and an offer. No contact on file: the number and how to set one.
+def _emerg_profile(city: str = "", country: str = "", contact: str = "Dana Cohen"):
+    p = prof.load()
+    p.update(city=city, emergency_contact=contact, pinned=[])
+    if country:
+        p["country"] = country
+    else:
+        p.pop("country", None)
+    prof.save(p)
+
+
+def _cd() -> dict:
+    return router.EMERGENCY_PENDING or {}
+
+
+def t_emergency_countdown():
+    print("\nt_emergency_countdown")
+    window = router.EMERGENCY_WINDOW
+    router.EMERGENCY_WINDOW = 3600.0          # fired by hand below, never by a timer
+    cases = (
+        # utterance, Jev reading, city, country, the number she must hear
+        ("call emergency services, theres a fire", dict(intent="call", emergency=0.9, distress=1.2),
+         "", "", ("911", "112")),
+        ("there's a fire in the kitchen", dict(intent="chitchat", emergency=0.3, distress=0.6),
+         "Tel Aviv", "", ("102",)),
+        ("someone collapsed, call an ambulance", dict(intent="call", emergency=0.9, distress=1.4),
+         "", "United States", ("911",)),
+        ("i'm having a heart attack", dict(intent="chitchat", emergency=0.97, distress=1.9),
+         "", "Germany", ("112",)),
+        ("call 911 i'm scared", dict(intent="call", emergency=0.8, distress=1.0),
+         "", "", ("911",)),
+    )
+    for utt, reading, city, country, nums in cases:
+        fresh()
+        _emerg_profile(city, country)
+        with tm.gates_on():
+            r = say(ScriptedJev({utt: dict(reading, language="english")}), utt)
+            s = r.get("say") or ""
+            check(f"{utt!r}: the number line first ({'/'.join(nums)}), from her phone",
+                  all(n in s for n in nums) and "phone" in s.lower()
+                  and s.find(nums[0]) < s.find("Dana"), s)
+            check(f"{utt!r}: then her contact on a 3-second countdown, nobody called yet",
+                  r["did"] == "emergency" and "3 seconds" in s and "Dana Cohen" in s
+                  and not tm.CALLED and _cd().get("who") == "Dana Cohen"
+                  and (r.get("detail") or {}).get("countdown", 0) >= 3,
+                  (r["did"], s, tm.CALLED, _cd()))
+            out = router._fire_emergency()
+            check(f"{utt!r}: when the countdown runs out, Dana is called",
+                  [c[0] for c in tm.CALLED] == ["Dana Cohen"] and out
+                  and out["did"] == "emergency" and router.LAST_EMERGENCY
+                  and router.EMERGENCY_PENDING is None, (out, tm.CALLED))
+        router.LAST_EMERGENCY = None
+
+    # She can stop it: "stop", "no", the key.
+    for stop in ("stop", "no", "no I'm fine"):
+        fresh()
+        _emerg_profile()
+        utt = "there's a fire"
+        with tm.gates_on():
+            say(ScriptedJev({utt: dict(intent="chitchat", emergency=0.9, distress=1.5)}), utt)
+            j = ScriptedJev({})
+            r = say(j, stop)
+            fired = router._fire_emergency()
+        check(f"{stop!r} during the countdown stops it: no call, said plainly",
+              r["did"] == "emergency_cancelled" and not tm.CALLED and fired is None
+              and "Dana" in (r.get("say") or "") and j.calls == 0,
+              (r["did"], r.get("say"), tm.CALLED, j.calls))
+    fresh()
+    _emerg_profile()
+    utt = "there's a fire"
+    with tm.gates_on():
+        say(ScriptedJev({utt: dict(intent="chitchat", emergency=0.9, distress=1.5)}), utt)
+        held = router.hold_emergency(123.0)
+        fired = router._fire_emergency()
+        check("the key stops the countdown: no call, and a yes can still call her",
+              held and fired is None and not tm.CALLED
+              and awaiting().get("need") == "confirm_call"
+              and awaiting().get("contact") == "Dana Cohen", (held, fired, awaiting()))
+        r = say(ScriptedJev({"yes": dict(is_answer=0.95, agreed=0.95)}), "yes")
+    check("  and her yes calls Dana", [c[0] for c in tm.CALLED] == ["Dana Cohen"]
+          and r["did"] == "emergency", (r["did"], tm.CALLED))
+    router.LAST_EMERGENCY = None
+    fresh()
+    _emerg_profile()
+    with tm.gates_on():
+        say(ScriptedJev({utt: dict(intent="chitchat", emergency=0.9, distress=1.5)}), utt)
+        router.hold_emergency(55.0)
+        r = router.turn_closed(speak=False, turn_ts=55.0, sent=False, reason="nothing")
+    check("the key, then nothing heard: she is told nobody was called",
+          r.get("did") == "emergency_cancelled" and "Dana" in (r.get("say") or "")
+          and not tm.CALLED, (r, tm.CALLED))
+    router.AWAITING = None
+
+    # A bare "call 911": the number, then an offer, never a countdown.
+    for utt, lang, num in (("call 911", "english", "911"), ("תתקשרי ל-101", "hebrew", "101")):
+        fresh()
+        _emerg_profile("Tel Aviv")
+        with tm.gates_on():
+            # distress 1.62: what a bare "call 911" measured live (run emg-A-7a36164).
+            r = say(ScriptedJev({utt: dict(intent="call", emergency=0.75, distress=1.62,
+                                           language=lang)}), utt)
+            s = r.get("say") or ""
+            want = "Shall I call Dana Cohen, your emergency contact?" if lang == "english" \
+                else "שאתקשר"
+            check(f"bare {utt!r}: the number, then the offer to call Dana",
+                  r["did"] == "emergency_number" and num in s and want in s
+                  and s.find(num) < s.find("Dana") and r.get("asked_back")
+                  and not tm.CALLED and router.EMERGENCY_PENDING is None
+                  and awaiting().get("need") == "confirm_call"
+                  and awaiting().get("contact") == "Dana Cohen", (r["did"], s, awaiting()))
+            r = say(ScriptedJev({"yes": dict(is_answer=0.95, agreed=0.95),
+                                 "כן": dict(is_answer=0.95, agreed=0.95)}),
+                    "yes" if lang == "english" else "כן")
+        check(f"bare {utt!r}: her yes calls Dana", [c[0] for c in tm.CALLED] == ["Dana Cohen"],
+              (r["did"], tm.CALLED))
+        router.LAST_EMERGENCY = None
+
+    # Nobody to call at all: the number, and how to set an emergency contact.
+    fresh()
+    _emerg_profile("", "", contact="")
+    utt = "there's a fire"
+    real_recent = book.recent_chats
+    book.recent_chats = lambda limit=30: []
+    try:
+        with tm.gates_on():
+            r = say(ScriptedJev({utt: dict(intent="chitchat", emergency=0.9, distress=1.5)}), utt)
+    finally:
+        book.recent_chats = real_recent
+    s = r.get("say") or ""
+    check("nobody to call: the number line plus how to set the contact, no countdown",
+          "911" in s and "emergency contact" in s.lower() and "say" in s.lower()
+          and router.EMERGENCY_PENDING is None and not tm.CALLED, (r["did"], s))
+    # No emergency contact, but a pinned person: the countdown goes to her, as the
+    # emergency call always did (a fall does not wait for setup).
+    fresh()
+    _emerg_profile("", "", contact="")
+    p = prof.load(); p["pinned"] = ["Mom"]; prof.save(p)
+    with tm.gates_on():
+        r = say(ScriptedJev({utt: dict(intent="chitchat", emergency=0.9, distress=1.5)}), utt)
+    check("no emergency contact, Mom pinned: the countdown goes to Mom",
+          r["did"] == "emergency" and _cd().get("who") == "Mom", (r["did"], r.get("say")))
+    router.cancel_emergency()
+
+    # Calling switched off: said so, and still who it would have called.
+    fresh()
+    _emerg_profile()
+    with tm.gates_on():
+        mac.CALL_FOR_REAL = False
+        try:
+            r = say(ScriptedJev({utt: dict(intent="chitchat", emergency=0.9)}), utt)
+        finally:
+            mac.CALL_FOR_REAL = True
+    check("calls off: the number, says calling is off, names who it would call",
+          r["did"] == "call_disabled" and "911" in (r.get("say") or "")
+          and (r.get("detail") or {}).get("would_call") == "Dana Cohen" and not tm.CALLED,
+          (r["did"], r.get("say"), r.get("detail")))
+
+    # After the call went out (the latch), more cries for help never call again, and
+    # never start a second countdown. EN and HE.
+    for first, more, lang in (("I fell and I cannot get up", ("I cannot get up", "help me"), "english"),
+                              ("נפלתי ואני לא יכולה לקום", ("נפלתי", "תעזרי לי"), "hebrew")):
+        fresh()
+        _emerg_profile()
+        with tm.gates_on():
+            say(ScriptedJev({first: dict(intent="help", emergency=0.9, language=lang)}), first)
+            router._fire_emergency()
+            for utt2, emg in zip(more, (0.39, 0.51)):
+                r = say(ScriptedJev({utt2: dict(intent="help", emergency=emg, distress=1.2,
+                                                language=lang)}), utt2)
+                check(f"{utt2!r} after the call: help is already coming, no second call or countdown",
+                      r["did"] == "emergency" and (r.get("detail") or {}).get("redialled") is False
+                      and len(tm.CALLED) == 1 and router.EMERGENCY_PENDING is None,
+                      (r["did"], r.get("say"), tm.CALLED))
+            # "No, stop, I'm fine" hangs up the call that is ringing.
+            stop = "no, stop, I am fine" if lang == "english" else "לא, די, אני בסדר"
+            j = ScriptedJev({stop: dict(false_alarm=0.95, language=lang)})
+            hung = len(tm.HUNGUP)
+            r = say(j, stop)
+        check(f"{lang}: calling it off hangs up the call in progress",
+              r["did"] == "emergency_cancelled" and len(tm.HUNGUP) == hung + 1,
+              (r["did"], r.get("say")))
+        router.LAST_EMERGENCY = None
+
+    # During the countdown, another cry for help calls now, once.
+    fresh()
+    _emerg_profile()
+    with tm.gates_on():
+        say(ScriptedJev({"there's a fire": dict(intent="chitchat", emergency=0.9)}), "there's a fire")
+        r = say(ScriptedJev({"i cannot get up": dict(intent="help", emergency=0.39)}),
+                "i cannot get up")
+        again = router._fire_emergency()
+    check("a cry for help during the countdown calls now, exactly once",
+          r["did"] == "emergency" and len(tm.CALLED) == 1 and again is None
+          and router.EMERGENCY_PENDING is None, (r["did"], r.get("say"), tm.CALLED))
+    router.LAST_EMERGENCY = None
+
+    # Hebrew.
+    for utt, reading, num in (
+            ("יש שריפה בבית", dict(intent="chitchat", emergency=0.9, distress=1.6), "102"),
+            ("מישהו התמוטט, תתקשרי לאמבולנס", dict(intent="call", emergency=0.9, distress=1.5), "101"),
+            ("יש לי התקף לב", dict(intent="chitchat", emergency=0.95, distress=1.9), "101")):
+        fresh()
+        _emerg_profile("תל אביב")
+        with tm.gates_on():
+            r = say(ScriptedJev({utt: dict(reading, language="hebrew")}), utt)
+            s = r.get("say") or ""
+            check(f"{utt!r}: Hebrew number line ({num}) then the countdown to Dana",
+                  r["did"] == "emergency" and num in s and "3" in s and "שניות" in s
+                  and s.find(num) < s.find("3 ") and not tm.CALLED
+                  and _cd().get("who") == "Dana Cohen", (r["did"], s))
+            r2 = say(ScriptedJev({}), "עצרי")
+        check(f"{utt!r}: 'עצרי' stops it, in Hebrew",
+              r2["did"] == "emergency_cancelled" and not tm.CALLED
+              and router._fire_emergency() is None and any("֐" <= ch <= "׿" for ch in (r2.get("say") or "")),
+              (r2["did"], r2.get("say")))
+
+    # Unrelated words during a countdown are handled; the countdown keeps running.
+    fresh()
+    _emerg_profile()
+    with tm.gates_on():
+        say(ScriptedJev({"there's a fire": dict(intent="chitchat", emergency=0.9)}), "there's a fire")
+        say(ScriptedJev({"what time is it": dict(intent="chitchat", about_clock=0.95)}),
+            "what time is it")
+        check("other words during the countdown never stop it",
+              router.EMERGENCY_PENDING is not None and not tm.CALLED, router.EMERGENCY_PENDING)
+    router.cancel_emergency()
+
+    # Not emergencies.
+    for utt in ("play fire by bts", "the fire alarm test is tomorrow", "set the volume to 100"):
+        check(f"units: {utt!r} is not emergency wording", not people.emergency_kind(utt))
+    for lg in ("english", "hebrew", "arabic", "russian"):
+        for key in ("emergency_go", "emergency_unknown", "emergency_offer", "emergency_no_contact",
+                    "emergency_countdown", "emergency_il"):
+            t = people.LINES[key][lg]
+            check(f"{key} in {lg}: no em dash", "—" not in t, t)
+    router.EMERGENCY_WINDOW = window
 
 
 # ---------------------------------------------------------------- 5b. sad, with a task
@@ -541,15 +789,20 @@ def t_distress_with_a_task():
         fresh()
         with tm.gates_on():
             r = say(ScriptedJev({utt: dict(script, emergency=0.9, distress=1.95)}), utt)
+            # Owner decision 2026-10-03: after a 3-second countdown she can stop.
+            armed = router.EMERGENCY_PENDING is not None
+            router._fire_emergency()
         check(f"{utt!r}: a real emergency still calls", r["did"] == "emergency"
-              and tm.CALLED, (r["did"], r.get("say"), tm.CALLED))
+              and armed and tm.CALLED, (r["did"], r.get("say"), tm.CALLED))
         router.LAST_EMERGENCY = None
     fresh()
     utt = "call 911, i am so sad"
     with tm.gates_on():
         r = say(ScriptedJev({utt: dict(intent="music", emergency=0.95, distress=1.9)}), utt)
-    check("'call 911' still gets the number to dial", r["did"] == "emergency_number"
+    check("'call 911' still gets the number to dial, and nobody is called at once",
+          r["did"] in ("emergency_number", "emergency") and "911" in (r.get("say") or "")
           and not tm.CALLED, (r["did"], r.get("say")))
+    router.cancel_emergency()
 
 
 # ---------------------------------------------------------------- 5c. location, in trouble
@@ -786,6 +1039,843 @@ def t_money():
           and len(WEB_TASKS) == 1, (r["did"], WEB_TASKS))
 
 
+# ---------------------------------------------------------------- 8b. "book" asks first
+# Owner decision 2026-10-03 (bench hard-web-001): "find me the cheapest flight to new
+# york next tuesday and book it" split into two browser tasks, one of them a booking,
+# while the Hebrew sentence asked first. Book, reserve and purchase are purchase words
+# like buy and order: it searches, shows what it found, and asks "Shall I go ahead and
+# book?" before any booking step. It never presses Pay.
+def t_book_asks_first():
+    print("\nt_book_asks_first")
+    for utt, lang, want, yes in (
+            ("find me the cheapest flight to new york next tuesday and book it", "english",
+             "Shall I go ahead and book?", "yes"),
+            ("תמצאי לי את הטיסה הכי זולה לניו יורק ותזמיני אותה", "hebrew", "להזמין?", "כן")):
+        fresh()
+        LLM.splits[utt] = ["find me the cheapest flight to new york next tuesday",
+                           "book the cheapest flight to new york next tuesday"]
+        by = {utt: dict(intent="do_online", is_compound=0.92, language=lang,
+                        span="the cheapest flight to new york next tuesday"),
+              yes: dict(is_answer=0.95, agreed=0.95, language=lang)}
+        with tm.gates_on():
+            r = say(ScriptedJev(by), utt)
+            time.sleep(0.2)
+            s = r.get("say") or ""
+            check(f"{lang}: never split into a search and a booking", not LLM.split_asked,
+                  LLM.split_asked)
+            check(f"{lang}: it searches (one browser task, finding only)",
+                  len(WEB_TASKS) == 1 and ("flight" in WEB_TASKS[0][0] or "טיס" in WEB_TASKS[0][0])
+                  and not any(w in WEB_TASKS[0][0].lower().split(" (")[0]
+                              for w in ("book it", "ותזמיני")), WEB_TASKS)
+            check(f"{lang}: and asks before any booking step: {want!r}",
+                  r["did"] == "confirm_web" and r.get("asked_back") and want in s
+                  and awaiting().get("need") == "confirm_web", (r["did"], s))
+            check(f"{lang}: nothing claimed booked or paid",
+                  not any(w in s.lower() for w in ("booked", "paid", "purchased", "הזמנתי", "שילמתי")), s)
+            r2 = say(ScriptedJev(by), yes)
+            time.sleep(0.2)
+        check(f"{lang}: her yes starts the booking, which stops before paying",
+              r2["did"] == "web_working" and len(WEB_TASKS) == 2, (r2["did"], WEB_TASKS))
+    for utt, want in (("book me a flight to rome", "buy"), ("reserve a hotel in paris", "buy"),
+                      ("purchase two tickets to the show", "buy"),
+                      ("תשריני לי חדר במלון באילת", "buy"), ("תרכשי לי כרטיס להופעה", "buy"),
+                      ("احجزيلي تذكرة لعمان", "buy"), ("забронируй отель в Риме", "buy"),
+                      ("book a table for two at an italian place tonight", ""),
+                      ("reserve a table at rosa's", ""), ("read me a book", ""),
+                      ("open my facebook", ""), ("book a doctor's appointment", "")):
+        check(f"units: money_web({utt!r}) == {want!r}", people.money_web(utt) == want,
+              people.money_web(utt))
+
+
+# ---------------------------------------------------------------- 1b. sound-alikes offered
+def _with_row(name: str, first: str, phone: str):
+    r = {"name": name, "first": first, "phone": phone,
+         "waid": phone.lstrip("+") + "@s.whatsapp.net", "source": "fixture"}
+    r["keys"] = book.keys_for(name) | book.keys_for(first)
+    BOOK.append(r)
+    book._CACHE.update(at=time.time() * 10, rows=list(BOOK))
+    people._same_spelling.cache_clear()
+
+
+def _without_row(name: str):
+    BOOK[:] = [r for r in BOOK if r["name"] != name]
+    book._CACHE.update(at=time.time() * 10, rows=list(BOOK))
+
+
+def t_sound_alike_offered():
+    """Live on the phone (2026-10-03): "text Donna I'm running late" with Dana Cohen and
+    Dana Levi in the book, Jev chose nobody: "I don't have Donna in your contacts. Who
+    should I send it to?" with no choices, and after "Dana Levi" it asked "What should
+    it say?" again (3 turns). Now: the Danas are offered by name and her words are kept."""
+    print("\nt_sound_alike_offered")
+    _with_row("Dana Levi", "Dana", "+15550000013")
+    try:
+        check("units: sound_alike('Donna') is both Danas",
+              people.sound_alike("Donna") == ["Dana Cohen", "Dana Levi"],
+              people.sound_alike("Donna"))
+        check("units: sound_alike('Gail') is Gal", people.sound_alike("Gail") == ["Gal Ben Ami"],
+              people.sound_alike("Gail"))
+        check("units: no likeness, nobody offered", people.sound_alike("Michael") == [],
+              people.sound_alike("Michael"))
+        check("units: a name in the book exactly is not a sound-alike",
+              "Dana Cohen" not in people.sound_alike("Dana"), people.sound_alike("Dana"))
+        fresh()
+        utt = "text Donna I'm running late"
+        by = {utt: dict(intent="message", contact="nobody", contact_is_named=0.95,
+                        message_has_content=0.9, language="english", span="I'm running late"),
+              "Dana Levi": dict(is_answer=0.95, contact="Dana Levi")}
+        with tm.gates_on():
+            r = say(ScriptedJev(by), utt)
+            s = r.get("say") or ""
+            check("Donna: told it is not in her book, and offered both Danas by name",
+                  r["did"] == "need_which" and s.startswith("I don't have Donna in your contacts.")
+                  and "Dana Cohen" in s and "Dana Levi" in s and router.PENDING is None,
+                  (r["did"], s))
+            check("Donna: the choices are on the turn",
+                  (r.get("detail") or {}).get("between") == ["Dana Cohen", "Dana Levi"],
+                  r.get("detail"))
+            check("Donna: her words are kept while she is asked",
+                  awaiting().get("body") == "I'm running late", awaiting())
+            r2 = say(ScriptedJev(by), "Dana Levi")
+            body2 = (router.PENDING or {}).get("text") or awaiting().get("body")
+            check("'Dana Levi': her message goes to Dana Levi, never 'what should it say?'",
+                  r2["did"] in ("sending", "confirm_send")
+                  and (pending_to() == "Dana Levi" or awaiting().get("contact") == "Dana Levi")
+                  and "running late" in str(body2), (r2["did"], r2.get("say"), body2))
+            router._cancel_pending()
+        fresh()
+        utt = "text Gail I'm outside"
+        with tm.gates_on():
+            r = say(ScriptedJev({utt: dict(intent="message", contact="nobody",
+                                           contact_is_named=0.95, message_has_content=0.9,
+                                           span="I'm outside")}), utt)
+        check("Gail: one sound-alike is a 'did you mean'",
+              r["did"] == "need_who"
+              and "I don't have Gail in your contacts. Did you mean Gal" in (r.get("say") or "")
+              and awaiting().get("suggest") == "Gal Ben Ami", (r["did"], r.get("say")))
+        fresh()
+        utt = "call Donna"
+        with tm.gates_on():
+            r = say(ScriptedJev({utt: dict(intent="call", contact="nobody",
+                                           contact_is_named=0.95)}), utt)
+        check("call Donna: both Danas offered, nothing dialled",
+              r["did"] == "need_which" and "Dana Cohen" in (r.get("say") or "")
+              and "Dana Levi" in (r.get("say") or "") and awaiting().get("intent") == "call",
+              (r["did"], r.get("say")))
+    finally:
+        _without_row("Dana Levi")
+        people._same_spelling.cache_clear()
+
+
+# ---------------------------------------------------------------- 1c. a new request mid-question
+def t_new_request_mid_question():
+    """Seen over HTTP (2026-10-03): with "What should it say?" open for Dana, a new
+    "text Gal I'm on my way" was taken as the answer: a draft to Dana with Gal's words."""
+    print("\nt_new_request_mid_question")
+    for utt, need, asked, want in (
+            ("text Gal I'm on my way", "what", "Dana Cohen", "Gal Ben Ami"),
+            ("call Mom", "what", "Dana Cohen", "Mom"),
+            ("tell her Gal is coming", "what", "Dana Cohen", ""),
+            ("I'm on my way", "what", "Dana Cohen", ""),
+            ("text Dana Cohen running late", "what", "Dana Cohen", ""),
+            ("message Gal", "who", "", ""),
+            ("send it to Gal", "who", "", ""),
+            ("Gal", "who", "", ""),
+            ("text Gal I'm on my way", "who", "", "Gal Ben Ami"),
+            ("תשלחי לגל שאני בדרך", "what", "Dana Cohen", "Gal Ben Ami")):
+        got = people.new_request_to(utt, need, asked)
+        check(f"units: new_request_to({utt!r}, {need}) == {want!r}", got == want, got)
+    fresh()
+    first, second = "text Dana Cohen", "text Gal I'm on my way"
+    by = {first: msg("Dana Cohen", message_has_content=0.1),
+          # Live Jev called it an answer to "what should it say?".
+          second: {**msg("Gal Ben Ami", span="I'm on my way"), "is_answer": 0.95}}
+    with tm.gates_on():
+        r1 = say(ScriptedJev(by), first)
+        check("'text Dana Cohen': asked what it should say",
+              r1["did"] == "need_what" and awaiting().get("need") == "what", (r1["did"], r1.get("say")))
+        j2 = ScriptedJev(by)
+        r2 = say(j2, second)
+        to2 = pending_to() or awaiting().get("contact")
+        check("the new request goes to Gal with her words, never into Dana's draft",
+              to2 == "Gal Ben Ami" and "on my way" in str((router.PENDING or {}).get("text")
+                                                         or awaiting().get("body")),
+              (r2["did"], r2.get("say"), router.PENDING, awaiting()))
+        check("no Jev call spent reading it as an answer",
+              not any("is_answer" in q for q in j2.asked), [list(q) for q in j2.asked])
+        router._cancel_pending()
+
+
+# ---------------------------------------------------------------- her book, just in time
+# The owner's fresh 1.2.4 install (2026-10-03): "play a song of adele" raised macOS's
+# "MicMic would like to access data from other apps" (the day's briefing read
+# WhatsApp's message store); "send it to tamar on whatsapp and say i think about you"
+# waited 2.5 s for a book macOS was still asking about, said "I don't have Tamar in
+# your contacts", split off "say i think about you" with nobody to send it to, and then
+# asked "Who should I send it to?" five times. Everything below runs the REAL
+# savta/actions/contacts.py, with WhatsApp's folder pointed at a scratch path that is
+# watched, and the copy and the Contacts app replaced by recorders.
+import contextlib                              # noqa: E402
+import importlib                               # noqa: E402
+import pathlib                                 # noqa: E402
+
+FAKE_WA = pathlib.Path(tempfile.mkdtemp(prefix="micmic-fake-wa-")) / "group.net.whatsapp.WhatsApp.shared"
+TAMAR = {"name": "Tamar Cohen", "first": "Tamar", "phone": "+15550000077",
+         "waid": "15550000077@s.whatsapp.net", "source": "whatsapp"}
+
+
+@contextlib.contextmanager
+def real_book(explain=None):
+    """The real address-book module on a Mac where no read has worked yet (contacts_gate,
+    no contacts_ok). Yields `seen`: every look inside WhatsApp's folder, every copy and
+    every Contacts-app read, with where it came from."""
+    saved = dict(book.__dict__)
+    marker = book._ok_marker()
+    had_marker = marker.read_text() if marker.exists() else None
+    settings_before = router.SETTINGS.read_text() if router.SETTINGS.exists() else None
+    real_methods = {m: getattr(pathlib.Path, m) for m in
+                    ("exists", "stat", "is_file", "is_dir", "open", "read_bytes", "iterdir")}
+    seen: list[str] = []
+    importlib.reload(book)
+    book.WA_DIR = FAKE_WA
+
+    def trap(name, real):
+        def f(self, *a, **k):
+            if str(self).startswith(str(FAKE_WA)):
+                seen.append(f"Path.{name}")
+            return real(self, *a, **k)
+        return f
+    for m, real in real_methods.items():
+        setattr(pathlib.Path, m, trap(m, real))
+    book._copy_with_timeout = lambda src, dst, timeout=book.COPY_TIMEOUT: (
+        seen.append(f"copy {pathlib.Path(src).name}"), False)[1]
+    def contacts_app():                 # the real one's gate, then a recorder
+        if book.may_touch():
+            seen.append("Contacts app")
+        return []
+    book._read_macos = contacts_app
+    marker.unlink(missing_ok=True)
+    router.save_settings({"onboarded": True, "contacts_gate": True})
+    book.set_explainer(explain)
+    try:
+        yield seen
+    finally:
+        for m, real in real_methods.items():
+            setattr(pathlib.Path, m, real)
+        for k, v in saved.items():
+            setattr(book, k, v)
+        if had_marker is not None:
+            marker.write_text(had_marker)
+        if settings_before is not None:
+            router.SETTINGS.write_text(settings_before)
+        router._cancel_pending()
+        router.AWAITING = None
+
+
+def t_no_book_before_asked():
+    print("\nt_no_book_before_asked")
+    said: list[str] = []
+    turns = [("ok amazing can you please play a song of adele", dict(intent="music")),
+             ("play some adele", dict(intent="music")),
+             ("תשימי לי שיר של אדל", dict(intent="music", language="hebrew")),
+             ("what time is it", dict(intent="look_up")),
+             ("what's the weather", dict(intent="look_up")),
+             ("set a timer for 5 minutes", dict(intent="timer")),
+             ("open the calculator", dict(intent="open_app")),
+             ("good morning", dict(intent="chitchat")),
+             ("tell me a joke", dict(intent="chitchat")),
+             ("remind me at five to take my pills", dict(intent="timer")),
+             ("make it louder", dict(intent="control"))]
+    real_due = router.due_briefing
+    router.due_briefing = tm.REAL_DUE_BRIEFING
+    try:
+        with real_book(explain=lambda: said.append("line") or True) as seen:
+            for utt, script in turns:
+                fresh()
+                # The first turn of the day, every time: the briefing is what read
+                # WhatsApp's message store on the owner's music turn.
+                p = prof.load()
+                p.pop("last_briefed", None)
+                prof.save(p)
+                book._first_ok[0] = None
+                n, launched = len(seen), len(tm.LAUNCHED)
+                with tm.gates_on():
+                    r = say(ScriptedJev({utt: script}), utt)
+                time.sleep(0.2)            # a background loader would have run by now
+                contacts_osa = [c for c in tm.LAUNCHED[launched:] if "Contacts" in str(c)]
+                check(f"fresh Mac, {utt!r}: nothing looked inside WhatsApp, no Contacts app",
+                      seen[n:] == [] and not contacts_osa and not book.read_before(),
+                      (r.get("did"), seen[n:], contacts_osa))
+            check("and MicMic's contacts line never came up on any of them", said == [], said)
+            # The one deliberate exception: an emergency reads at once, to find a number.
+            fresh()
+            p = prof.load()
+            p.update(emergency_contact="", pinned=[])
+            prof.save(p)
+            n = len(seen)
+            router.emergency_candidates()
+            check("an emergency is the one exception: it reads her book at once",
+                  bool(seen[n:]), seen[n:])
+            book._permit_until[0] = 0.0
+            n = len(seen)
+            router.emergency_candidates(urgent=False)
+            check("an offer to call someone (she sounds upset) reads nothing", seen[n:] == [],
+                  seen[n:])
+    finally:
+        router.due_briefing = real_due
+    for utt, want in (("tell me a joke", False), ("remind me at five", False),
+                      ("תגידי לי מה השעה", False), ("скажи мне время", False),
+                      ("tell dana i'm late", True), ("remind me to call mom", True),
+                      ("send it to tamar", True), ("תגידי לדנה שאני בדרך", True)):
+        check(f"units: _about_a_person({utt!r}) == {want}",
+              router._about_a_person(utt) == want, router._about_a_person(utt))
+
+
+def _tamar_turn(channel="whatsapp", content=0.9, span="i think about you", **kw) -> dict:
+    return dict(intent="message", contact="nobody", contact_is_named=0.95,
+                message_has_content=content, channel=channel, span=span, **kw)
+
+
+def t_first_read_waits_for_her_answer():
+    print("\nt_first_read_waits_for_her_answer")
+    said: list[str] = []
+    # macOS's own question is answered 3.5 s after her Continue: longer than the
+    # 2.5 s the turn used to wait (LOAD_BUDGET).
+    with real_book(explain=lambda: said.append("line") or True) as seen:
+        def answered_late():
+            time.sleep(3.5)
+            book._STATUS["whatsapp"] = "ok"
+            return [dict(TAMAR)] + [dict(r) for r in BOOK]
+        book._read_whatsapp = answered_late
+        fresh()
+        utt = "send a whatsapp to tamar saying i think about you"
+        t0 = time.time()
+        with tm.gates_on():
+            r = say(ScriptedJev({utt: msg("Tamar Cohen", channel="whatsapp",
+                                          span="i think about you")}), utt)
+        took = time.time() - t0
+        check("her Continue: MicMic's line once, then the turn waits for macOS's answer",
+              said == ["line"] and took >= 3.4, (said, round(took, 1)))
+        check("her Allow lets the same turn go on: counting down to Tamar Cohen",
+              r["did"] == "sending" and pending_to() == "Tamar Cohen"
+              and "think about you" in (router.PENDING or {}).get("text", ""),
+              (r["did"], r.get("say"), router.PENDING))
+        check("and the read is remembered (contacts_ok)", book.read_before("whatsapp"))
+        router._cancel_pending()
+
+
+def t_unreadable_book_is_said_so():
+    print("\nt_unreadable_book_is_said_so")
+    prev_dry = os.environ.get("MICMIC_DRY_OPEN")
+    os.environ["MICMIC_DRY_OPEN"] = "1"
+    said: list[str] = []
+    try:
+        # WhatsApp's data refused (instantly, as macOS remembers a Don't Allow), and
+        # the Contacts app gives nothing either: the owner's 16:47:59.
+        with real_book(explain=lambda: said.append("line") or True) as seen:
+            def refused():
+                book._STATUS["whatsapp"] = "blocked"
+                return []
+            book._read_whatsapp = refused
+            for lang, utt in (("english", "send a message to tamar"),
+                              ("hebrew", "תשלחי הודעה לתמר")):
+                fresh()
+                book._first_ok[0] = None
+                book._CACHE.update(at=0.0, rows=[]); book._LAST_FAIL[0] = 0.0
+                book._ATTEMPTED[0] = 0.0
+                with tm.gates_on():
+                    r = say(ScriptedJev({utt: _tamar_turn(content=0.1, span="",
+                                                          language=lang)}), utt)
+                s = r.get("say") or ""
+                if lang == "english":
+                    check("never 'I don't have Tamar in your contacts' from a book never read",
+                          "I don't have" not in s and s.startswith(
+                              "I can't see your contacts yet, so I can't find Tamar."), s)
+                    check("it says how: Full Disk Access, and offers to open it",
+                          "Full Disk Access" in s and s.endswith("Should I open it for you?")
+                          and awaiting().get("pane") == "full_disk", (s, awaiting()))
+                else:
+                    check("Hebrew: the same, in her language",
+                          "אני עוד לא רואה את אנשי הקשר שלך" in s and "גישה מלאה לדיסק" in s, s)
+            # "Yes": that pane opens (dry here), her request stays open.
+            by = {"yes please": dict(is_answer=0.95, open_settings=0.95)}
+            with tm.gates_on():
+                r = say(ScriptedJev(by), "yes please")
+            check("'yes please': System Settings opens on that pane, the request stays open",
+                  r["did"] == "opened_settings" and r["detail"].get("pane") == "full_disk"
+                  and awaiting().get("need") == "who", (r["did"], r.get("say"), r.get("detail")))
+            # She switched it on: her answer re-reads at once (no 120 s lockout).
+            book.RECHECK_GAP = 0.0
+            book._read_whatsapp = lambda: (book._STATUS.update(whatsapp="ok"),
+                                           [dict(TAMAR)] + [dict(r) for r in BOOK])[1]
+            by = {"tamar": dict(is_answer=0.95, contact="Tamar Cohen")}
+            with tm.gates_on():
+                r = say(ScriptedJev(by), "tamar")
+            check("allowed since: 'tamar' re-reads at once, finds her, asks what to say",
+                  r["did"] == "need_what" and awaiting().get("contact") == "Tamar Cohen",
+                  (r["did"], r.get("say"), awaiting()))
+            router.AWAITING = None
+
+            # The Contacts app refused instead (no WhatsApp on this Mac): Automation.
+            fresh()
+            book._ok_marker().unlink(missing_ok=True)     # the read above worked
+            book._first_ok[0] = True
+            book._CACHE.update(at=0.0, rows=[]); book._LAST_FAIL[0] = 0.0
+            book._read_whatsapp = lambda: (book._STATUS.update(whatsapp="absent"), [])[1]
+            book._read_macos = lambda: (book._STATUS.update(macos="blocked"), [])[1]
+            book._STATUS.update(whatsapp="", macos="")
+            book.recheck(wait=1.0)
+            utt = "call tamar"
+            with tm.gates_on():
+                r = say(ScriptedJev({utt: dict(intent="call", contact="nobody",
+                                               contact_is_named=0.95)}), utt)
+            check("a call, Contacts app refused: Automation is named, nobody is called",
+                  "Automation" in (r.get("say") or "") and not tm.CALLED
+                  and "I don't have" not in (r.get("say") or ""), (r["did"], r.get("say")))
+            router.AWAITING = None
+
+            # She said Not now: told so, nothing kept open, asked again next time.
+            fresh()
+            book._ok_marker().unlink(missing_ok=True)
+            book._first_ok[0] = None
+            book._CACHE.update(at=0.0, rows=[])
+            said.clear()
+            book.set_explainer(lambda: said.append("line") or False)
+            utt = "send a message to tamar"
+            with tm.gates_on():
+                r = say(ScriptedJev({utt: _tamar_turn(content=0.1, span="")}), utt)
+            check("after Not now: 'I can't see your contacts yet', nothing kept open",
+                  (r.get("say") or "").startswith("I can't see your contacts yet")
+                  and "Ask me again" in (r.get("say") or "") and not awaiting(),
+                  (r.get("say"), awaiting()))
+            with tm.gates_on():
+                say(ScriptedJev({utt: _tamar_turn(content=0.1, span="")}), utt)
+            check("and her next request about a person shows MicMic's line again",
+                  said == ["line", "line"], said)
+    finally:
+        if prev_dry is None:
+            os.environ.pop("MICMIC_DRY_OPEN", None)
+        else:
+            os.environ["MICMIC_DRY_OPEN"] = prev_dry
+
+
+def t_without_the_book():
+    print("\nt_without_the_book")
+    found_calls, ready_calls, pressed = [], [], []
+    real = (mac.whatsapp_find_chat, mac.whatsapp_ready, mac.whatsapp_press_send)
+    try:
+        with real_book(explain=lambda: True) as seen:
+            def refused():
+                book._STATUS["whatsapp"] = "blocked"
+                return []
+            book._read_whatsapp = refused
+            utt = "send it to tamar on whatsapp and say i think about you"
+
+            def turn(found, last_played=True):
+                fresh()
+                book._first_ok[0] = True
+                book._CACHE.update(at=0.0, rows=[]); book._LAST_FAIL[0] = 0.0
+                mac.whatsapp_find_chat = lambda s, t: (found_calls.append((s, t)), dict(found))[1]
+                mac.whatsapp_ready = lambda t: (ready_calls.append(t), (True, "ready"))[1]
+                if last_played:
+                    router.MEM.last_played = {"id": "adele01", "title": "Adele - Hello",
+                                              "player": "youtube", "at": time.time()}
+                with tm.gates_on():
+                    return say(ScriptedJev({utt: _tamar_turn(is_compound=0.9)}), utt)
+
+            # Accessibility finds exactly one chat: typed there, the usual countdown.
+            r = turn({"ok": True, "who": "Tamar Cohen", "why": ""})
+            pend = dict(router.PENDING or {})
+            check("one chat in WhatsApp's window carries the name: read back, counting down",
+                  r["did"] == "sending" and pend.get("to") == "Tamar Cohen"
+                  and pend.get("wa_ui") and pend.get("channel") == "whatsapp",
+                  (r["did"], r.get("say"), pend))
+            check("the words she said and the song that just played, as one message",
+                  found_calls[-1][0].lower() == "tamar" and "i think about you" in pend.get("text", "")
+                  and "youtube.com/watch?v=adele01" in pend.get("text", ""), (found_calls, pend))
+            mac.whatsapp_press_send = lambda who, text: (pressed.append((who, text)), (True, "sent"))[1]
+            n_said = len(tm.SAID)
+            router._fire_pending()
+            check("countdown over: Send pressed in that chat (verified by mac), 'Sent'",
+                  pressed and pressed[-1][0] == "Tamar Cohen"
+                  and any("Sent to" in t for _, t in tm.SAID[n_said:]), (pressed, tm.SAID[n_said:]))
+            # The chat is not in front with her words any more: left ready, never "sent".
+            turn({"ok": True, "who": "Tamar Cohen", "why": ""})
+            mac.whatsapp_press_send = lambda who, text: (False, "ready")
+            n_said = len(tm.SAID)
+            router._fire_pending()
+            check("her words gone from that chat: nothing pressed, 'ready, press send'",
+                  any("ready in WhatsApp" in t for _, t in tm.SAID[n_said:])
+                  and router._HISTORY[-1]["did"] == "left_ready", (tm.SAID[n_said:],))
+            # No Accessibility, or no clear match: WhatsApp opened with the words ready.
+            for why in ("no_accessibility", "several"):
+                n_wa = len(tm.WA)
+                r = turn({"ok": False, "who": "", "why": why})
+                check(f"{why}: WhatsApp opened with her words ready, nothing sent or armed",
+                      r["did"] == "left_ready" and router.PENDING is None and len(tm.WA) == n_wa
+                      and "i think about you" in ready_calls[-1]
+                      and (r.get("say") or "") == ("I can't see your contacts, so I opened "
+                                                   "WhatsApp with your message ready. Pick "
+                                                   "Tamar and press send."),
+                      (r["did"], r.get("say"), router.PENDING))
+            # Messages finds people by name itself.
+            fresh()
+            book._first_ok[0] = True
+            u2 = "text tamar that i'm on my way"
+            with tm.gates_on():
+                r = say(ScriptedJev({u2: _tamar_turn(channel="imessage", span="i'm on my way")}), u2)
+            check("iMessage: read back and counting down to the name she said",
+                  r["did"] == "sending" and pending_to() == "Tamar"
+                  and (router.PENDING or {}).get("channel") == "imessage", (r["did"], r.get("say")))
+            router._cancel_pending()
+            # A card number is never sent this way.
+            fresh()
+            book._first_ok[0] = True
+            u3 = "text tamar my card is 4580 1234 5678 9012"
+            with tm.gates_on():
+                r = say(ScriptedJev({u3: _tamar_turn(channel="imessage",
+                                                     span="my card is 4580 1234 5678 9012")}), u3)
+            check("a card number: not sent without her book, she hears why instead",
+                  router.PENDING is None and r["did"] == "need_who", (r["did"], r.get("say")))
+            router.AWAITING = None
+            # No name at first: her message is kept, and her answer is the name to
+            # look for without the book.
+            fresh()
+            book._first_ok[0] = True
+            u4 = "send a whatsapp saying i'm outside"
+            by4 = {u4: dict(intent="message", contact="nobody", contact_is_named=0.1,
+                            message_has_content=0.9, channel="whatsapp", span="i'm outside"),
+                   "tamar": dict(is_answer=0.95, contact="nobody"),
+                   "yes please": dict(is_answer=0.95, contact="nobody")}
+            mac.whatsapp_find_chat = lambda s, t: (found_calls.append((s, t)),
+                                                   {"ok": False, "who": "", "why": "not_found"})[1]
+            with tm.gates_on():
+                r = say(ScriptedJev(by4), u4)
+                check("nobody named, book unreadable: told so, her message kept",
+                      r["did"] == "need_who" and "I kept your message." in (r.get("say") or "")
+                      and awaiting().get("body") == "i'm outside", (r.get("say"), awaiting()))
+                r = say(ScriptedJev(by4), "tamar")
+            check("her answer 'tamar': looked for in WhatsApp, then opened with the words ready",
+                  r["did"] == "left_ready" and found_calls[-1] == ("Tamar", "i'm outside")
+                  and ready_calls[-1] == "i'm outside" and not awaiting(),
+                  (r["did"], r.get("say"), found_calls[-1:]))
+            check("units: bare_name", people.bare_name("tamar") == "Tamar"
+                  and people.bare_name("yes please") == "" and people.bare_name("לתמר") == "תמר"
+                  and people.bare_name("you should have it on whatsapp") == ""
+                  and people.bare_name("tamar cohen") == "Tamar cohen",
+                  [people.bare_name(x) for x in ("tamar", "yes please", "לתמר", "tamar cohen")])
+    finally:
+        mac.whatsapp_find_chat, mac.whatsapp_ready, mac.whatsapp_press_send = real
+        router.MEM.last_played = None
+    # A number she says needs no book at all.
+    fresh()
+    p = prof.load()
+    p["country"] = "IL"
+    prof.save(p)
+    utt = "send a whatsapp to 054-123-4567 saying i'm outside"
+    with tm.gates_on():
+        r = say(ScriptedJev({utt: dict(intent="message", contact="nobody", contact_is_named=0.9,
+                                       message_has_content=0.9, channel="whatsapp",
+                                       span="i'm outside")}), utt)
+    check("a number she says: counting down to it, international",
+          r["did"] == "sending" and pending_to() == "+972541234567", (r["did"], r.get("say")))
+    router._cancel_pending()
+    p.pop("country", None)
+    prof.save(p)
+    for utt, region, want in (("send it to 054-123-4567", "IL", "+972541234567"),
+                              ("text +1 415 555 0100 hi", "", ""),
+                              ("text to +1 415 555 0100 hi", "", "+14155550100"),
+                              ("תשלחי ל-0541234567 שאני בדרך", "IL", "+972541234567"),
+                              ("tell dana the code is 1234567", "IL", ""),
+                              ("send it to 4155550100", "US", "+14155550100"),
+                              ("send it to 4155550100", "", "")):
+        check(f"units: said_number({utt!r}) == {want!r}",
+              people.said_number(utt, region) == want, people.said_number(utt, region))
+
+
+def t_whatsapp_never_blind():
+    print("\nt_whatsapp_never_blind")
+    from savta.actions import apps
+    ready = []
+    real_ready = mac.whatsapp_ready
+    mac.whatsapp_ready = lambda t: (ready.append(t), (True, "ready"))[1]
+    try:
+        n_osa = len(tm.OSA)
+        with tm.gates_on():
+            out = tm.REAL_WHATSAPP("Tamar", "hi there")
+        check("no number: WhatsApp left ready, and no return is ever pressed",
+              out == (False, "ready") and ready == ["hi there"] and len(tm.OSA) == n_osa,
+              (out, ready, tm.OSA[n_osa:]))
+    finally:
+        mac.whatsapp_ready = real_ready
+    with tm.gates_on():
+        check("a test process (MICMIC_STATE_DIR) never drives WhatsApp's window",
+              mac.whatsapp_find_chat("Tamar", "hi")["why"] == "test"
+              and mac.whatsapp_press_send("Tamar", "hi") == (False, "ready"))
+    # Her chat list as Accessibility shows it (rows are made up).
+    rows = ["Tamar Cohen, see you tomorrow, 10:02", "Tal Levi, ok, Yesterday",
+            "Natalia Stern, photo, Monday"]
+    check("units: one row carries the name she said", mac.wa_rows_named("tamar", rows)
+          == ["Tamar Cohen"], mac.wa_rows_named("tamar", rows))
+    check("units: two Talias is not one", mac.wa_rows_named(
+        "tamar", rows + ["Tamar Bar, hi, 09:00"]) == ["Tamar Cohen", "Tamar Bar"])
+    check("units: 'tamar cohen' picks the one", mac.wa_rows_named(
+        "tamar cohen", rows + ["Tamar Bar, hi, 09:00"]) == ["Tamar Cohen"])
+    # The window, faked: search, one chat, the box, the Send button.
+    state = {"typed": {}, "clicked": [], "box": "", "rows": []}
+
+    def snap(app, max_elements=120):
+        els = [{"id": 1, "role": "AXSearchField", "kind": "type", "label": "Search", "value": ""}]
+        els += [{"id": 10 + i, "role": "AXCell", "kind": "click", "label": lab, "value": ""}
+                for i, lab in enumerate(state["rows"])]
+        els += [{"id": 50, "role": "AXTextArea", "kind": "type", "label": "Type a message",
+                 "value": state["box"]},
+                {"id": 60, "role": "AXButton", "kind": "click", "label": "Send", "value": ""}]
+        return {"app": app, "title": "WhatsApp", "elements": els, "refs": {},
+                "text": " | ".join(state["rows"] + ["Tamar Cohen"])}
+
+    def act(s, el, op, text=""):
+        if op == "type":
+            state["typed"][el["label"]] = text
+            if el["role"] == "AXSearchField":
+                state["rows"] = [r for r in ["Tamar Cohen, see you, 10:02", "Tal Levi, ok"]
+                                 if text.lower() in r.lower()]
+            else:
+                state["box"] = text
+        else:
+            state["clicked"].append(el["label"])
+        return True, "ok"
+    real_apps = (apps.available, apps.ensure_open, apps.snapshot, apps.act)
+    real_allowed, real_time = mac._wa_ui_allowed, mac.time
+
+    class _NoWait:                      # mac.py's own clock, minus its waits
+        def __getattr__(self, k):
+            return getattr(real_time, k)
+
+        @staticmethod
+        def sleep(s):
+            return None
+    apps.available = lambda: (True, "ready")
+    apps.ensure_open = lambda name, wait=4.0: True
+    apps.snapshot, apps.act = snap, act
+    mac._wa_ui_allowed = lambda: True
+    mac.time = _NoWait()
+    try:
+        with tm.gates_on():
+            got = mac.whatsapp_find_chat("tamar", "i think about you")
+            check("find: searched her name, opened the one chat, typed her words, pressed nothing",
+                  got == {"ok": True, "who": "Tamar Cohen", "why": ""}
+                  and state["typed"].get("Search") == "tamar"
+                  and state["box"] == "i think about you"
+                  and state["clicked"] == ["Tamar Cohen, see you, 10:02"], (got, state))
+            ok = mac.whatsapp_press_send("Tamar Cohen", "i think about you")
+            check("Send pressed only with exactly her words in that chat's box",
+                  ok == (True, "sent") and state["clicked"][-1] == "Send", (ok, state["clicked"]))
+            state["box"] = "something else"
+            n = len(state["clicked"])
+            ok = mac.whatsapp_press_send("Tamar Cohen", "i think about you")
+            check("another draft in front: nothing pressed, left ready",
+                  ok == (False, "ready") and len(state["clicked"]) == n, (ok, state["clicked"]))
+            state["rows"] = []
+            got = mac.whatsapp_find_chat("dana", "hi")
+            check("no chat with that name: not found, nothing typed in a box",
+                  got["ok"] is False and got["why"] == "not_found", got)
+    finally:
+        apps.available, apps.ensure_open, apps.snapshot, apps.act = real_apps
+        mac._wa_ui_allowed, mac.time = real_allowed, real_time
+
+
+def t_who_is_never_asked_three_times():
+    print("\nt_who_is_never_asked_three_times")
+    fresh()
+    utt = "send a message saying i'm running late"
+    answers = ["the one from work", "you know who", "the neighbour", "her"]
+    by = {utt: dict(intent="message", contact="nobody", contact_is_named=0.1,
+                    message_has_content=0.9, span="i'm running late")}
+    by.update({a: dict(is_answer=0.95, contact="nobody") for a in answers})
+    with tm.gates_on():
+        replies = [say(ScriptedJev(by), utt)] + [say(ScriptedJev(by), a) for a in answers[:3]]
+    says = [r.get("say") or "" for r in replies]
+    check("asked who, then once more",
+          says[0] == "Who should I send it to?" and says[1] == "Who should I send it to?", says)
+    check("the third time: what is wrong, not the same question",
+          says[2].startswith("I still can't tell who you mean.")
+          and "never mind" in says[2] and replies[2]["did"] == "need_who", says[2])
+    check("then it is left, and nothing is kept open", replies[3]["did"] == "left_it"
+          and says[3].startswith("Alright, I'll leave it for now") and not awaiting(), says[3])
+    check("never the same line three times in a row",
+          not any(says[i] == says[i + 1] == says[i + 2] for i in range(len(says) - 2)), says)
+    # The owner's case: her book unreadable, a call (nothing can be done without it).
+    prev_dry = os.environ.get("MICMIC_DRY_OPEN")
+    os.environ["MICMIC_DRY_OPEN"] = "1"
+    try:
+        with real_book(explain=lambda: True):
+            book._read_whatsapp = lambda: (book._STATUS.update(whatsapp="blocked"), [])[1]
+            fresh()
+            book._first_ok[0] = True
+            u2 = "call tamar"
+            by = {u2: dict(intent="call", contact="nobody", contact_is_named=0.95)}
+            by.update({a: dict(is_answer=0.95, contact="nobody")
+                       for a in ("tamar israelien", "to tamar", "you should call tamar")})
+            with tm.gates_on():
+                rs = [say(ScriptedJev(by), u2)] + [
+                    say(ScriptedJev(by), a) for a in ("tamar israelien", "to tamar",
+                                                      "you should call tamar")]
+            ss = [r.get("say") or "" for r in rs]
+            check("unreadable book: told why, then 'still', then left: no loop",
+                  ss[0].startswith("I can't see your contacts yet")
+                  and ss[1].startswith("I still can't see your contacts.")
+                  and rs[2]["did"] == "left_it" and not any("Who should I" in s for s in ss[:3]),
+                  ss)
+    finally:
+        if prev_dry is None:
+            os.environ.pop("MICMIC_DRY_OPEN", None)
+        else:
+            os.environ["MICMIC_DRY_OPEN"] = prev_dry
+        router.AWAITING = None
+
+
+# ---------------------------------------------------------------- both lines together
+# Sound-alikes and a new request mid-question (the iPhone's brain) next to the book read
+# just in time and the who-count (contacts-first-read): a name is offered only from a
+# book that was read, and a new request starts the count again.
+def t_sound_alike_needs_a_read_book():
+    print("\nt_sound_alike_needs_a_read_book")
+    prev_dry = os.environ.get("MICMIC_DRY_OPEN")
+    os.environ["MICMIC_DRY_OPEN"] = "1"
+    try:
+        with real_book(explain=lambda: True):
+            book._read_whatsapp = lambda: (book._STATUS.update(whatsapp="blocked"), [])[1]
+
+            def turn(utt, script):
+                fresh()
+                book._first_ok[0] = True
+                book._CACHE.update(at=0.0, rows=[]); book._LAST_FAIL[0] = 0.0
+                with tm.gates_on():
+                    return say(ScriptedJev({utt: script}), utt)
+
+            r = turn("call Donna", dict(intent="call", contact="nobody", contact_is_named=0.95))
+            s = r.get("say") or ""
+            check("unreadable, 'call Donna': why it cannot see her contacts, no Dana offered",
+                  r["did"] == "need_who" and s.startswith("I can't see your contacts yet")
+                  and "I don't have" not in s and "Dana" not in s, (r["did"], s))
+            check("units: sound_alike offers nobody from a book that was not read",
+                  people.sound_alike("Donna") == [], people.sound_alike("Donna"))
+            router.AWAITING = None
+            r = turn("text Donna I'm running late",
+                     _tamar_turn(channel="imessage", span="I'm running late"))
+            s = r.get("say") or ""
+            check("unreadable, 'text Donna ...': Messages by the name she said, never a guess",
+                  r["did"] == "sending" and pending_to() == "Donna"
+                  and "I don't have" not in s and "Dana" not in s, (r["did"], s, pending_to()))
+            router._cancel_pending()
+    finally:
+        if prev_dry is None:
+            os.environ.pop("MICMIC_DRY_OPEN", None)
+        else:
+            os.environ["MICMIC_DRY_OPEN"] = prev_dry
+        router.AWAITING = None
+
+
+def t_new_request_resets_the_who_count():
+    print("\nt_new_request_resets_the_who_count")
+    fresh()
+    utt, utt2, new = ("send a message saying i'm running late",
+                      "send a message saying see you soon", "text Gal I'm on my way")
+    misses = ["the one from work", "you know who", "her"]
+    by = {u: dict(intent="message", contact="nobody", contact_is_named=0.1,
+                  message_has_content=0.9, span=sp)
+          for u, sp in ((utt, "i'm running late"), (utt2, "see you soon"))}
+    by.update({a: dict(is_answer=0.95, contact="nobody") for a in misses})
+    # Live Jev may call it an answer; the code sees a new request first.
+    by[new] = {**msg("Gal Ben Ami", span="I'm on my way"), "is_answer": 0.95}
+    with tm.gates_on():
+        rs = [say(ScriptedJev(by), x) for x in (utt, *misses[:2])]
+        check("two misses: the explaining line, one before it is left",
+              (rs[2].get("say") or "").startswith("I still can't tell who you mean."),
+              [r.get("say") for r in rs])
+        j = ScriptedJev(by)
+        r = say(j, new)
+        text = (router.PENDING or {}).get("text") or ""
+        check("a new request then: Gal with her new words, never 'I'll leave it'",
+              r["did"] in ("sending", "confirm_send") and pending_to() == "Gal Ben Ami"
+              and "on my way" in text and "running late" not in text,
+              (r["did"], r.get("say"), router.PENDING))
+        check("no Jev call spent reading it as an answer",
+              not any("is_answer" in q for q in j.asked), [list(q) for q in j.asked])
+        router._cancel_pending()
+        r1, r2 = say(ScriptedJev(by), utt2), say(ScriptedJev(by), misses[2])
+        check("the next question counts from the start: 'who?' asked again, not explained",
+              r1.get("say") == "Who should I send it to?" and r2["did"] == "need_who"
+              and r2.get("say") == "Who should I send it to?", (r1.get("say"), r2.get("say")))
+    router.AWAITING = None
+    # Her book unreadable: the new request goes on without it, with its own words.
+    prev_dry = os.environ.get("MICMIC_DRY_OPEN")
+    os.environ["MICMIC_DRY_OPEN"] = "1"
+    try:
+        with real_book(explain=lambda: True):
+            book._read_whatsapp = lambda: (book._STATUS.update(whatsapp="blocked"), [])[1]
+            fresh()
+            book._first_ok[0] = True
+            book._CACHE.update(at=0.0, rows=[]); book._LAST_FAIL[0] = 0.0
+            for u, need, want in (("text Gal I'm on my way", "who", "Gal"),
+                                  ("message Gal", "who", ""), ("call tamar", "who", ""),
+                                  ("you should call tamar", "who", "")):
+                got = people.new_request_to(u, need)
+                check(f"units, unreadable: new_request_to({u!r}, {need}) == {want!r}",
+                      got == want, got)
+            by = {"text tamar": _tamar_turn(channel="imessage", content=0.1, span=""),
+                  new: {**_tamar_turn(channel="imessage", span="I'm on my way"),
+                        "is_answer": 0.95}}
+            with tm.gates_on():
+                r1 = say(ScriptedJev(by), "text tamar")
+                r2 = say(ScriptedJev(by), new)
+            text = (router.PENDING or {}).get("text") or ""
+            check("unreadable: 'text tamar' is told why, then 'text Gal ...' goes to Gal",
+                  (r1.get("say") or "").startswith("I can't see your contacts yet")
+                  and r2["did"] == "sending" and pending_to() == "Gal" and "on my way" in text,
+                  (r1.get("say"), r2["did"], r2.get("say"), router.PENDING))
+            router._cancel_pending()
+    finally:
+        if prev_dry is None:
+            os.environ.pop("MICMIC_DRY_OPEN", None)
+        else:
+            os.environ["MICMIC_DRY_OPEN"] = prev_dry
+        router.AWAITING = None
+
+
+def t_send_and_say_is_one_message():
+    print("\nt_send_and_say_is_one_message")
+    fresh()
+    utt = "send it to dana on whatsapp and say i think about you"
+    LLM.splits[utt] = ["send it to dana on whatsapp", "say i think about you"]
+    router.MEM.last_played = {"id": "adele01", "title": "Adele - Hello", "player": "youtube",
+                              "at": time.time()}
+    try:
+        with tm.gates_on():
+            r = say(ScriptedJev({utt: msg("Dana Cohen", channel="whatsapp", is_compound=0.9,
+                                          span="i think about you")}), utt)
+        text = (router.PENDING or {}).get("text", "")
+        check("not split: one message to Dana, never 'Who should I send it to?'",
+              utt not in LLM.split_asked and r["did"] == "sending" and pending_to() == "Dana Cohen",
+              (r["did"], r.get("say"), LLM.split_asked))
+        check("the song that just played and her words, together",
+              "i think about you" in text and "youtube.com/watch?v=adele01" in text, text)
+        router._cancel_pending()
+    finally:
+        router.MEM.last_played = None
+    for utt, want in (("send it to tamar on whatsapp and say i think about you", True),
+                      ("send it to dana and tell her i miss you", True),
+                      ("text dana hi and let her know i'm late", True),
+                      ("תשלחי את זה לדנה ותגידי לה שאני אוהבת אותה", True),
+                      ("отправь это Дане и скажи ей, что я скучаю", True),
+                      ("text dana i'm late and call mom", False),
+                      ("send dana hi and tell mom i'm late", False),
+                      ("send dana hi and write to gal", False),
+                      ("play adele and send it to dana", False)):
+        check(f"units: _send_and_say({utt!r}) == {want}", router._send_and_say(utt) == want)
+
+
 def t_lines():
     print("\nt_lines")
     for k, v in people.LINES.items():
@@ -795,8 +1885,12 @@ def t_lines():
 
 
 def main():
-    for t in (t_name_not_in_book, t_two_davids, t_no_number, t_text_keeps_whatsapp,
-              t_emergency, t_distress_with_a_task, t_location_trouble, t_secrets, t_calls_off, t_money, t_lines):
+    for t in (t_name_not_in_book, t_sound_alike_offered, t_new_request_mid_question, t_two_davids, t_no_number, t_text_keeps_whatsapp,
+              t_emergency, t_emergency_countdown, t_book_asks_first, t_distress_with_a_task, t_location_trouble, t_secrets, t_calls_off, t_money,
+              t_no_book_before_asked, t_first_read_waits_for_her_answer,
+              t_unreadable_book_is_said_so, t_without_the_book, t_whatsapp_never_blind,
+              t_who_is_never_asked_three_times, t_sound_alike_needs_a_read_book,
+              t_new_request_resets_the_who_count, t_send_and_say_is_one_message, t_lines):
         try:
             t()
         except Exception as e:  # noqa: BLE001  (on a checkout without the fix)

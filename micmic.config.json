@@ -10,12 +10,21 @@
     "hey micmic"
   ],
   "listen_seconds": 12,
+  "backup_hotkey": "ctrl+opt+m",
+  "_backup_hotkey_note": "The talk key that needs no macOS permission (a Carbon hot key, native/listener.py), registered always, beside the right-hand talk key that needs Accessibility. A combination with a modifier, e.g. \"ctrl+opt+m\" (the default, M for MicMic) or \"ctrl+opt+k\". Not ctrl+opt+space: macOS switches keyboard languages with it; \"off\" turns it off.",
   "llm": {
     "enabled": "auto",
     "model": "gemini-3.5-flash-lite",
     "note": "auto means: use it when GEMINI_API_KEY exists, otherwise fall back to the keyless path. Set to false to never use it. Only two jobs go here: splitting compound requests, and answering knowledge questions. The clock and the weather never do."
   },
   "_activation_note": "push = press the orb or the spacebar. wake = always listening, acts only after a wake word. always = acts on everything it hears.",
+  "voice_engines": {
+    "english": ["eleven_turbo", "kokoro", "say"],
+    "hebrew": ["eleven_turbo", "say"],
+    "arabic": ["eleven_turbo", "say"],
+    "russian": ["eleven_turbo", "say"]
+  },
+  "_voice_note": "Per language, the voices to try in order (savta/voice.py): eleven_turbo = ElevenLabs v4 Turbo through MicMic's cloud (or ELEVENLABS_API_KEY in a source build), kokoro = the voice on this Mac, used ONLY if she downloaded it in Settings > Voice (English only; skipped otherwise, so English is [eleven_turbo, say] for a new user), say = macOS. To put English back on Kokoro first: \"english\": [\"kokoro\", \"say\"].",
   "pinned_contacts": [],
   "_contacts_note": "Contacts come from WhatsApp and fall back to the macOS Contacts app. Put a name in pinned_contacts only to force it to the top of the shortlist."
 }

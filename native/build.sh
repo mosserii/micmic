@@ -47,7 +47,15 @@ notarize() {
   local out rc=0
   # "|| rc=$?": under set -e a failing substitution would end the script before
   # Apple's own words were printed (it exited 69 with nothing to read).
-  out=$(xcrun notarytool submit "$1" --keychain-profile "$KEYCHAIN_PROFILE" --wait 2>&1) || rc=$?
+  # MICMIC_NOTARY_KEYCHAIN: a keychain file of its own for the notary profile. On this Mac
+  # the profile vanished from the login keychain twice (2026-09-28, 2026-10-03).
+  local kc=()
+  if [ -n "${MICMIC_NOTARY_KEYCHAIN:-}" ]; then
+    kc=(--keychain "$MICMIC_NOTARY_KEYCHAIN")
+    # It locks after sleep; it was made with an empty password, so unlocking is safe here.
+    security unlock-keychain -p "" "$MICMIC_NOTARY_KEYCHAIN" 2>/dev/null || true
+  fi
+  out=$(xcrun notarytool submit "$1" --keychain-profile "$KEYCHAIN_PROFILE" ${kc[@]+"${kc[@]}"} --wait 2>&1) || rc=$?
   echo "$out" | sed 's/^/    /'
   if [ "$rc" -ne 0 ] || ! echo "$out" | grep -q "status: Accepted"; then
     echo "  (notarytool exit $rc)"
@@ -217,7 +225,6 @@ release_build() {
   <key>CFBundleVersion</key><string>$BUILD_VERSION</string>
   <key>CFBundleShortVersionString</key><string>$SHORT_VERSION</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
-  <key>LSUIElement</key><true/>
   <key>NSMicrophoneUsageDescription</key><string>MicMic listens for your voice so you can talk to your computer instead of typing.</string>
   <key>NSSpeechRecognitionUsageDescription</key><string>MicMic turns what you say into words so it can do what you ask.</string>
   <key>NSAppleEventsUsageDescription</key><string>MicMic sends your messages and opens your apps for you.</string>
@@ -445,8 +452,8 @@ write_if_changed "$APP/Contents/Info.plist" <<PLIST && CHANGED=1
   <key>CFBundleInfoDictionaryVersion</key>    <string>6.0</string>
   <key>LSMinimumSystemVersion</key>           <string>13.0</string>
 
-  <!-- No Dock icon, no window: MicMic lives in the menu bar. -->
-  <key>LSUIElement</key>                      <true/>
+  <!-- No LSUIElement: MicMic is in the Dock and Cmd-Tab while it runs, as well as in
+       the menu bar (owner, 2026-10-03). The Dock icon is AppIcon.icns above. -->
 
   <!-- These two strings are the reason the bundle exists. macOS shows them in the
        permission dialogs, and refuses to let the process ask at all without them. -->

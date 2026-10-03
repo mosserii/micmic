@@ -156,6 +156,26 @@ def claims_action(text: str, language: str = "english") -> bool:
     return False
 
 
+class Spoken(str):
+    """A spoken line. `tag` is the ElevenLabs v4 delivery tag Gemini chose for it inside
+    the same call (voice_tags.split_tag), or None. A plain str everywhere else."""
+    tag: str | None = None
+
+
+def _spoken_with(text: str | None, tag: str | None) -> "Spoken | None":
+    if text is None:
+        return None
+    out = Spoken(text)
+    out.tag = tag
+    return out
+
+
+# The tag rule and its validator live in savta/voice_tags.py. They are used only when
+# tag_allow is passed, i.e. when the cloud voice will speak the line; otherwise every
+# prompt is byte for byte what it was.
+from .voice_tags import gemini_rule as _gemini_rule, split_tag  # noqa: E402
+
+
 def _drop_trailing_question(text: str) -> str:
     """An answer ends when the answer does. "את מתעניינת באסטרונומיה?" tacked on after
     the distance to the moon is filler she then feels she has to reply to."""
@@ -163,6 +183,70 @@ def _drop_trailing_question(text: str) -> str:
     while len(parts) > 1 and parts[-1].rstrip().endswith(("?", "؟")):
         parts.pop()
     return " ".join(parts).strip()
+
+
+# Small talk and refusals, said plainly (owner decision 2026-10-03). Bench replies
+# added questions she never asked for ("What are you working on so late anyway?",
+# "Want me to fetch you a glass of water instead?", "Getting ready to wind down for the
+# night?") and remarks on the hour. The prompt forbids both; this is the code check
+# under it, applied to every small-talk reply (router, intent chitchat).
+_LATE_RX = re.compile(
+    r"\b(?:so\s+late|this\s+late|late\s+(?:tonight|at\s+night)|working\s+late|up\s+late|"
+    r"still\s+up|this\s+time\s+of\s+(?:the\s+)?(?:night|day)|at\s+this\s+hour|"
+    r"such\s+an\s+hour|wind(?:ing)?\s+down|bed\s*time|for\s+the\s+night|tomorrow|tonight)\b|"
+    r"מאוחר|בשעה\s+כזו|בשעה\s+כזאת|השעה\s+הזאת|הלילה|לישון|מחר|"
+    r"متأخر|هالساعة|بهالوقت|الليلة|تنامي|تنام|بكرا|بكرة|"
+    r"поздно|в\s+такой\s+час|на\s+ночь|спать|завтра|сегодня\s+вечером",
+    re.IGNORECASE)
+_SHE_SAID_LATE = re.compile(
+    r"\b(?:night|late|sleep|tired|bed|tomorrow|tonight|evening)\b|לילה|מאוחר|לישון|עייפ|מחר|ערב|"
+    r"ليل|متأخر|نوم|تعبان|تعبانة|بكرا|مسا|ноч|поздно|спать|устал|завтра|вечер",
+    re.IGNORECASE)
+_REFUSAL_RX = re.compile(
+    r"\b(?:can(?:'|’)?t|cannot|won(?:'|’)?t|unable|not\s+able|never|lips\s+are\s+sealed)\b|"
+    r"לא\s+יכולה|לא\s+יכול|אסור\s+לי|אף\s+פעם\s+לא|ما\s+بقدر|ما\s+فيني|أبداً|ابدا|"
+    r"не\s+могу|не\s+буду|никогда", re.IGNORECASE)
+_JOKE_RX = re.compile(r"\b(?:joke|jokes|riddle|funny)\b|בדיחה|בדיחות|חידה|نكتة|نكت|حزورة|"
+                      r"шутк|анекдот|загадк", re.IGNORECASE)
+_PLAIN_FALLBACK = {
+    "english": "Alright, I am here if you need anything.",
+    "hebrew": "בסדר, אני כאן אם צריך משהו.",
+    "arabic": "ماشي، أنا هون إذا بدك إشي.",
+    "russian": "Хорошо, я здесь, если что-то нужно.",
+}
+
+
+def plain_reply(text: str, utterance: str = "", language: str = "english") -> str:
+    """A small-talk reply with no question added to it and no remark on the hour.
+
+    Every question sentence goes (a joke she asked for keeps its own), and every remark
+    on how late it is, unless she brought up the night herself. A reply that was only a
+    question keeps what came before its last comma ("I'm doing well, how about you?" ->
+    "I'm doing well."), or becomes a plain "I am here if you need anything"."""
+    text = (text or "").strip()
+    if not text:
+        return text
+    sents = [x for x in re.split(r"(?<=[.!?؟])\s+", text) if x.strip()]
+    is_q = lambda x: x.rstrip().endswith(("?", "؟"))  # noqa: E731
+    late_ok = bool(_SHE_SAID_LATE.search(utterance or ""))
+    joke = bool(_JOKE_RX.search(utterance or ""))
+    refusal = bool(_REFUSAL_RX.search(text))
+    keep = list(sents)
+    while keep and is_q(keep[-1]) and not (joke and len(keep) == 1):
+        keep.pop()                        # questions added at the end
+    if refusal and not joke:
+        keep = [x for x in keep if not is_q(x)]   # a refusal asks nothing
+    keep = [x for x in keep if late_ok or not _LATE_RX.search(x)]
+    if not keep and sents and is_q(sents[-1]):
+        last = sents[-1].rstrip("?؟ ").strip()
+        cut = max(last.rfind(","), last.rfind("،"))
+        head = last[:cut].strip() if cut > 0 else ""
+        if len(head.split()) >= 2 and (late_ok or not _LATE_RX.search(head)):
+            keep = [head + "."]
+    out = " ".join(keep).strip()
+    if not out:
+        return _PLAIN_FALLBACK.get(language, _PLAIN_FALLBACK["english"])
+    return out
 
 
 def _key() -> str | None:
@@ -208,6 +292,7 @@ class LLM:
         self.last_ms = 0.0
         self.busy_ms = 0.0          # wall time inside _post, failures included
         self.last_error: str | None = None
+        self.last_tag: str | None = None
         # Set when the proxy says today's Gemini allowance is used up, so the router can
         # say when it comes back instead of a generic failure. Cleared on success.
         self.quota_exceeded: _jev.QuotaExceeded | None = None
@@ -438,15 +523,21 @@ class LLM:
                 f"verb, pronoun and adjective that refers to them.")
 
     def _spoken(self, prompt: str, system: str, language: str, lang_name: str,
-                max_tokens: int, temperature: float) -> str | None:
+                max_tokens: int, temperature: float, tag_allow=None) -> str | None:
         """A line to be read aloud, in the one language she spoke.
 
         The model occasionally drifts into another script mid-sentence: a Hebrew
         answer came back with Arabic numerals-in-words spliced in and a garbled word
         after them. That is unspeakable, so it is asked once more, strictly, and what
         still does not fit is cut to the sentences that do."""
+        if tag_allow:
+            system = system + "\n" + _gemini_rule(tag_allow)
         out = self.text(prompt, system, max_tokens=max_tokens, temperature=temperature,
                         timeout=SPOKEN_TIMEOUT)
+        tag = None
+        if tag_allow:
+            tag, out = split_tag(out, tag_allow)
+        self.last_tag = tag
         out = fix_stray_letters(out, language) if out else out
         if out and foreign_script(out, language):
             strict = (system + f"\nWrite ONLY in {lang_name}, in its own alphabet. Not a "
@@ -454,6 +545,9 @@ class LLM:
                       "as digits.")
             again = self.text(prompt, strict, max_tokens=max_tokens, temperature=0.0,
                               timeout=SPOKEN_TIMEOUT)
+            if tag_allow:
+                tag, again = split_tag(again, tag_allow)
+                self.last_tag = tag
             out = again if again and not foreign_script(again, language) else \
                 _keep_own_script(again or out, language)
         if not out:
@@ -463,7 +557,7 @@ class LLM:
         return re.sub(r"\s+", " ", out).strip() or None
 
     def chat(self, utterance: str, language: str = "hebrew", name: str = "",
-             recent: str = "", gender: str = "") -> str | None:
+             recent: str = "", gender: str = "", tag_allow=None) -> str | None:
         """Small talk. Not every sentence is an instruction, and answering "how are
         you" with "say it again in other words" is the rudest thing this can do."""
         lang = {"hebrew": "Hebrew", "arabic": "Arabic", "russian": "Russian"}.get(
@@ -490,6 +584,8 @@ class LLM:
             "team, not by Apple.\n"
             "Do not ask her personal questions and do not end with a question. Never "
             "comment on the time of day or on how late or early it is.\n"
+            "Never invent details of her life (plans, trips, photos, work, family, what "
+            "she is doing), and never offer to do something else instead.\n"
             "If she asks for a joke, tell one short joke.\n"
             "Your answer is read aloud by a speech synthesiser, so plain spoken words "
             "only: no markdown, no lists, no emoji, no URLs, no parentheses.\n"
@@ -500,9 +596,9 @@ class LLM:
             "or a forecast anywhere.")
         prompt = (f"Just before this, the conversation was: {recent}\n\n" if recent else "")
         prompt += f"She said: {utterance}"
-        out = self._spoken(prompt, sys_prompt, language, lang, 160, 0.7)
+        out = self._spoken(prompt, sys_prompt, language, lang, 160, 0.7, tag_allow)
         out = _drop_trailing_question(out) if out else None
-        return out[:300] if out else None
+        return _spoken_with(out[:300], self.last_tag) if out else None
 
     def report(self, question: str, items: list[dict], language: str = "hebrew",
                gender: str = "") -> str | None:
@@ -530,7 +626,7 @@ class LLM:
         return out[:350] if out else None
 
     def answer(self, question: str, language: str = "hebrew", context: str = "",
-               gender: str = "", asked_before: str = "") -> str | None:
+               gender: str = "", asked_before: str = "", tag_allow=None) -> str | None:
         """A short spoken answer. It will be read aloud, so no lists and no markdown."""
         lang = {"hebrew": "Hebrew", "arabic": "Arabic", "russian": "Russian"}.get(
             language, "English")
@@ -569,9 +665,9 @@ class LLM:
         prompt += (f"Background information, which may or may not be relevant:\n{context}\n\n"
                    if context else "")
         prompt += f"Question: {question}"
-        out = self._spoken(prompt, sys_prompt, language, lang, 320, 0.3)
+        out = self._spoken(prompt, sys_prompt, language, lang, 320, 0.3, tag_allow)
         out = _drop_trailing_question(out) if out else None
-        return out[:400] if out else None
+        return _spoken_with(out[:400], self.last_tag) if out else None
 
     def identify_song(self, request: str, language: str = "english", context: str = "",
                       singer_on: str = "", gender: str = "") -> dict | None:

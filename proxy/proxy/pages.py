@@ -9,18 +9,28 @@ for our own files under /static/ (the icon and the self-hosted fonts).
 from __future__ import annotations
 
 import html
+from datetime import date
 from pathlib import Path
 
 from .config import PROXY_ROOT, Config
 
 WEB_ROOT = PROXY_ROOT / "web"
-UPDATED = "28 September 2026"
+UPDATED = "3 October 2026"
+# Each legal page's version, shown at its top as "Version X. Last updated Y." The iPhone
+# app records these same strings when she agrees (terms_version, privacy_version), so a
+# material change bumps the date here, in the app's constants and in the proxy's
+# *_REQUIRED variables together.
+DOC_VERSIONS = {
+    "/terms": "2026-10-03",
+    "/privacy": "2026-10-03",
+}
 
 # path -> template file
 PAGES = {
     "/": "index.html",
     "/privacy": "privacy.html",
     "/terms": "terms.html",
+    "/support": "support.html",
     "/checkout/success": "checkout-success.html",
     "/checkout/cancel": "checkout-cancel.html",
 }
@@ -57,6 +67,17 @@ HTML_HEADERS = {
 
 def _fmt(n: int) -> str:
     return f"{n:,}"
+
+
+def _long_date(iso: str) -> str:
+    """"2026-10-03" -> "3 October 2026", the way the pages write a date."""
+    d = date.fromisoformat(iso)
+    return f"{d.day} {_MONTHS[d.month - 1]} {d.year}"
+
+
+# Not strftime("%B"): that follows the server's locale, and the pages are English only.
+_MONTHS = ("January", "February", "March", "April", "May", "June", "July", "August",
+           "September", "October", "November", "December")
 
 
 def static_files(root: Path = WEB_ROOT) -> dict[str, tuple[Path, str]]:
@@ -100,6 +121,9 @@ def render(cfg: Config, root: Path = WEB_ROOT) -> dict[str, tuple[bytes, str]]:
         "contact_inline": contact_inline,
         "free_requests": _fmt(cfg.daily_requests("free")),
         "pro_requests": _fmt(cfg.daily_requests("pro")),
+        "free_voice_chars": _fmt(cfg.free_tts_chars),
+        "pro_voice_day_chars": _fmt(cfg.pro_daily_tts_chars),
+        "pro_voice_month_chars": _fmt(cfg.pro_monthly_tts_chars),
         "pro_price": html.escape(cfg.pro_price_label),
         "operator": html.escape(cfg.operator_name),
         "updated": UPDATED,
@@ -115,6 +139,10 @@ def render(cfg: Config, root: Path = WEB_ROOT) -> dict[str, tuple[bytes, str]]:
             text = text.replace("{{hero}}", (root / hero).read_text().rstrip("\n"))
             text = text.replace("{{variant}}", variant)
             text = text.replace("{{robots}}", "" if path == "/" else NOINDEX)
+        if path in DOC_VERSIONS:
+            v = DOC_VERSIONS[path]
+            text = text.replace("{{version}}", v).replace(
+                "{{updated}}", _long_date(v))
         for k, v in values.items():
             text = text.replace("{{" + k + "}}", v)
         out[path] = (text.encode("utf-8"), "text/html; charset=utf-8")

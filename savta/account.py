@@ -35,7 +35,7 @@ def _baked_cloud_url() -> str:
 
 
 DEFAULT_CLOUD_URL = _baked_cloud_url()
-APP_VERSION = "1.2.3"   # keep equal to build.sh --version
+APP_VERSION = "1.2.4"   # keep equal to build.sh --version
 
 STATUS_TTL = 30.0
 # Seconds to wait before the next registration attempt after each consecutive failure.
@@ -74,14 +74,40 @@ def _digest(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()[:16]
 
 
+# The cloud's label for this device ("admin list" only). Never the Mac's own name: the
+# ComputerName she or Apple set is usually "Dana's MacBook Pro", a person's name sent
+# to a server for no reason. Only the model family, read from the hardware identifier
+# (hw.model, e.g. "MacBookPro18,3"), which nobody chooses; anything else is "Mac".
+# Longest prefix first: "MacBookPro" before "MacBook", "MacPro" before "Mac".
+MODEL_FAMILIES = (
+    ("MacBookPro", "MacBook Pro"),
+    ("MacBookAir", "MacBook Air"),
+    ("MacBook", "MacBook"),
+    ("Macmini", "Mac mini"),
+    ("MacPro", "Mac Pro"),
+    ("iMacPro", "iMac Pro"),
+    ("iMac", "iMac"),
+)
+
+
+def _model_family(model: str) -> str:
+    """"MacBookPro18,3" -> "MacBook Pro". Apple silicon models since 2022 are named
+    "Mac14,2" and say nothing more, so they (and anything unknown) are plain "Mac"."""
+    model = (model or "").strip()
+    for prefix, family in MODEL_FAMILIES:
+        if model.startswith(prefix) and model[len(prefix):][:1].isdigit():
+            return family
+    return "Mac"
+
+
 def _device_name() -> str:
     try:
-        r = subprocess.run(["scutil", "--get", "ComputerName"], capture_output=True,
+        r = subprocess.run(["sysctl", "-n", "hw.model"], capture_output=True,
                            text=True, timeout=3)
-        name = r.stdout.strip() if r.returncode == 0 else ""
+        model = r.stdout.strip() if r.returncode == 0 else ""
     except Exception:  # noqa: BLE001
-        name = ""
-    return (name or "Mac")[:64]
+        model = ""
+    return _model_family(model)
 
 
 def _call(method: str, base: str, path: str, token: str | None = None,

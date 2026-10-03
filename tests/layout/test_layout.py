@@ -116,11 +116,11 @@ LAYOUT_JS = r"""
   const W = innerWidth, H = innerHeight, panel = document.body.classList.contains('panel');
   const out = [];
   const TEXTY = el => [...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim());
-  const PARTS = '.ob-demo,.ob-bar,.ob-kbd,.ob-key,.ob-pcard,.ob-pdots,.ob-orb,.ob-quote,.ob-pill,.orb,.card,.typerow,.ob-prog';
+  const PARTS = '.ob-kcap,.ob-pcard,.ob-pdots,.ob-orb,.ob-quote,.ob-pill,.orb,.card,.typerow';
   const effOpacity = el => { let o = 1; for(let e = el; e && e.nodeType === 1; e = e.parentElement)
     o *= parseFloat(getComputedStyle(e).opacity); return o; };
   const shown = el => {
-    if(el.closest('.ob-sr,[aria-hidden="true"]:not(.ob-demo):not(.ob-pdots),#dev,.field,svg')) return false;
+    if(el.closest('.ob-sr,[aria-hidden="true"]:not(.ob-pdots),#dev,.field,svg')) return false;
     const cs = getComputedStyle(el);
     if(cs.visibility !== 'visible' || cs.display === 'none') return false;
     const r = el.getBoundingClientRect();
@@ -343,7 +343,7 @@ def open_panel(browser, lang, scheme, step=None, api=None, first_run=True, perm=
     init = INIT + f"try{{localStorage.setItem('micmic.lang',{json.dumps(lang)})}}catch(_){{}}"
     init += (f"try{{sessionStorage.setItem('micmic.onboarding.step','{step}')}}catch(_){{}}"
              if step else "try{sessionStorage.clear()}catch(_){}")
-    if perm is not None:            # which permission step 2 opens on (0, 1, 2)
+    if perm is not None:            # which of step 1's questions it opens on (0 the language, 1-3)
         init += f"try{{sessionStorage.setItem('micmic.onboarding.perm','{perm}')}}catch(_){{}}"
     ctx.add_init_script(init)
     page = ctx.new_page()
@@ -362,14 +362,13 @@ def test_onboarding(browser):
     for lang in ("en", "he"):
         for scheme in ("dark", "light"):
             tag = f"{lang}-{scheme}"
-            # 1: every phase of the demo, then the listener changing state under it,
-            #    which is what 1.0.1 got wrong.
-            ctx, page, errors = open_panel(browser, lang, scheme, step=1)
-            for ph in ("idle", "press", "work", "result"):
-                page.evaluate("""p => { const d = document.querySelector('.ob-demo'); d.dataset.p = p;
-                  d.dataset.w = '1'; document.querySelectorAll('.ob-words b').forEach(b => b.classList.add('in')); }""", ph)
-                page.wait_for_timeout(80)
-                layout(page, f"ob1-{ph}-{tag}")
+            # 1 of 4: the language, then the listener changing state under it, which
+            #    is what 1.0.1 got wrong.
+            ctx, page, errors = open_panel(browser, lang, scheme, step=1, api=Api(perms=NEW_MAC))
+            check(f"the first screen is the language, 1 of 4 ({tag})",
+                  page.get_attribute(".ob-pcard", "data-k") == "language"
+                  and page.text_content(".ob-pofn") == page.evaluate("t('obPermOf')").replace("{n}", "1"))
+            layout(page, f"ob1-language-{tag}")
             for s in ("listening", "thinking", "acting", "idle"):
                 page.evaluate("s => window.panelState(s, '')", s)
                 page.wait_for_timeout(60)
@@ -379,38 +378,43 @@ def test_onboarding(browser):
                 "getComputedStyle(document.getElementById('typebox')).visibility === 'hidden' && "
                 "getComputedStyle(document.getElementById('gear')).visibility === 'hidden' && "
                 "getComputedStyle(document.getElementById('newchat')).visibility === 'hidden'"))
-            check(f"no page errors, step 1 ({tag})", not errors, errors[:2])
+            check(f"no page errors, the language ({tag})", not errors, errors[:2])
             ctx.close()
 
-            # 2: one permission at a time, each in every state it can be in
+            # 2-4 of 4: one permission at a time, each in every state it can be in
             perm_step_pictures(browser, lang, scheme, tag)
 
-            # 3: waiting, thinking, and heard
+            # Try it: how to talk (her key), waiting, thinking, and heard
             api = Api()
-            ctx, page, errors = open_panel(browser, lang, scheme, step=3, api=api)
-            layout(page, f"ob3-idle-{tag}")
+            ctx, page, errors = open_panel(browser, lang, scheme, step=2, api=api)
+            page.wait_for_selector(".ob-howto:not([hidden])", timeout=4000)
+            layout(page, f"ob2-try-idle-{tag}")
             page.evaluate("window.panelState('thinking','')")
             page.wait_for_timeout(80)
-            layout(page, f"ob3-thinking-{tag}")
+            layout(page, f"ob2-try-thinking-{tag}")
             api.heard = "What time is it?" if lang == "en" else "מה השעה?"
             page.wait_for_selector(".ob-step.ok", timeout=5000)
             page.wait_for_timeout(200)
-            layout(page, f"ob3-heard-{tag}")
-            check(f"no page errors, step 3 ({tag})", not errors, errors[:2])
+            layout(page, f"ob2-try-heard-{tag}")
+            check(f"no page errors, Try it ({tag})", not errors, errors[:2])
             ctx.close()
 
     # The longest copy the page has, so a language nobody looked at cannot wrap a
-    # button into the next one. Russian's permission lines are the longest of all.
+    # button into the next one. Russian's permission lines and its hold-or-tap line
+    # are the longest of all.
     for lang in ("ru", "ar"):
-        for step in (1, 2, 3):
-            ctx, page, _ = open_panel(browser, lang, "dark", step=step,
-                                      api=Api(perms=NEW_MAC) if step == 2 else None)
-            page.evaluate("window.panelState('listening','')")
-            page.wait_for_timeout(60)
-            layout(page, f"ob{step}-{lang}-dark")
-            ctx.close()
         for scheme in ("dark", "light"):
-            perm_step_pictures(browser, lang, scheme, f"{lang}-{scheme}")
+            tag = f"{lang}-{scheme}"
+            for name, step, perm in (("language", 1, 0), ("try", 2, None)):
+                ctx, page, _ = open_panel(browser, lang, scheme, step=step, perm=perm,
+                                          api=Api(perms=NEW_MAC) if step == 1 else None)
+                if step == 2:
+                    page.wait_for_selector(".ob-howto:not([hidden])", timeout=4000)
+                page.evaluate("window.panelState('listening','')")
+                page.wait_for_timeout(60)
+                layout(page, f"ob{step}-{name}-{tag}")
+                ctx.close()
+            perm_step_pictures(browser, lang, scheme, tag)
 
 
 NEW_MAC = {"microphone": "not_asked", "speech": "not_asked", "accessibility": "denied", "ready": False}
@@ -455,7 +459,7 @@ def test_first_run_fixes(browser):
                                      ("noax-clash", NO_AX, {"clash": CLASH})):
                 api = Api(perms=dict(perms))
                 api.onboarding = onb
-                ctx, page, errors = open_panel(browser, lang, scheme, step=3, api=api)
+                ctx, page, errors = open_panel(browser, lang, scheme, step=2, api=api)
                 page.wait_for_timeout(300)
                 if name == "clash":
                     page.wait_for_selector(".ob-clash:not([hidden])", timeout=3000)
@@ -465,55 +469,64 @@ def test_first_run_fixes(browser):
                 if "noax" in name:
                     page.wait_for_selector(".ob-nokey:not([hidden])", timeout=3000)
                     check(f"without Accessibility the circle leads ({name}, {tag})",
-                          page.text_content('.ob-step[data-n="3"] .ob-sub') == page.evaluate("t('ob3SubClick')"))
-                layout(page, f"ob3-{name}-{tag}")
+                          page.text_content('.ob-step[data-n="2"] .ob-sub') == page.evaluate("t('ob3SubClick')"))
+                if "clash" in name:
+                    check(f"while the key is another app's, no hold or tap teaching ({name}, {tag})",
+                          page.is_hidden(".ob-howto"))
+                layout(page, f"ob2-{name}-{tag}")
                 if name == "clash":
                     page.click(".ob-clash-other")
                     page.wait_for_timeout(120)
-                    layout(page, f"ob3-clash-keys-{tag}")
+                    layout(page, f"ob2-clash-keys-{tag}")
                     page.click(".ob-clash-use")
                     page.wait_for_timeout(200)
                     check(f"Use saves the hotkey setting ({tag})",
                           ("settings", {"hotkey": "right-command"}) in api.posts, api.posts)
                     check(f"and the line goes ({tag})", page.is_hidden(".ob-clash"))
+                    page.wait_for_selector(".ob-howto:not([hidden])", timeout=3000)
+                    check(f"and the new key is taught: ⌘, hold or tap ({tag})",
+                          page.text_content(".ob-kcap") == "⌘" and "⌘" in page.inner_text(".ob-howto"))
+                    layout(page, f"ob2-clash-chosen-{tag}")
                 check(f"no page errors, step 3 {name} ({tag})", not errors, errors[:2])
                 ctx.close()
 
 
 def perm_step_pictures(browser, lang, scheme, tag):
-    """Step 2, one permission at a time: to be asked, asking (macOS's dialog up), on
-    (the tick), refused (Open Settings and Continue), and step 3 without a way to hear
-    her. Every picture measured."""
+    """Step 1's permissions, 2 to 4 of 4, one at a time: to be asked, asking (macOS's
+    dialog up), on (the tick), refused (Open Settings and Continue), and Try it without
+    a way to hear her. Every picture measured."""
     for i, k in enumerate(("microphone", "speech", "accessibility")):
         api = Api(perms=dict(NEW_MAC))
-        ctx, page, errors = open_panel(browser, lang, scheme, step=2, api=api, perm=i)
+        ctx, page, errors = open_panel(browser, lang, scheme, step=1, api=api, perm=i + 1)
         page.wait_for_selector(f'.ob-pcard[data-k="{k}"][data-s="ask"]', timeout=5000)
         page.wait_for_timeout(120)
-        layout(page, f"ob2-{k}-ask-{tag}")
+        check(f"{k} is {i + 2} of 4 ({tag})",
+              page.text_content(".ob-pofn") == page.evaluate("t('obPermOf')").replace("{n}", str(i + 2)))
+        layout(page, f"ob1-{k}-ask-{tag}")
         page.click(".ob-allow")
         page.wait_for_selector('.ob-pcard[data-s="asking"]', timeout=3000)
         page.wait_for_timeout(120)
-        layout(page, f"ob2-{k}-asking-{tag}")
-        check(f"step 2 posts {k}, and only {k} ({tag})",
+        layout(page, f"ob1-{k}-asking-{tag}")
+        check(f"step 1 posts {k}, and only {k} ({tag})",
               [b for pth, b in api.posts if pth == "permissions/request"] == [{"k": k}], api.posts)
         if k != "accessibility":
             api.perms = {**NEW_MAC, k: "denied"}
             page.wait_for_selector('.ob-pcard[data-s="denied"]', timeout=3000)
             page.wait_for_timeout(120)
-            layout(page, f"ob2-{k}-denied-{tag}")
+            layout(page, f"ob1-{k}-denied-{tag}")
         api.perms = {**NEW_MAC, k: "granted"}
         page.wait_for_selector('.ob-pcard[data-s="granted"]', timeout=3000)
-        layout(page, f"ob2-{k}-granted-{tag}")
-        check(f"no page errors, step 2 {k} ({tag})", not errors, errors[:2])
+        layout(page, f"ob1-{k}-granted-{tag}")
+        check(f"no page errors, step 1 {k} ({tag})", not errors, errors[:2])
         ctx.close()
     for off in ("microphone", "speech"):
         api = Api(perms={"microphone": "granted", "speech": "granted", "accessibility": "granted",
                          off: "denied", "ready": False})
-        ctx, page, errors = open_panel(browser, lang, scheme, step=3, api=api)
+        ctx, page, errors = open_panel(browser, lang, scheme, step=2, api=api)
         page.wait_for_selector(".ob-nohear:not([hidden])", timeout=4000)
         page.wait_for_timeout(120)
-        layout(page, f"ob3-no-{off}-{tag}")
-        check(f"step 3 without {off}: Done, not a wait for a turn that cannot come ({tag})",
+        layout(page, f"ob2-no-{off}-{tag}")
+        check(f"Try it without {off}: Done, not a wait for a turn that cannot come ({tag})",
               page.is_visible('[data-go="done"]') and not page.is_visible(".ob-pill"))
         ctx.close()
 
@@ -591,8 +604,51 @@ def test_settings_permissions(browser):
             ctx.close()
 
 
+BACKUP = {"combo": "ctrl+opt+m", "enabled": True, "registered": True, "status": 0,
+          "error": "", "taken_by": "", "usable": True}
+
+
+def test_backup_key_pictures(browser):
+    """Accessibility off, ⌃⌥ M registered (no permission needed): Try it teaches it
+    under the circle, and Settings > Permissions says it with a Turn on button. All four
+    languages, dark and light."""
+    for lang in ("he", "en", "ar", "ru"):
+        for scheme in ("dark", "light"):
+            tag = f"{lang}-{scheme}"
+            api = Api(perms={**NO_AX, "backup_hotkey": BACKUP})
+            api.onboarding = {}
+            ctx, page, errors = open_panel(browser, lang, scheme, step=2, api=api)
+            page.wait_for_selector(".ob-nokey:not([hidden]) .ob-bkey", timeout=3000)
+            page.wait_for_timeout(200)
+            check(f"Try it names the backup key ({tag})",
+                  "⌃⌥ M" in page.text_content(".ob-nokey .ob-bkey")
+                  and page.is_visible(".ob-nokey .ob-bkey"), page.text_content(".ob-nokey"))
+            layout(page, f"ob3-backup-{tag}")
+            check(f"no page errors, Try it backup key ({tag})", not errors, errors[:2])
+            ctx.close()
+
+            api = Api(perms={**NO_AX, "backup_hotkey": BACKUP})
+            ctx, page, errors = open_panel(browser, lang, scheme, api=api, first_run=False)
+            dismiss_onboarding(page)
+            page.click("#gear")
+            page.wait_for_selector("#hBackup:not([hidden])", timeout=3000)
+            page.evaluate("document.getElementById('hBackup').scrollIntoView({block:'center'})")
+            page.wait_for_timeout(150)
+            layout(page, f"settings-backup-{tag}")
+            page.click("#backupAx")
+            page.wait_for_timeout(150)
+            check(f"its Turn on posts accessibility ({tag})",
+                  ("permissions/request", {"k": "accessibility"}) in api.posts, api.posts)
+            check(f"no page errors, settings backup key ({tag})", not errors, errors[:2])
+            ctx.close()
+
+
+BAR_WORDS = {"en": ("Play some music", "Playing music"), "he": ("תשימי קצת מוזיקה", "מנגנת מוזיקה"),
+             "ar": ("شغّل شوية موسيقى", "عم شغّل موسيقى"), "ru": ("Включи музыку", "Включаю музыку")}
+
+
 def test_bar(browser):
-    for lang in ("en", "he"):
+    for lang in ("en", "he", "ar", "ru"):
         for scheme in ("dark", "light"):
             tag = f"{lang}-{scheme}"
             ctx = browser.new_context(viewport={"width": 640, "height": 64}, color_scheme=scheme,
@@ -608,19 +664,29 @@ def test_bar(browser):
                 h = page.evaluate("Math.ceil(document.querySelector('.stage').getBoundingClientRect().height)")
                 page.set_viewport_size({"width": 640, "height": h})
                 page.wait_for_timeout(60)
+            ask, answer = BAR_WORDS[lang]
             for label, code in (
                     ("listening", "barState('listening','')"),
-                    ("heard", "barHeard(%s)" % json.dumps("Play some music" if lang == "en" else "תשימי קצת מוזיקה")),
+                    # A tapped turn: how to send it, with her key, and Send.
+                    ("tap-hint", "barHint('right-command')"),
+                    ("tap-hint-backup", "barHint('ctrl+opt+m')"),
+                    ("tap-hint-heard", "barHeard(%s)" % json.dumps(ask)),
+                    ("tap-hint-menu", "barHint('')"),
+                    ("heard", "barState('listening',''); barHeard(%s)" % json.dumps(ask)),
                     ("working", "barState('thinking','')"),
-                    ("result", "barResult(%s, '')" % json.dumps("Playing music" if lang == "en" else "מנגנת מוזיקה"))):
+                    ("result", "barResult(%s, '')" % json.dumps(answer))):
                 page.evaluate(code)
                 fit()
                 layout(page, f"bar-{label}-{tag}")
+                if label.startswith("tap-hint"):
+                    check(f"bar {label} shows the hint and Send ({tag})", page.evaluate(
+                        "['taphint','barsend'].every(i => { const e = document.getElementById(i);"
+                        " return getComputedStyle(e).display !== 'none' && e.getBoundingClientRect().width > 0; })"))
             ctx.close()
 
 
 def test_selection_and_drag(browser):
-    ctx, page, _ = open_panel(browser, "en", "dark", step=3)
+    ctx, page, _ = open_panel(browser, "en", "dark", step=2)
     # WebKit honours only the prefixed property; Chromium reports both.
     sel = page.evaluate("""(() => { const cs = getComputedStyle(document.querySelector('.ob-step.on .ob-sub'));
       return [cs.webkitUserSelect || '', cs.userSelect || '']; })()""")
@@ -1079,28 +1145,26 @@ def test_lead_items(browser):
           page.evaluate("document.documentElement.lang") == "he")
     ctx.close()
 
-    # 3: the onboarding keyboard presses the shortcut she has
-    for spec, want in (("right-option", ["⌥"]), ("right-command", ["⌘"]), ("right-control", ["⌃"]),
-                       ("right-shift", ["⇧"]), ("fn-fn", ["fn"]), ("cmd+shift+m", ["⌘", "⇧", "M"])):
+    # 3: Try it draws the shortcut she has, and says how that one is used
+    for spec, want in (("right-option", "⌥"), ("right-command", "⌘"), ("right-control", "⌃"),
+                       ("right-shift", "⇧"), ("fn-fn", "Fn"), ("cmd+shift+m", "⌘⇧M")):
         for lang in ("en", "he"):
             api = Api(); api.config = {"hotkey": spec}
-            ctx, page, errors = open_panel(browser, lang, "dark", step=1, api=api)
-            page.evaluate("""() => { const d = document.querySelector('.ob-demo'); d.dataset.p = 'press'; d.dataset.w = '1';
-              document.querySelectorAll('.ob-words b').forEach(b => b.classList.add('in')); }""")
-            page.wait_for_timeout(100)
-            hot = page.evaluate("[...document.querySelectorAll('.ob-kbd .ob-hot em')].map(e => e.textContent)")
-            check(f"3: the keyboard presses {spec} ({lang})", hot == want, hot)
-            title = page.text_content(".ob-step.on .ob-title")
+            ctx, page, errors = open_panel(browser, lang, "dark", step=2, api=api)
+            page.wait_for_selector(".ob-howto:not([hidden])", timeout=4000)
+            cap = page.text_content(".ob-kcap")
+            check(f"3: Try it draws {spec} as the key ({lang})", cap == want, cap)
+            sub, how = page.text_content(".ob-step.on .ob-sub"), page.text_content(".ob-howto")
             if spec != "right-option":
-                check(f"3: the headline names it too ({spec}, {lang})", "⌥" not in title, title)
+                check(f"3: no line names ⌥ instead ({spec}, {lang})", "⌥" not in sub + how, (sub, how))
             if spec in ("fn-fn", "cmd+shift+m"):
-                sub = page.text_content(".ob-step.on .ob-sub")
                 check(f"3: no 'on the right' for a key that is not ({spec}, {lang})",
-                      not any(w in sub for w in ("right", "ימין")), sub)
+                      not any(w in how for w in ("right", "ימין")), how)
             if spec == "cmd+shift+m":
                 check(f"3: a combination reads in key order inside the sentence ({lang})",
-                      "\u2066⌘⇧M\u2069" in title, title)
-            layout(page, f"ob1-key-{spec}-{lang}")
+                      page.evaluate("getComputedStyle(document.querySelector('.ob-kcap')).direction") == "ltr"
+                      and cap == "⌘⇧M", cap)
+            layout(page, f"ob2-key-{spec}-{lang}")
             ctx.close()
 
 
@@ -1274,7 +1338,7 @@ def main():
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)    # bundled Chromium, never channel="chrome"
             try:
-                for t in (test_onboarding, test_first_run_fixes, test_settings_permissions, test_panel_states, test_results, test_web_task,
+                for t in (test_onboarding, test_first_run_fixes, test_settings_permissions, test_backup_key_pictures, test_panel_states, test_results, test_web_task,
                           test_panel_details, test_lead_items, test_qa_v2, test_bar, test_guide,
                           test_selection_and_drag):
                     print(f"\n-- {t.__name__}")

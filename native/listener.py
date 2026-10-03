@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import math
 import os
 import re
 import subprocess
@@ -123,7 +124,19 @@ SETTINGS_POLL = 3.0     # how soon a language or hotkey chosen in the page takes
 # A turn: she pressed the key (or MicMic asked her something) and the microphone is
 # hers until she says she is done. Silence never ends a key turn: she was cut off
 # mid-thought by the 1.2s endpoint above, which is for the wake word only.
-HOLD_MIN = 0.35         # held at least this long = hold-to-talk; shorter = tap-toggle
+HOLD_MIN = 0.35         # held at least this long = hold-to-talk; shorter = tap-toggle.
+                        # Measured between the key's own press and release events
+                        # (their timestamps), never between our handlers running: a
+                        # press whose turn took 0.4 s to open had its release waiting
+                        # in the queue, and a quick tap was read as a hold and sent at
+                        # once ("turn open (ptt)", 3 ms later "turn finishing: released",
+                        # the owner's log 2026-10-03 13:13:40).
+# A key turn with less audio than this, or with no speech energy in it, is never sent:
+# it closes quietly as "nothing said". Those 3 ms turns went out as "okay" and "mm",
+# which the local model reads out of silence, and got a chat reply.
+MIN_TURN_AUDIO = 0.4    # seconds of audio the turn must have heard
+SPEECH_RMS = 0.004      # a 2048-frame buffer this loud (about -48 dBFS) may be a voice
+SPEECH_MIN_S = 0.15     # ...and there must be this much of it (one key click is 0.04 s)
 PTT_MAX = 30.0          # a turn nobody ends is ended here. At 120 s a tap turn
                         # nobody tapped again sent two minutes of the room.
 TAP_SILENCE = 1.8       # a TAP turn (not a held key) ends this long after her words stop
@@ -229,8 +242,8 @@ LANG = {
         "hotkey_ax": "⚠ קיצור המקלדת צריך הרשאת נגישות",
         "wait_mic": "עוד לא מקשיבה: המיקרופון כבוי",
         "wait_speech": "עוד לא מקשיבה: זיהוי הדיבור כבוי",
-        "jit_mic": "MicMic צריכה את המיקרופון כדי לשמוע אותך.",
-        "jit_speech": "MicMic צריכה זיהוי דיבור כדי להפוך את הקול שלך לטקסט ב-Mac.",
+        "jit_mic": "MicMic צריכה את המיקרופון כדי לשמוע אותך. בינתיים אפשר לכתוב לה בחלון של MicMic.",
+        "jit_speech": "MicMic צריכה זיהוי דיבור כדי להפוך את הקול שלך לטקסט ב-Mac. בינתיים אפשר לכתוב לה בחלון של MicMic.",
         "jit_mic_off": "המיקרופון כבוי עבור MicMic. אפשר להפעיל אותו בהגדרות המערכת, ו-MicMic תתחיל להקשיב לבד.",
         "jit_speech_off": "זיהוי הדיבור כבוי עבור MicMic. אפשר להפעיל אותו בהגדרות המערכת, ו-MicMic תתחיל להקשיב לבד.",
         "allow_mic": "לאפשר מיקרופון",
@@ -239,6 +252,24 @@ LANG = {
         "not_now": "לא עכשיו",
         "jit_contacts": "כדי למצוא את מי שביקשת, MicMic צריכה להסתכל באנשי הקשר שלך. מיד אחר כך macOS ישאל.",
         "continue": "המשך",
+        # PERMISSION_FALLBACKS.md P2-1, P0-20, P0-17, P0-18.
+        "jit_mic_quiet": "המיקרופון כבוי עבור MicMic. אפשר לכתוב לה בחלון של MicMic.",
+        "jit_speech_quiet": "זיהוי הדיבור כבוי עבור MicMic. אפשר לכתוב לה בחלון של MicMic.",
+        "jit_contacts_two": "כדי למצוא את מי שביקשת, MicMic צריכה להסתכל באנשי הקשר שלך. macOS ישאל פעם או פעמיים.",
+        "jit_auto_messages": "כדי לשלוח את זה, MicMic משתמשת באפליקציית ההודעות. מיד אחר כך macOS ישאל.",
+        "jit_auto_notes": "כדי לרשום את זה, MicMic משתמשת באפליקציית הפתקים. מיד אחר כך macOS ישאל.",
+        "jit_auto_reminders": "כדי לקבוע את התזכורת, MicMic משתמשת באפליקציית התזכורות. מיד אחר כך macOS ישאל.",
+        "jit_auto_calendar": "כדי להוסיף את זה, MicMic משתמשת ביומן. מיד אחר כך macOS ישאל.",
+        "jit_auto_music": "כדי לשלוט במוזיקה, MicMic משתמשת באפליקציית המוזיקה. מיד אחר כך macOS ישאל.",
+        "jit_auto_spotify": "כדי לשלוט ב-Spotify, MicMic צריכה גישה ל-Spotify. מיד אחר כך macOS ישאל.",
+        "jit_auto_chrome": "כדי לעבוד עם הלשוניות ב-Chrome, MicMic צריכה גישה ל-Chrome. מיד אחר כך macOS ישאל.",
+        "jit_auto_system_events": "כדי ללחוץ על מקשים בשבילך, MicMic משתמשת ב-System Events. מיד אחר כך macOS ישאל.",
+        "jit_auto_facetime": "כדי להשתמש ב-FaceTime בשבילך, MicMic צריכה גישה ל-FaceTime. מיד אחר כך macOS ישאל.",
+        "jit_auto_contacts": "כדי למצוא אנשים באנשי הקשר, MicMic משתמשת באפליקציית אנשי הקשר. מיד אחר כך macOS ישאל.",
+        "jit_auto_other": "כדי לעשות את זה, MicMic צריכה גישה ל-{app}. מיד אחר כך macOS ישאל.",
+        "jit_screen": "כדי לצלם את המסך בעצמה, MicMic צריכה הרשאת הקלטת מסך. מיד אחר כך macOS ישאל.",
+        "jit_screen_off": "כדי לצלם את המסך בעצמה, MicMic צריכה הרשאת הקלטת מסך. צריך להפעיל שם את MicMic.",
+        "jit_screen_restart": "MicMic תצטרך להפעיל את עצמה מחדש אחרי שמפעילים את ההרשאה.",
     },
     "ar": {
         "speech_denied": "لا أملك إذن التعرف على الصوت. يجب الموافقة في إعدادات النظام.",
@@ -269,8 +300,8 @@ LANG = {
         "hotkey_ax": "⚠ الاختصار يحتاج إذن تسهيلات الاستخدام",
         "wait_mic": "لا أستمع بعد: الميكروفون مغلق",
         "wait_speech": "لا أستمع بعد: التعرّف على الكلام مغلق",
-        "jit_mic": "يحتاج MicMic إلى الميكروفون حتى يسمعك.",
-        "jit_speech": "يحتاج MicMic إلى التعرّف على الكلام ليحوّل صوتك إلى نص على جهاز Mac.",
+        "jit_mic": "يحتاج MicMic إلى الميكروفون حتى يسمعك. وحتى ذلك الحين، يمكنك الكتابة إليه في نافذة MicMic.",
+        "jit_speech": "يحتاج MicMic إلى التعرّف على الكلام ليحوّل صوتك إلى نص على جهاز Mac. وحتى ذلك الحين، يمكنك الكتابة إليه في نافذة MicMic.",
         "jit_mic_off": "الميكروفون مغلق لـ MicMic. يمكنك تشغيله في إعدادات النظام، وسيبدأ MicMic بالاستماع وحده.",
         "jit_speech_off": "التعرّف على الكلام مغلق لـ MicMic. يمكنك تشغيله في إعدادات النظام، وسيبدأ MicMic بالاستماع وحده.",
         "allow_mic": "السماح بالميكروفون",
@@ -279,6 +310,23 @@ LANG = {
         "not_now": "ليس الآن",
         "jit_contacts": "لإيجاد الشخص الذي ذكرته، يحتاج MicMic إلى النظر في جهات الاتصال. بعدها سيسألك macOS.",
         "continue": "متابعة",
+        "jit_mic_quiet": "الميكروفون مغلق لـ MicMic. يمكنك الكتابة إليه في نافذة MicMic.",
+        "jit_speech_quiet": "التعرّف على الكلام مغلق لـ MicMic. يمكنك الكتابة إليه في نافذة MicMic.",
+        "jit_contacts_two": "لإيجاد الشخص الذي ذكرته، يحتاج MicMic إلى النظر في جهات الاتصال. سيسألك macOS مرة أو مرتين.",
+        "jit_auto_messages": "لإرسالها، يستخدم MicMic تطبيق الرسائل. بعدها سيسألك macOS.",
+        "jit_auto_notes": "لتدوينها، يستخدم MicMic تطبيق الملاحظات. بعدها سيسألك macOS.",
+        "jit_auto_reminders": "لضبط التذكير، يستخدم MicMic تطبيق التذكيرات. بعدها سيسألك macOS.",
+        "jit_auto_calendar": "لإضافتها، يستخدم MicMic التقويم. بعدها سيسألك macOS.",
+        "jit_auto_music": "للتحكم في الموسيقى، يستخدم MicMic تطبيق الموسيقى. بعدها سيسألك macOS.",
+        "jit_auto_spotify": "للتحكم في Spotify، يحتاج MicMic إلى الوصول إليه. بعدها سيسألك macOS.",
+        "jit_auto_chrome": "للتعامل مع علامات التبويب في Chrome، يحتاج MicMic إلى الوصول إليه. بعدها سيسألك macOS.",
+        "jit_auto_system_events": "للضغط على المفاتيح نيابةً عنك، يستخدم MicMic أداة System Events. بعدها سيسألك macOS.",
+        "jit_auto_facetime": "لاستخدام FaceTime نيابةً عنك، يحتاج MicMic إلى الوصول إليه. بعدها سيسألك macOS.",
+        "jit_auto_contacts": "لإيجاد الأشخاص في جهات الاتصال، يستخدم MicMic تطبيق جهات الاتصال. بعدها سيسألك macOS.",
+        "jit_auto_other": "لفعل ذلك، يحتاج MicMic إلى الوصول إلى {app}. بعدها سيسألك macOS.",
+        "jit_screen": "لالتقاط صور الشاشة بنفسه، يحتاج MicMic إلى إذن تسجيل الشاشة. بعدها سيسألك macOS.",
+        "jit_screen_off": "لالتقاط صور الشاشة بنفسه، يحتاج MicMic إلى إذن تسجيل الشاشة. يجب تشغيل MicMic هناك.",
+        "jit_screen_restart": "سيحتاج MicMic إلى إعادة التشغيل بعد تشغيل الإذن.",
     },
     "ru": {
         "speech_denied": "Нет разрешения на распознавание речи. Разрешите его в настройках системы.",
@@ -309,8 +357,8 @@ LANG = {
         "hotkey_ax": "⚠ Сочетанию клавиш нужен универсальный доступ",
         "wait_mic": "пока не слушаю: микрофон выключен",
         "wait_speech": "пока не слушаю: распознавание речи выключено",
-        "jit_mic": "MicMic нужен микрофон, чтобы слышать вас.",
-        "jit_speech": "MicMic нужно распознавание речи, чтобы превращать ваш голос в текст на Mac.",
+        "jit_mic": "MicMic нужен микрофон, чтобы слышать вас. А пока можно писать ему в окне MicMic.",
+        "jit_speech": "MicMic нужно распознавание речи, чтобы превращать ваш голос в текст на Mac. А пока можно писать ему в окне MicMic.",
         "jit_mic_off": "Микрофон для MicMic выключен. Включите его в Системных настройках, и MicMic начнёт слушать сам.",
         "jit_speech_off": "Распознавание речи для MicMic выключено. Включите его в Системных настройках, и MicMic начнёт слушать сам.",
         "allow_mic": "Разрешить микрофон",
@@ -319,6 +367,23 @@ LANG = {
         "not_now": "Не сейчас",
         "jit_contacts": "Чтобы найти человека, которого вы назвали, MicMic нужно посмотреть ваши контакты. Затем macOS спросит вас.",
         "continue": "Продолжить",
+        "jit_mic_quiet": "Микрофон для MicMic выключен. Можно писать ему в окне MicMic.",
+        "jit_speech_quiet": "Распознавание речи для MicMic выключено. Можно писать ему в окне MicMic.",
+        "jit_contacts_two": "Чтобы найти человека, которого вы назвали, MicMic нужно посмотреть ваши контакты. macOS спросит вас один или два раза.",
+        "jit_auto_messages": "Чтобы отправить сообщение, MicMic использует приложение «Сообщения». Затем macOS спросит вас.",
+        "jit_auto_notes": "Чтобы записать это, MicMic использует приложение «Заметки». Затем macOS спросит вас.",
+        "jit_auto_reminders": "Чтобы поставить напоминание, MicMic использует приложение «Напоминания». Затем macOS спросит вас.",
+        "jit_auto_calendar": "Чтобы добавить это, MicMic использует «Календарь». Затем macOS спросит вас.",
+        "jit_auto_music": "Чтобы управлять музыкой, MicMic использует приложение «Музыка». Затем macOS спросит вас.",
+        "jit_auto_spotify": "Чтобы управлять Spotify, MicMic нужен к нему доступ. Затем macOS спросит вас.",
+        "jit_auto_chrome": "Чтобы работать с вкладками Chrome, MicMic нужен к нему доступ. Затем macOS спросит вас.",
+        "jit_auto_system_events": "Чтобы нажимать клавиши за вас, MicMic использует System Events. Затем macOS спросит вас.",
+        "jit_auto_facetime": "Чтобы пользоваться FaceTime за вас, MicMic нужен к нему доступ. Затем macOS спросит вас.",
+        "jit_auto_contacts": "Чтобы находить людей в контактах, MicMic использует приложение «Контакты». Затем macOS спросит вас.",
+        "jit_auto_other": "Для этого MicMic нужен доступ к {app}. Затем macOS спросит вас.",
+        "jit_screen": "Чтобы самому делать снимки экрана, MicMic нужна запись экрана. Затем macOS спросит вас.",
+        "jit_screen_off": "Чтобы самому делать снимки экрана, MicMic нужна запись экрана. Включите там MicMic.",
+        "jit_screen_restart": "MicMic нужно будет перезапустить после того, как вы включите разрешение.",
     },
     "en": {
         "speech_denied": "Speech recognition is not allowed. Please approve it in System Settings.",
@@ -349,8 +414,8 @@ LANG = {
         "hotkey_ax": "⚠ Hotkey needs Accessibility permission",
         "wait_mic": "not listening yet: the microphone is off",
         "wait_speech": "not listening yet: speech recognition is off",
-        "jit_mic": "MicMic needs the microphone so it can hear you.",
-        "jit_speech": "MicMic needs Speech Recognition to turn your voice into text on your Mac.",
+        "jit_mic": "MicMic needs the microphone so it can hear you. Until then, you can type to it in the MicMic window.",
+        "jit_speech": "MicMic needs Speech Recognition to turn your voice into text on your Mac. Until then, you can type to it in the MicMic window.",
         "jit_mic_off": "The microphone is off for MicMic. Turn it on in System Settings, and MicMic starts listening by itself.",
         "jit_speech_off": "Speech Recognition is off for MicMic. Turn it on in System Settings, and MicMic starts listening by itself.",
         "allow_mic": "Allow microphone",
@@ -359,6 +424,23 @@ LANG = {
         "not_now": "Not now",
         "jit_contacts": "To find the person you named, MicMic needs to look at your contacts. macOS will ask you next.",
         "continue": "Continue",
+        "jit_mic_quiet": "The microphone is off for MicMic. You can type to it in the MicMic window.",
+        "jit_speech_quiet": "Speech Recognition is off for MicMic. You can type to it in the MicMic window.",
+        "jit_contacts_two": "To find the person you named, MicMic needs to look at your contacts. macOS will ask you once or twice.",
+        "jit_auto_messages": "To send it, MicMic uses the Messages app. macOS will ask you next.",
+        "jit_auto_notes": "To write it down, MicMic uses the Notes app. macOS will ask you next.",
+        "jit_auto_reminders": "To set the reminder, MicMic uses the Reminders app. macOS will ask you next.",
+        "jit_auto_calendar": "To add it, MicMic uses Calendar. macOS will ask you next.",
+        "jit_auto_music": "To control your music, MicMic uses the Music app. macOS will ask you next.",
+        "jit_auto_spotify": "To control Spotify, MicMic needs to talk to it. macOS will ask you next.",
+        "jit_auto_chrome": "To work with your Chrome tabs, MicMic needs to talk to Chrome. macOS will ask you next.",
+        "jit_auto_system_events": "To press keys for you, MicMic uses System Events. macOS will ask you next.",
+        "jit_auto_facetime": "To use FaceTime for you, MicMic needs to talk to it. macOS will ask you next.",
+        "jit_auto_contacts": "To find people in your contacts, MicMic uses the Contacts app. macOS will ask you next.",
+        "jit_auto_other": "To do that, MicMic needs to talk to {app}. macOS will ask you next.",
+        "jit_screen": "To take screenshots itself, MicMic needs Screen Recording. macOS will ask you next.",
+        "jit_screen_off": "To take screenshots itself, MicMic needs Screen Recording. Turn MicMic on there.",
+        "jit_screen_restart": "MicMic will need to restart after you turn it on.",
     },
 }
 
@@ -601,6 +683,42 @@ TAP_KEYS = {
 }
 
 
+def buffer_rms(data) -> float:
+    """The loudness of one buffer of float samples, from every fourth one (plenty for a
+    yes/no about speech, and a quarter of the work on the audio thread)."""
+    part = data[::4]
+    if not part:
+        return 0.0
+    return math.sqrt(sum(x * x for x in part) / len(part))
+
+
+def _event_time(event):
+    """An NSEvent's own time (seconds since boot), or None. Hold or tap is decided by
+    the key's press and release times, never by when our handlers got to run."""
+    try:
+        return float(event.timestamp()) or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+_KEY_GLYPH = {"cmd": "⌘", "command": "⌘", "ctrl": "⌃", "control": "⌃", "opt": "⌥",
+              "alt": "⌥", "option": "⌥", "shift": "⇧"}
+
+
+def key_name(spec: str) -> str:
+    """How a log line names a talk key: "right ⌘", "⌃⌥ M", "Fn twice", "" for none."""
+    spec = str(spec or "").strip().lower()
+    if spec in TAP_KEYS:
+        return "right " + _KEY_GLYPH[spec.split("-", 1)[1]]
+    if spec in ("fn-fn", "fn+fn", "globe-globe", "globe+globe"):
+        return "Fn twice"
+    if "+" in spec:
+        *mods, key = spec.split("+")
+        return "".join(_KEY_GLYPH.get(m, m) for m in mods) + " " + \
+            ("Space" if key == "space" else key.upper())
+    return spec
+
+
 class TapDetector:
     """Pressed and released within MAX_S with nothing else pressed in between.
 
@@ -669,6 +787,8 @@ SETTINGS_PANES = {
     "microphone": "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
     "speech": "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition",
     "accessibility": ACCESSIBILITY_PANE,
+    "screen_recording": ("x-apple.systempreferences:"
+                         "com.apple.preference.security?Privacy_ScreenCapture"),
 }
 
 
@@ -703,6 +823,36 @@ def ask_speech(done) -> None:
     Speech.SFSpeechRecognizer.requestAuthorization_(done)
 
 
+_libCG = None
+
+
+def request_screen_capture() -> bool:
+    """macOS's Screen Recording request: the first time, its dialog, and the one call
+    that puts MicMic in that list (a preflight never does). Later calls only answer.
+    Called only after MicMic's own line and her Continue (ask_screen_recording)."""
+    global _libCG
+    try:
+        if _libCG is None:
+            _libCG = ctypes.CDLL(
+                "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+            _libCG.CGRequestScreenCaptureAccess.restype = ctypes.c_bool
+        return bool(_libCG.CGRequestScreenCaptureAccess())
+    except Exception as e:  # noqa: BLE001
+        log(f"could not ask for Screen Recording: {e!r}")
+        return False
+
+
+def whatsapp_installed() -> bool:
+    """Is the WhatsApp app on this Mac? LaunchServices only: never a look inside its
+    data, which is the very thing macOS asks about."""
+    try:
+        ws = AppKit.NSWorkspace.sharedWorkspace()
+        return any(ws.URLForApplicationWithBundleIdentifier_(b) is not None
+                   for b in ("net.whatsapp.WhatsApp", "desktop.WhatsApp"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def open_settings_pane(k: str) -> None:
     url = SETTINGS_PANES.get(k)
     if url:
@@ -728,6 +878,41 @@ def ask_alert(message: str, ok: str, cancel: str, on_ok, after=None) -> None:
     on_main(show)
 
 
+def frontmost_app():
+    """The app in front before MicMic's line takes focus, or None when that is MicMic
+    itself (or it cannot be read). Read only."""
+    try:
+        app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+        if app is None or int(app.processIdentifier()) == os.getpid():
+            return None
+        return app
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def give_focus_back(app) -> None:
+    """Hand focus back to the app she was in before MicMic's line (main thread, from
+    the alert's close). ask_alert activates MicMic, a regular app now, so without this
+    the keystroke an Automation line was shown for (System Events' Cmd-W, a pressed
+    key) would land in MicMic instead of her app."""
+    if app is None:
+        return
+    try:
+        me = AppKit.NSApp()
+        if hasattr(me, "yieldActivationToApplication_"):   # macOS 14+: cooperative
+            me.yieldActivationToApplication_(app)
+        app.activateWithOptions_(getattr(AppKit, "NSApplicationActivateIgnoringOtherApps", 2))
+    except Exception as e:  # noqa: BLE001
+        log(f"could not hand focus back: {e!r}")
+
+
+def is_front(app) -> bool:
+    try:
+        return bool(app.isActive())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def fetch_permission_request() -> str:
     """For a listener that is its own process: the one permission the page asked for
     since the last look, or "" (savta/onboarding_api.py, /api/permissions/next)."""
@@ -745,7 +930,19 @@ RECOVERY_POLL_SLOW = 10.0  # after RECOVERY_FAST_FOR seconds of looking
 RECOVERY_FAST_FOR = 600.0
 PENDING_POLL = 0.5         # a separate-process listener collecting the page's clicks
 JIT_REPEAT = 3.0           # the just-in-time line, at most this often
+JIT_QUIET_FOR = 600.0      # after her "Not now": a quiet bar line, no modal, this long
 CONTACTS_WAIT = 30.0       # her answer to the contacts line, inside the turn's 45 s
+CONSENT_WAIT = 30.0        # her answer to an Automation or Screen Recording line
+FOCUS_WAIT = 1.0           # after that line: her app back in front, at most this long
+# savta/consent.py's targets -> the line for each (LANG "jit_auto_*"). Any other
+# target gets jit_auto_other, which names it.
+AUTOMATION_LINES = {
+    "Messages": "jit_auto_messages", "Notes": "jit_auto_notes",
+    "Reminders": "jit_auto_reminders", "Calendar": "jit_auto_calendar",
+    "Music": "jit_auto_music", "Spotify": "jit_auto_spotify",
+    "Google Chrome": "jit_auto_chrome", "System Events": "jit_auto_system_events",
+    "FaceTime": "jit_auto_facetime", "Contacts": "jit_auto_contacts",
+}
 
 
 def parse_combo(spec: str) -> tuple[int, int]:
@@ -766,6 +963,218 @@ def parse_combo(spec: str) -> tuple[int, int]:
             raise ValueError(f"unknown modifier {m!r} in MICMIC_HOTKEY {spec!r}")
         mask |= bit
     return code, mask
+
+
+# ------------------------------------------------------------------ the backup talk key
+# The owner (2026-10-03): the talk key (a lone right ⌘ or ⌥) is an NSEvent global
+# monitor, which hears nothing until Accessibility is on. So MicMic ALWAYS also
+# registers a system hot key, ⌃⌥ M by default ("M for MicMic"), through Carbon's
+# RegisterEventHotKey: no TCC permission at all, and it reaches MicMic from any app.
+# Pressed and released drive the same press()/release() as the talk key: hold sends on
+# release, a tap listens until the next tap, the same turn_open/turn_closed contract.
+# "backup_hotkey" in micmic.config.json or Settings changes it; "off" turns it off.
+# Not ⌃⌥ Space (the first default): on every Mac with two keyboard languages that is
+# macOS's "Select next source in Input menu", which takes the press first.
+DEFAULT_BACKUP_HOTKEY = "ctrl+opt+m"
+BACKUP_OFF = ("", "off", "none", "false")
+BACKUP_STATUS_URL = SERVER.rstrip("/") + "/api/backup_hotkey_status"
+# NSEvent modifier bit (parse_combo's) -> Carbon's cmdKey, shiftKey, optionKey, controlKey.
+_CARBON_MODS = {1 << 20: 1 << 8, 1 << 17: 1 << 9, 1 << 19: 1 << 11, 1 << 18: 1 << 12}
+# macOS's own shortcuts (System Settings > Keyboard > Keyboard Shortcuts) by their id in
+# com.apple.symbolichotkeys. Any ENABLED one on the same keys wins over a hot key: macOS
+# takes the press first, and the hot key never hears it. Every entry is checked; these
+# ids only get a readable name, any other is "macos_shortcut_<id>".
+_MACOS_SHORTCUTS = {60: "input_sources_previous", 61: "input_sources_next",
+                    64: "spotlight", 65: "spotlight_window"}
+
+
+def carbon_combo(spec: str) -> tuple[int, int]:
+    """"ctrl+opt+m" -> (virtual key code, Carbon modifier mask): M is kVK_ANSI_M, 0x2E. A backup key with no
+    modifier would fire while she types, so one is required. Raises ValueError."""
+    code, mask = parse_combo(spec)
+    if not mask:
+        raise ValueError(f"backup hot key {spec!r} needs a modifier")
+    mods = 0
+    for ns_bit, carbon_bit in _CARBON_MODS.items():
+        if mask & ns_bit:
+            mods |= carbon_bit
+    return code, mods
+
+
+def _fourcc(s: str) -> int:
+    return int.from_bytes(s.encode("ascii"), "big")
+
+
+class CarbonHotKeys:
+    """The one seam to HIToolbox's hot keys, over ctypes. Tests replace the module's
+    HOTKEYS with a fake and never load Carbon.
+
+    One event handler on the application event target, installed the first time a key
+    is registered and kept for the life of the process; each key has its own id, and
+    the handler hands kEventHotKeyPressed / kEventHotKeyReleased to that key's
+    callbacks. Carbon delivers them on the main thread from the app's own run loop
+    (NSApplication's), so the callbacks run there. The ctypes callback object is held
+    here: freed, the next press would jump into released memory."""
+    NO_ERR = 0
+    EXISTS = -9878        # eventHotKeyExistsErr: another app holds it exclusively
+    INVALID = -9879       # eventHotKeyInvalidErr
+    PRESSED, RELEASED = 5, 6
+    SIGNATURE = _fourcc("MicM")
+
+    def __init__(self) -> None:
+        self._lib = None
+        self._upp = None
+        self._handler = None
+        self._keys: dict[int, tuple] = {}    # id -> (EventHotKeyRef, on_press, on_release)
+        # on_press / on_release are called with the event's time (seconds since boot)
+        self._next_id = 1
+
+    def _load(self):
+        if self._lib is not None:
+            return self._lib
+        c = ctypes
+        lib = c.CDLL("/System/Library/Frameworks/Carbon.framework/Carbon")
+
+        class EventTypeSpec(c.Structure):
+            _fields_ = [("eventClass", c.c_uint32), ("eventKind", c.c_uint32)]
+
+        class EventHotKeyID(c.Structure):
+            _fields_ = [("signature", c.c_uint32), ("id", c.c_uint32)]
+
+        self._EventTypeSpec, self._EventHotKeyID = EventTypeSpec, EventHotKeyID
+        self._Handler = c.CFUNCTYPE(c.c_int32, c.c_void_p, c.c_void_p, c.c_void_p)
+        lib.GetApplicationEventTarget.restype = c.c_void_p
+        lib.GetApplicationEventTarget.argtypes = []
+        lib.InstallEventHandler.restype = c.c_int32
+        lib.InstallEventHandler.argtypes = [c.c_void_p, self._Handler, c.c_ulong,
+                                            c.POINTER(EventTypeSpec), c.c_void_p,
+                                            c.POINTER(c.c_void_p)]
+        lib.RegisterEventHotKey.restype = c.c_int32
+        lib.RegisterEventHotKey.argtypes = [c.c_uint32, c.c_uint32, EventHotKeyID,
+                                            c.c_void_p, c.c_uint32, c.POINTER(c.c_void_p)]
+        lib.UnregisterEventHotKey.restype = c.c_int32
+        lib.UnregisterEventHotKey.argtypes = [c.c_void_p]
+        lib.GetEventKind.restype = c.c_uint32
+        lib.GetEventKind.argtypes = [c.c_void_p]
+        lib.GetEventTime.restype = c.c_double       # EventTime: seconds since boot
+        lib.GetEventTime.argtypes = [c.c_void_p]
+        lib.GetEventParameter.restype = c.c_int32
+        lib.GetEventParameter.argtypes = [c.c_void_p, c.c_uint32, c.c_uint32,
+                                          c.POINTER(c.c_uint32), c.c_ulong,
+                                          c.POINTER(c.c_ulong), c.c_void_p]
+        self._lib = lib
+        return lib
+
+    def _on_event(self, _call_ref, event, _user) -> int:
+        try:
+            lib = self._lib
+            hk = self._EventHotKeyID()
+            st = lib.GetEventParameter(event, _fourcc("----"), _fourcc("hkid"), None,
+                                       ctypes.sizeof(hk), None, ctypes.byref(hk))
+            if st != self.NO_ERR or hk.signature != self.SIGNATURE:
+                return -9874                        # eventNotHandledErr: not ours
+            entry = self._keys.get(int(hk.id))
+            kind = int(lib.GetEventKind(event))
+            if entry is not None:
+                fn = entry[1] if kind == self.PRESSED else entry[2] if kind == self.RELEASED else None
+                if fn is not None:
+                    # The key's own time, not the moment this handler got to run: a tap
+                    # whose press took a while to handle is still a tap.
+                    try:
+                        at = float(lib.GetEventTime(event)) or None
+                    except Exception:  # noqa: BLE001
+                        at = None
+                    fn(at)
+        except Exception as e:  # noqa: BLE001
+            log(f"backup hot key handler error: {e!r}")
+        return self.NO_ERR
+
+    def _install(self) -> int:
+        if self._handler is not None:
+            return self.NO_ERR
+        lib = self._load()
+        specs = (self._EventTypeSpec * 2)(
+            self._EventTypeSpec(_fourcc("keyb"), self.PRESSED),
+            self._EventTypeSpec(_fourcc("keyb"), self.RELEASED))
+        self._upp = self._Handler(self._on_event)
+        ref = ctypes.c_void_p()
+        st = lib.InstallEventHandler(lib.GetApplicationEventTarget(), self._upp, 2, specs,
+                                     None, ctypes.byref(ref))
+        if st == self.NO_ERR:
+            self._handler = ref
+        return int(st)
+
+    def register(self, code: int, mods: int, on_press, on_release) -> tuple[int, object]:
+        """(OSStatus, token). 0 is registered; anything else is not, and the token is None."""
+        st = self._install()
+        if st != self.NO_ERR:
+            return st, None
+        lib = self._lib
+        kid = self._next_id
+        self._next_id += 1
+        ref = ctypes.c_void_p()
+        st = lib.RegisterEventHotKey(code, mods, self._EventHotKeyID(self.SIGNATURE, kid),
+                                     lib.GetApplicationEventTarget(), 0, ctypes.byref(ref))
+        if st != self.NO_ERR:
+            return int(st), None
+        self._keys[kid] = (ref, on_press, on_release)
+        return self.NO_ERR, kid
+
+    def unregister(self, token) -> int:
+        entry = self._keys.pop(token, None)
+        if entry is None or self._lib is None:
+            return self.NO_ERR
+        return int(self._lib.UnregisterEventHotKey(entry[0]))
+
+
+HOTKEYS = CarbonHotKeys()
+
+
+def shortcut_in_table(table, code: int, ns_mask: int) -> str:
+    """Pure: the name of an ENABLED entry of an AppleSymbolicHotKeys table on exactly
+    this key code and these modifiers, else "". Each entry's value.parameters is
+    (character, virtual key code, NSEvent modifier mask)."""
+    relevant = (1 << 20) | (1 << 17) | (1 << 19) | (1 << 18)
+    for sid in sorted(table, key=lambda k: int(k) if str(k).isdigit() else 1 << 30):
+        entry = table[sid]
+        try:
+            if not entry or not int(entry.get("enabled", 0)):
+                continue
+            params = list((entry.get("value") or {}).get("parameters") or [])
+            if len(params) >= 3 and int(params[1]) == code \
+                    and (int(params[2]) & relevant) == (ns_mask & relevant):
+                n = int(sid) if str(sid).isdigit() else sid
+                return _MACOS_SHORTCUTS.get(n, f"macos_shortcut_{sid}")
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return ""
+
+
+def macos_shortcut_on(code: int, ns_mask: int) -> str:
+    """The name of an ENABLED macOS shortcut on exactly these keys, else "". Read only
+    (com.apple.symbolichotkeys, the list System Settings > Keyboard Shortcuts writes).
+    On a Mac with two keyboard languages, "Select next source in Input menu" is ⌃⌥ Space
+    out of the box, and macOS takes that press before any hot key hears it. A shortcut
+    never customised may be missing from the file; only what is written there is seen."""
+    try:
+        table = Foundation.CFPreferencesCopyAppValue(
+            "AppleSymbolicHotKeys", "com.apple.symbolichotkeys") or {}
+        return shortcut_in_table(table, code, ns_mask)
+    except Exception as e:  # noqa: BLE001
+        log(f"could not read macOS's own shortcuts: {e!r}")
+    return ""
+
+
+def post_backup_hotkey_status(state: dict) -> None:
+    """Tell the server what the backup key really is, so the page says the truth (GET
+    /api/permissions and /api/config "backup_hotkey")."""
+    try:
+        req = urllib.request.Request(
+            BACKUP_STATUS_URL, data=json.dumps(state).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        urllib.request.urlopen(req, timeout=4).close()
+    except Exception as e:  # noqa: BLE001
+        log(f"backup hot key: could not report status: {e!r}")
 
 
 # --------------------------------------------------------------------------- server
@@ -906,6 +1315,14 @@ def ensure_server() -> None:
         _place.set_quitter(lambda: on_main(_quit_for_move))
     except Exception as e:  # noqa: BLE001
         log(f"permission requests will be collected over HTTP instead: {e!r}")
+    # MicMic's own line before macOS asks to let it control an app, or to record the
+    # screen (savta/consent.py): only this process can show it.
+    try:
+        from savta import consent as _consent
+        _consent.register(LISTENER.explain_automation)
+        _consent.register_screen(LISTENER.ask_screen_recording)
+    except Exception as e:  # noqa: BLE001
+        log(f"no line before Automation and Screen Recording prompts: {e!r}")
     threading.Thread(target=_server.main, name="micmic-server", daemon=True).start()
     for _ in range(40):                    # 10s, the same budget the shell launcher used
         time.sleep(0.25)
@@ -1109,7 +1526,10 @@ class Listener:
         self.turn_samples = None      # list of floats at input_format's rate, or None
         self.local_result = None      # (text, confidence) from the local read, "" if it failed
         self.input_format = None
-        self.swallow_release = False  # the press that ENDED a tap turn: ignore its release
+        # Per key ("key" = the talk key, "backup" = ⌃⌥ M): a press that ended a tap turn,
+        # or came while one was being sent. Its release is ignored. One flag for both
+        # keys let the backup key's release swallow the talk key's, and the other way.
+        self.swallow: dict[str, bool] = {}
         self.engine = None
         self.gen = 0                  # session generation; stale callbacks are dropped
         self.request = None
@@ -1147,6 +1567,12 @@ class Listener:
         self.status_line = None
         self.hotkey_monitors = []      # so a changed hotkey can unregister the old ones
         self.hotkey_active = ""        # what is currently registered
+        # The backup talk key (CarbonHotKeys above): what is registered, its token, and
+        # the state the page is told (combo, enabled, registered, status, error, taken_by).
+        self.backup_spec = None
+        self.backup_token = None
+        self.backup_state: dict = {}
+        self.backup_down = False
         self.panel = None
         self.bar = None
         self.web_follow = None         # the browser task the bar is following, if any
@@ -1174,6 +1600,10 @@ class Listener:
         self._recovery_polling = False
         self._serving_requests = False
         self._jit_at = 0.0
+        self._jit_quiet: dict = {}    # "microphone"/"speech" -> when her "Not now" began
+        self._consent_up: set = set()  # Automation targets whose line is on screen now
+        self._screen_up = False        # the Screen Recording line is on screen now
+        self.last_focus_back = None    # after the last Automation Continue: her app in front?
 
     # ------------------------------------------------------------------ menu bar
     def build_status_item(self, delegate) -> None:
@@ -1269,6 +1699,8 @@ class Listener:
         if MicMicBar is not None and self.bar is None:
             try:
                 self.bar = MicMicBar(SERVER)       # kept warm and hidden until needed
+                # Its Send button, shown while a tapped turn listens: the second tap.
+                self.bar.on_send = lambda: on_main(self.send_now)
             except Exception as e:  # noqa: BLE001
                 log(f"could not build the bar: {e!r} — the panel will be used instead")
                 self.bar = None
@@ -1335,6 +1767,16 @@ class Listener:
         elif mode == "panel" and self.panel is not None:
             # Not activated: "this" means the app she was in, which must stay in front.
             on_main(lambda: self.panel.show(activate=False))
+
+    def view_tap_hint(self) -> None:
+        """A tapped turn is listening: the bar says how to send it ("Tap ⌘ again to
+        send", with her real key) and shows Send. A held key shows nothing extra. The
+        next state the bar is given (thinking, idle) takes it away."""
+        t = self.turn
+        if t is None or t["finish_at"] or self.bar is None or self.display_mode() != "bar":
+            return
+        spec = self.key_spec(t.get("src"))
+        on_main(lambda: self.bar.set_hint(spec))
 
     def view_heard(self, text: str) -> None:
         if self.display_mode() == "bar" and text:
@@ -1501,6 +1943,9 @@ class Listener:
         the click's answer or from the poll, with no relaunch."""
         if not DEFAULT_LOCALE and self.cfg.get("language_hint"):
             self.locale = str(self.cfg["language_hint"])
+        # Always, whatever is granted: it needs no permission, and without
+        # Accessibility it is the only key that reaches MicMic from another app.
+        self.register_backup_hotkey()
         self.serve_permission_requests()
         self.speech_auth = speech_status()
         self.mic_auth = mic_status() == 3
@@ -1595,26 +2040,203 @@ class Listener:
                 on_main(self.panel.show)
             self.poll_permission_recovery()
             return
+        # Her "Not now" holds for JIT_QUIET_FOR: each press after it gets one quiet line
+        # on the bar (and in the menu), never the modal again every few seconds
+        # (PERMISSION_FALLBACKS.md P2-1). The line is counted as a "Not now" from the
+        # moment it shows; her yes takes that back.
+        since = self._jit_quiet.get(k)
+        if since is not None and now - since < JIT_QUIET_FOR:
+            log(f"she tried to talk without {k} after Not now: the quiet line, no alert")
+            self.view_quiet(L(f"jit_{short}_quiet", self.locale))
+            self.poll_permission_recovery()
+            return
         log(f"she tried to talk without {k}: explaining, then asking only if she agrees")
+        self._jit_quiet[k] = now
+
+        def yes(act):
+            def go():
+                self._jit_quiet.pop(k, None)
+                act()
+            return go
         if st == 0:
             ask_alert(L(f"jit_{short}", self.locale), L(f"allow_{short}", self.locale),
-                      L("not_now", self.locale), lambda: self.request_permission(k))
+                      L("not_now", self.locale), yes(lambda: self.request_permission(k)))
         else:
             ask_alert(L(f"jit_{short}_off", self.locale), L("open_settings", self.locale),
-                      L("not_now", self.locale), lambda: open_settings_pane(k))
+                      L("not_now", self.locale), yes(lambda: open_settings_pane(k)))
         self.poll_permission_recovery()
+
+    def view_quiet(self, text: str) -> None:
+        """A permission line that needs no answer: the menu's status line, and the bar
+        (or the window, where she can type) without taking focus from her app."""
+        self.set_status(text)
+        if self.bar is not None and self.display_mode() == "bar":
+            def show():
+                self.bar.show()
+                self.bar.set_result(text, None)
+            on_main(show)
+        elif self.panel is not None and self.display_mode() == "panel":
+            on_main(lambda: self.panel.show(activate=False))
+
+    def _line_lang(self) -> str:
+        return str((self.cfg or {}).get("language_hint") or self.locale)
 
     def confirm_contacts(self) -> bool:
         """MicMic's one line before macOS first asks about her contacts, which happens
         on her first request about a person (savta/actions/contacts.py). Called on the
-        server's thread for that turn, which waits for her answer; never the main one."""
+        server's thread for that turn, which waits for her answer; never the main one.
+        With WhatsApp on this Mac one Continue can bring two macOS dialogs (WhatsApp's
+        data, then the Contacts app), and the line says so (P0-20)."""
         done, ans = threading.Event(), {"yes": False}
-        loc = str((self.cfg or {}).get("language_hint") or self.locale)
-        log("first read of her contacts: explaining before macOS asks")
-        ask_alert(L("jit_contacts", loc), L("continue", loc), L("not_now", loc),
-                  lambda: ans.update(yes=True), after=done.set)
+        loc = self._line_lang()
+        two = whatsapp_installed()
+        log("first read of her contacts: explaining before macOS asks"
+            + (" (WhatsApp is here: once or twice)" if two else ""))
+        ask_alert(L("jit_contacts_two" if two else "jit_contacts", loc), L("continue", loc),
+                  L("not_now", loc), lambda: ans.update(yes=True), after=done.set)
         done.wait(CONTACTS_WAIT)
+        if ans["yes"]:
+            # That line already named the Contacts app's prompt: no second line for it.
+            try:
+                from savta import consent as _consent
+                _consent.remember("Contacts", True)
+            except Exception:  # noqa: BLE001
+                pass
         return ans["yes"]
+
+    def explain_automation(self, target: str):
+        """MicMic's one line before macOS first asks to let it control `target`
+        (savta/consent.py explain, from the Apple Event's caller). Runs on that
+        caller's thread, which waits for her answer: True Continue, False Not now, None
+        no answer within CONSENT_WAIT (the turn moves on; a later answer is kept for
+        the run through consent.remember). Never on the main thread, which shows the
+        alert. The alert takes focus; on close it goes back to the app she was in, and
+        a Continue returns only once that app is in front again (or FOCUS_WAIT passed),
+        so the Apple Event that follows (System Events' Cmd-W, a key press) is not
+        aimed at MicMic. Whether it is in front is reported, never assumed: see
+        last_focus_back."""
+        target = str(target or "").strip()
+        if target in self._consent_up:
+            return None                   # its line is still on screen: no second one
+        loc = self._line_lang()
+        key = AUTOMATION_LINES.get(target)
+        msg = L(key, loc) if key else L("jit_auto_other", loc, app=target)
+        done, ans = threading.Event(), {"yes": None}
+        # Her click and the timeout are decided under one lock: either the waiting turn
+        # gets the answer, or the answer goes to consent.remember. Never neither.
+        gate, st = threading.Lock(), {"closed": False, "late": False}
+        prev = frontmost_app()
+
+        def said_yes():
+            ans["yes"] = True
+
+        def closed():
+            self._consent_up.discard(target)
+            with gate:
+                if ans["yes"] is None:
+                    ans["yes"] = False
+                st["closed"] = True
+                was_late = st["late"]
+            if was_late:                  # the turn moved on: keep it for the run,
+                try:                      # a late Not now as much as a late Continue
+                    from savta import consent as _consent
+                    _consent.remember(target, bool(ans["yes"]))
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                give_focus_back(prev)     # the turn is still waiting: her app, in front
+            done.set()
+        self._consent_up.add(target)
+        self.last_focus_back = None
+        log(f"first Apple Event to {target}: explaining before macOS asks")
+        try:
+            ask_alert(msg, L("continue", loc), L("not_now", loc), said_yes, after=closed)
+        except Exception:
+            self._consent_up.discard(target)
+            raise
+        if not done.wait(CONSENT_WAIT):
+            with gate:
+                st["late"] = not st["closed"]
+            if st["late"]:
+                log(f"no answer to the {target} line in {CONSENT_WAIT:.0f} s: the turn moves on")
+                return None
+            done.wait(1.0)                # closed() is finishing: focus handed back
+        if ans["yes"] and prev is not None:
+            t0 = time.time()
+            while not is_front(prev) and time.time() - t0 < FOCUS_WAIT:
+                time.sleep(0.05)
+            self.last_focus_back = is_front(prev)
+            if not self.last_focus_back:
+                log(f"after the {target} line her app is not back in front yet")
+        return bool(ans["yes"])
+
+    def ask_screen_recording(self, first_time: bool):
+        """Screen Recording, after MicMic's line (savta/consent.py ask_screen_recording).
+
+        First time on this Mac: the line, then on Continue macOS's own request, which
+        shows its dialog and puts MicMic in the Screen Recording list; then the restart
+        line on the bar (not a second modal over macOS's dialog). Asked on an earlier
+        run: macOS will not ask again, so the line offers the pane, and the restart
+        line follows. True Continue, False Not now, None no answer in time, or its line
+        is still up from an earlier ask (never a second alert over it). An answer after
+        CONSENT_WAIT still counts: a late Continue has asked macOS, so it is recorded
+        (consent.note_screen_asked) and the restart line shows; a late Not now holds
+        for the run (consent.note_screen_declined)."""
+        if self._screen_up:
+            return None                   # its line is still on screen: no second one
+        loc = self._line_lang()
+        done, ans = threading.Event(), {"yes": None}
+        gate, st = threading.Lock(), {"closed": False, "late": False}
+
+        def tell_consent(yes: bool) -> None:
+            try:
+                from savta import consent as _consent
+                (_consent.note_screen_asked if yes else _consent.note_screen_declined)()
+            except Exception:  # noqa: BLE001
+                pass
+
+        def closed():
+            self._screen_up = False
+            with gate:
+                if ans["yes"] is None:
+                    ans["yes"] = False
+                st["closed"] = True
+                was_late = st["late"]
+            if was_late:
+                tell_consent(bool(ans["yes"]))
+                if ans["yes"]:
+                    self.view_quiet(L("jit_screen_restart", loc))
+            done.set()
+
+        def answered_yes(also):
+            def yes():
+                ans["yes"] = True
+                request_screen_capture()  # first time: macOS's dialog; later: the list
+                also()
+            return yes
+        self._screen_up = True
+        try:
+            if first_time:
+                log("Screen Recording: explaining before macOS asks")
+                ask_alert(L("jit_screen", loc), L("continue", loc), L("not_now", loc),
+                          answered_yes(lambda: None), after=closed)
+            else:
+                log("Screen Recording: asked before, offering its pane")
+                ask_alert(L("jit_screen_off", loc), L("open_settings", loc), L("not_now", loc),
+                          answered_yes(lambda: open_settings_pane("screen_recording")),
+                          after=closed)
+        except Exception:
+            self._screen_up = False
+            raise
+        if not done.wait(CONSENT_WAIT):
+            with gate:
+                st["late"] = not st["closed"]
+            if st["late"]:
+                log(f"no answer to the Screen Recording line in {CONSENT_WAIT:.0f} s")
+                return None
+        if ans["yes"]:
+            self.view_quiet(L("jit_screen_restart", loc))
+        return bool(ans["yes"])
 
     def poll_permission_recovery(self) -> None:
         """Start listening the moment the microphone and speech are both allowed, with
@@ -1722,6 +2344,7 @@ class Listener:
         threading.Thread(target=self.watchdog, daemon=True).start()
         self.install_recovery_observers()
         self.register_hotkey()
+        self.register_backup_hotkey()    # the config just read may name another, or "off"
         self.update_hotkey_status()
         self.set_status(L("listening", self.locale), "◉")
 
@@ -1791,6 +2414,7 @@ class Listener:
             fmt = node.outputFormatForBus_(0)
             self.input_format = fmt
             log(f"input format: {fmt.sampleRate():.0f} Hz, {fmt.channelCount()} ch")
+            rate = float(fmt.sampleRate()) or 48000.0
 
             def tap(buf, when):
                 self.audio_at = time.time()      # alive, whatever happens to the buffer
@@ -1808,12 +2432,21 @@ class Listener:
                             self.tap_error = repr(e)
                             log(f"audio tap cannot feed the recognizer: {e!r}")
                 keep = self.turn_samples
-                if keep is not None:
+                t = self.turn
+                counting = t is not None and not t["finish_at"]
+                if keep is not None or counting:
                     try:
                         # Channel 0 as floats: ~0.1 ms for a 2048-frame buffer.
-                        keep.extend(buf.floatChannelData()[0].as_tuple(buf.frameLength()))
+                        n = int(buf.frameLength())
+                        data = buf.floatChannelData()[0].as_tuple(n)
                     except Exception:  # noqa: BLE001
+                        data = None
                         self.turn_samples = None
+                    if data is not None:
+                        if keep is not None:
+                            keep.extend(data)
+                        if counting:
+                            self.count_turn_audio(t, n / rate, buffer_rms(data))
 
             node.installTapOnBus_bufferSize_format_block_(0, 2048, fmt, tap)
             self.tap_installed = True
@@ -1892,6 +2525,7 @@ class Listener:
             return                       # server hiccup: keep what is already working
         self.cfg = cfg
         self.register_hotkey()           # no-op unless the spec actually changed
+        on_main(self.register_backup_hotkey)   # Carbon wants the main thread; same no-op
         if not DEFAULT_LOCALE and cfg.get("language_hint"):
             self.set_locale(str(cfg["language_hint"]))
         self.apply_local_asr(cfg)
@@ -1994,15 +2628,18 @@ class Listener:
                         state["chord"] = True
                         on_main(self.cancel_chord)
                     return
+                at = _event_time(event)
                 if flags & flag:
                     if flags & others:
                         return                      # already part of a chord
+                    if state["down"]:
+                        return                      # the same press reported twice
                     state["down"], state["chord"] = True, False
-                    on_main(self.press)
+                    on_main(lambda: self.press("key", at))
                 elif state["down"]:
                     state["down"] = False
                     if not state["chord"]:
-                        on_main(self.release)
+                        on_main(lambda: self.release("key", at))
             except Exception as e:  # noqa: BLE001
                 log(f"hotkey handler error: {e!r}")
         self._install(AppKit.NSEventMaskFlagsChanged | AppKit.NSEventMaskKeyDown, handler)
@@ -2017,7 +2654,7 @@ class Listener:
                     now = time.time()
                     if now - state["last"] < 0.5:
                         state["last"] = 0.0
-                        on_main(self.push_to_talk)
+                        on_main(lambda: self.push_to_talk("key"))
                     else:
                         state["last"] = now
                 state["was_down"] = down
@@ -2040,28 +2677,141 @@ class Listener:
                     if event.isARepeat():
                         return                      # holding it: one press, not thirty
                     if (int(event.modifierFlags()) & relevant) == want_mask:
+                        at = _event_time(event)
                         state["down"] = True
-                        on_main(self.press)
+                        on_main(lambda: self.press("key", at))
                 elif state["down"]:                 # key up; the modifiers may be gone
+                    at = _event_time(event)
                     state["down"] = False
-                    on_main(self.release)
+                    on_main(lambda: self.release("key", at))
             except Exception as e:  # noqa: BLE001
                 log(f"hotkey handler error: {e!r}")
         self._install(AppKit.NSEventMaskKeyDown | AppKit.NSEventMaskKeyUp, handler)
 
-    def push_to_talk(self) -> None:
-        """"Listen now" in the menu and the double-Fn hotkey: no key to hold, so it is
-        always a tap turn. Pressed again while open, it sends."""
+    # --- the backup talk key: no permission, so it works without Accessibility ------
+    def backup_spec_wanted(self) -> str:
+        v = self.cfg.get("backup_hotkey", DEFAULT_BACKUP_HOTKEY)
+        if isinstance(v, dict):                  # GET /api/config's object: its combo
+            v = v.get("combo", DEFAULT_BACKUP_HOTKEY)
+        v = str(v if v is not None else "").strip().lower()
+        return "off" if v in BACKUP_OFF else v
+
+    def register_backup_hotkey(self, force: bool = False) -> None:
+        """Register the backup key (default ⌃⌥ M) as a Carbon hot key, on the main
+        thread. A no-op while the wanted combo is unchanged, except that the state is
+        re-posted when the server's copy is behind (a server restarted under us).
+        Turned off or changed, the old one is unregistered first."""
+        spec = self.backup_spec_wanted()
+        if spec == self.backup_spec and not force:
+            self.report_backup_hotkey()
+            return
+        self.unregister_backup_hotkey()
+        self.backup_spec = spec
+        state = {"combo": spec, "enabled": spec != "off", "registered": False,
+                 "status": 0, "error": "", "taken_by": ""}
+        if spec != "off":
+            try:
+                code, mods = carbon_combo(spec)
+            except ValueError as e:
+                state["error"] = "invalid"
+                log(f"backup talk key {spec!r} is not a key combination: {e}")
+            else:
+                try:
+                    st, token = HOTKEYS.register(code, mods, self._backup_pressed,
+                                                 self._backup_released)
+                except Exception as e:  # noqa: BLE001
+                    st, token = None, None
+                    state["error"] = "failed"
+                    log(f"backup talk key {spec!r}: could not register: {e!r}")
+                if st == CarbonHotKeys.NO_ERR and token is not None:
+                    self.backup_token = token
+                    state["registered"] = True
+                    owner = macos_shortcut_on(code, parse_combo(spec)[1])
+                    state["taken_by"] = owner
+                    log(f"backup talk key: {spec} registered (no permission needed)"
+                        + (f", but macOS's own {owner} shortcut is on the same keys and "
+                           f"takes the press first" if owner else ""))
+                elif st is not None:
+                    state["status"] = int(st)
+                    state["error"] = "taken" if st == CarbonHotKeys.EXISTS else "failed"
+                    log(f"backup talk key {spec}: RegisterEventHotKey returned {st} ("
+                        + ("another app holds it" if st == CarbonHotKeys.EXISTS
+                           else "not registered") + ")")
+        else:
+            log("backup talk key: off")
+        self.backup_state = state
+        self.report_backup_hotkey(force=True)
+
+    def unregister_backup_hotkey(self) -> None:
+        if self.backup_token is not None:
+            try:
+                st = HOTKEYS.unregister(self.backup_token)
+                if st:
+                    log(f"backup talk key: UnregisterEventHotKey returned {st}")
+            except Exception as e:  # noqa: BLE001
+                log(f"backup talk key: could not unregister: {e!r}")
+            self.backup_token = None
+        self.backup_down = False
+        if self.backup_state.get("registered"):
+            self.backup_state = {**self.backup_state, "registered": False}
+
+    def report_backup_hotkey(self, force: bool = False) -> None:
+        """Post the state when it changed, or when the server's copy in the config differs
+        (it keeps it in memory only). Off the main thread: never a wait on the run loop."""
+        mine = dict(self.backup_state)
+        if not mine:
+            return
+        seen = self.cfg.get("backup_hotkey")
+        if not force:
+            if not isinstance(seen, dict):
+                return                            # a server that does not know the key
+            if all(seen.get(k) == mine.get(k) for k in ("registered", "error", "taken_by")):
+                return
+        threading.Thread(target=post_backup_hotkey_status, args=(mine,), daemon=True).start()
+
+    def _backup_pressed(self, at=None) -> None:
+        if self.backup_down:
+            t = self.turn
+            if t is not None and t.get("src") == "backup" and t["mode"] is None \
+                    and not t["finish_at"]:
+                return                            # held: Carbon repeating, not a press
+            # Down, but no turn of its is being held: its release never came (a Mac
+            # that slept with the keys down, a release lost to another app's grab).
+            # This is a new press, not a repeat, or the key would stay dead.
+            log("backup talk key: pressed again without a release, taken as a new press")
+        self.backup_down = True
+        self.press("backup", at)
+
+    def _backup_released(self, at=None) -> None:
+        if not self.backup_down:
+            return                                # a release with no press: not ours
+        self.backup_down = False
+        self.release("backup", at)
+
+    def key_spec(self, src) -> str:
+        """The spec of the key behind a turn: "right-command", "ctrl+opt+m", "fn-fn", or
+        "" when no key opened it (the menu, the window's circle)."""
+        if src == "backup":
+            return self.backup_spec or DEFAULT_BACKUP_HOTKEY
+        if src == "key":
+            return self.hotkey_active or HOTKEY_OVERRIDE or DEFAULT_HOTKEY
+        return ""
+
+    def push_to_talk(self, src: str = "menu") -> None:
+        """"Listen now" in the menu, the window's circle and the double-Fn hotkey: no key
+        to hold, so it is always a tap turn. Pressed again while open, it sends."""
         t = self.turn
         if t is not None and t["kind"] == "ptt" and t["finish_at"] == 0.0:
             self.finish_turn("pressed again")
             return
-        if self._take_over_followup("toggle"):
+        if self._take_over_followup("toggle", src):
+            self.view_tap_hint()
             return
-        if self.start_turn("ptt", "tap"):
+        if self.start_turn("ptt", "tap", src=src):
             self.turn["mode"] = "toggle"
+            self.view_tap_hint()
 
-    def _take_over_followup(self, mode) -> bool:
+    def _take_over_followup(self, mode, src=None, at=None) -> bool:
         """MicMic had opened the microphone for her answer and she pressed the key as
         well (the log shows it every time: "turn open (followup)", 0.3-0.7 s later
         "turn open (ptt)"). It is the same turn, now hers: restarting it threw away
@@ -2071,44 +2821,88 @@ class Listener:
             return False
         now = time.time()
         with self.lock:
-            t.update(kind="ptt", down_at=now, mode=mode, deadline=now + PTT_MAX)
+            t.update(kind="ptt", down_at=now, mode=mode, deadline=now + PTT_MAX,
+                     src=src, key_at=at)
             self.last_change = now
         stop_speaking()
         if mode is None:
-            self.swallow_release = False          # its release decides hold or tap
-        log("turn: the key took over the open followup turn")
+            self.swallow[src] = False             # its release decides hold or tap
+        log(f"turn: {key_name(self.key_spec(src)) or src} took over the open followup turn")
         return True
 
     # --- the hotkey as a key: hold to talk, or tap to start and tap to send --------
-    def press(self) -> None:
+    # One rule for the talk key and the backup key alike:
+    #   pressed and released within HOLD_MIN (by the key's own event times) = a TAP: the
+    #     turn keeps listening until the next press of EITHER key, the bar's Send button,
+    #     or the tap turn's own silence end / cap;
+    #   held longer = HOLD (push-to-talk): it is sent on release.
+    # A press while a turn is being sent is ignored, and so is its release.
+    def press(self, src: str = "key", at=None) -> None:
         t = self.turn
+        name = key_name(self.key_spec(src)) or src
         if t is not None and t["finish_at"]:
-            log("turn: key pressed while it is being sent, ignored")
-            self.swallow_release = True
+            log(f"turn: {name} pressed while it is being sent, ignored")
+            self.swallow[src] = True
             return
-        if t is not None and t["kind"] == "ptt" and t["mode"] == "toggle" \
-                and t["finish_at"] == 0.0:
-            self.swallow_release = True
-            self.finish_turn("tapped again")
+        if t is not None and t["kind"] == "ptt" and t["finish_at"] == 0.0:
+            if t["mode"] == "toggle":
+                self.swallow[src] = True
+                self.finish_turn(f"tapped again ({name})")
+                return
+            if t["mode"] is None:
+                if t.get("src") != src:
+                    # The other key, while this one is held: it changes nothing.
+                    log(f"turn: {name} pressed while {key_name(self.key_spec(t.get('src')))} "
+                        f"is held, ignored")
+                    self.swallow[src] = True
+                    return
+                # Its own key pressed again with no release between: the release was
+                # lost. She is pressing to end it, so end it.
+                self.swallow[src] = True
+                t["mode"] = "toggle"
+                self.finish_turn(f"pressed again ({name}, no release seen)")
+                return
+        if self._take_over_followup(None, src, at):     # release() decides hold or tap
             return
-        if self._take_over_followup(None):     # release() decides hold or tap
-            return
-        self.swallow_release = False
-        self.start_turn("ptt")
+        self.swallow[src] = False
+        self.start_turn("ptt", src=src, key_at=at)
 
-    def release(self) -> None:
-        if self.swallow_release:
-            self.swallow_release = False
+    def release(self, src: str = "key", at=None) -> None:
+        if self.swallow.get(src):
+            self.swallow[src] = False
             return
         t = self.turn
         if t is None or t["kind"] != "ptt" or t["mode"] is not None:
             return
-        if time.time() - t["down_at"] >= HOLD_MIN:
+        if t.get("src", src) != src:
+            return                                # the other key's release decides nothing
+        name = key_name(self.key_spec(src)) or src
+        by_handler = time.time() - t["down_at"]
+        key_at = t.get("key_at")
+        held = (at - key_at) if (at is not None and key_at is not None and at >= key_at) \
+            else by_handler
+        t["held_s"] = held
+        if held >= HOLD_MIN:
             t["mode"] = "hold"
-            self.finish_turn("released")
+            self.finish_turn(f"released ({name}, held {held:.2f}s)")
         else:
             t["mode"] = "toggle"                 # a tap: keep listening until the next one
-            log("turn: tapped, listening until the key is tapped again")
+            late = f", handled {by_handler:.2f}s after the press" if by_handler >= HOLD_MIN else ""
+            log(f"turn: tapped ({name}, {held * 1000:.0f} ms{late}), listening until "
+                f"a key is tapped again")
+            self.view_tap_hint()
+
+    def send_now(self) -> None:
+        """The bar's Send button: the same as tapping the key again."""
+        t = self.turn
+        if t is None or t["finish_at"]:
+            return
+        if t["kind"] == "ptt" and t["mode"] is None:
+            # A key is down: its release must not decide anything once this sent it.
+            self.swallow[t.get("src") or "key"] = True
+        if t["kind"] == "ptt":
+            t["mode"] = t["mode"] or "toggle"
+        self.finish_turn("send button")
 
     def cancel_chord(self) -> None:
         """The key was a modifier in a chord after all. Nothing she said is sent."""
@@ -2118,9 +2912,11 @@ class Listener:
         log("turn: the hotkey was part of a chord, cancelled")
         self.end_turn_empty(sound=False)
 
-    def start_turn(self, kind: str, wire: str = "") -> bool:
+    def start_turn(self, kind: str, wire: str = "", src=None, key_at=None) -> bool:
         """wire is what the server is told the turn is: "hold" for a key that is down,
-        "tap" for Listen now or a double Fn, "followup" when MicMic asked."""
+        "tap" for Listen now or a double Fn, "followup" when MicMic asked. src is what
+        opened it ("key", "backup", "menu"), key_at the key's own press time."""
+        began = time.time()
         if not self.running:
             log("turn requested before the listener is listening")
             if kind == "ptt":
@@ -2151,7 +2947,9 @@ class Listener:
         with self.lock:
             self.turn = {"kind": kind, "down_at": now, "mode": None, "finish_at": 0.0,
                          "deadline": now + (PTT_MAX if kind == "ptt" else FOLLOWUP_WINDOW),
-                         "open_ts": open_ts}
+                         "open_ts": open_ts, "src": src, "key_at": key_at,
+                         # what the microphone gave this turn (the audio tap counts it)
+                         "heard_s": 0.0, "voiced_s": 0.0, "peak_rms": 0.0}
             self.transcript = ""
             self.turn_prefix = ""
             self.primary_final = None
@@ -2175,7 +2973,10 @@ class Listener:
         self.set_status(L("push_to_talk", self.locale), "●")
         play_sound(SOUND_ARM)
         server_duck(True)
-        log(f"turn open ({kind})")
+        took = time.time() - began
+        who = key_name(self.key_spec(src)) or src or ""
+        log(f"turn open ({kind}" + (f", {who}" if who else "")
+            + (f", opening took {took:.2f}s" if took >= 0.15 else "") + ")")
         return True
 
     def _start_local_read(self, t) -> None:
@@ -2199,6 +3000,33 @@ class Listener:
                 t["local_ms"] = int((time.time() - started) * 1000)
             self.consider()
         threading.Thread(target=go, daemon=True, name="micmic-local-read").start()
+
+    def count_turn_audio(self, t, seconds: float, rms: float) -> None:
+        """The audio tap's count of what one open turn heard: how long, and how much of
+        it was loud enough to be a voice. The junk guard below reads it."""
+        t["heard_s"] = t.get("heard_s", 0.0) + seconds
+        if rms >= SPEECH_RMS:
+            t["voiced_s"] = t.get("voiced_s", 0.0) + seconds
+        if rms > t.get("peak_rms", 0.0):
+            t["peak_rms"] = rms
+
+    @staticmethod
+    def junk_reason(t, apple_heard: str = "", early: bool = False) -> str:
+        """Why this finished turn must not be sent, or "". Under MIN_TURN_AUDIO of audio
+        it is never sent (the 3 ms turns that went out as "okay" and "mm"). With no
+        speech energy in it either, unless Apple's recogniser heard words: then there
+        was a voice, only a quiet one. `early` is the check made the moment it finishes,
+        before any reading: the length alone."""
+        heard = float(t.get("heard_s", 0.0))
+        if heard < MIN_TURN_AUDIO:
+            return f"only {heard:.2f}s of audio"
+        if early or apple_heard:
+            return ""
+        voiced = float(t.get("voiced_s", 0.0))
+        if voiced < SPEECH_MIN_S:
+            return (f"no speech in {heard:.1f}s of audio (loudest {t.get('peak_rms', 0.0):.4f}, "
+                    f"{voiced:.2f}s above {SPEECH_RMS})")
+        return ""
 
     def finish_turn(self, why: str) -> None:
         """She is done. Ask the recogniser for its final words (and the local model, when
@@ -2598,27 +3426,39 @@ class Listener:
                         self.request.endAudio()
                     except Exception:  # noqa: BLE001
                         pass
-            # The local model reads the turn the moment it is finished. With its text in
-            # hand nothing waits for Apple's final; without it (no model, a failed read,
-            # LOCAL_WAIT gone by) the turn goes out as Apple heard it, as it always did.
-            if not t.get("local_started"):
-                t["local_started"] = True
-                if self.turn_samples is not None:
-                    self._start_local_read(t)
-            local = self.local_result
-            if t.get("local_at") and local is None and now < t["finish_at"] + LOCAL_WAIT:
-                return
-            if not local and self.primary_final is None and now < t["finish_at"] + FINAL_WAIT:
-                return
-            if not t.get("logged"):
-                t["logged"] = True
-                prim_conf = (self.primary_final or ("", 0.0))[1]
-                read = ("none" if not t.get("local_at")
-                        else f"{t.get('local_ms', '?')} ms" if local
-                        else "failed" if local == "" else "too slow")
-                log(f"turn: {self.locale} {prim_conf:.2f} "
-                    f"({'final' if self.primary_final else 'no final'}), local read {read}")
-            to_send, lang_won = self._pick_transcript()
+            # Junk guard: a turn too short to hold a word is closed at once, unread.
+            junk = self.junk_reason(t, early=True)
+            if not junk:
+                # The local model reads the turn the moment it is finished. With its text
+                # in hand nothing waits for Apple's final; without it (no model, a failed
+                # read, LOCAL_WAIT gone by) the turn goes out as Apple heard it.
+                if not t.get("local_started"):
+                    t["local_started"] = True
+                    if self.turn_samples is not None:
+                        self._start_local_read(t)
+                local = self.local_result
+                if t.get("local_at") and local is None and now < t["finish_at"] + LOCAL_WAIT:
+                    return
+                if not local and self.primary_final is None and now < t["finish_at"] + FINAL_WAIT:
+                    return
+                if not t.get("logged"):
+                    t["logged"] = True
+                    prim_conf = (self.primary_final or ("", 0.0))[1]
+                    read = ("none" if not t.get("local_at")
+                            else f"{t.get('local_ms', '?')} ms" if local
+                            else "failed" if local == "" else "too slow")
+                    log(f"turn: {self.locale} {prim_conf:.2f} "
+                        f"({'final' if self.primary_final else 'no final'}), local read {read}")
+                apple = ((self.primary_final or ("", 0.0))[0]
+                         or (self.turn_prefix + " " + self.transcript).strip()
+                         or str(t.get("shown") or ""))
+                to_send, lang_won = self._pick_transcript()
+                # Words read out of a turn with no voice in it ("okay", "yeah" from
+                # silence, by the local model) are not hers.
+                junk = self.junk_reason(t, apple_heard=apple) if to_send else ""
+            if junk:
+                to_send, lang_won = "", ""
+                log(f"turn: {junk}, not sent")
             conf_won = self.pick_conf
             self.turn_samples = None
             self.local_result = None
@@ -2905,6 +3745,7 @@ class Listener:
 
     def shutdown(self) -> None:
         self.running = False
+        self.unregister_backup_hotkey()
         self.stop_task()
         try:
             if self.engine is not None:
@@ -2994,8 +3835,10 @@ LISTENER = Listener()
 
 class Delegate(AppKit.NSObject):
     def applicationDidFinishLaunching_(self, note):
+        global _LAUNCHED_AT
         LISTENER.build_status_item(self)
-        # Double-clicking an app and getting no window, no Dock icon and no sound is
+        install_main_menu(self)
+        # Double-clicking an app and getting no window and no sound is
         # indistinguishable from a crash — this was reported as "nothing opens up".
         # Launched by hand: show the window. Launched at login by launchd: stay quiet.
         if os.environ.get("MICMIC_AUTOSTART") != "1":
@@ -3015,15 +3858,47 @@ class Delegate(AppKit.NSObject):
             .addObserver_selector_name_object_(
                 self, objc.selector(self.showFromOtherLaunch_, signature=b"v@:@"),
                 SHOW_NOTE, None)
+        _LAUNCHED_AT = time.monotonic()
 
     def showFromOtherLaunch_(self, note):
         log("a second launch asked for the window — showing it")
         self.showPanel_(None)
 
     def applicationShouldHandleReopen_hasVisibleWindows_(self, app, visible):
-        # A click on the Dock icon while MicMic runs arrives here, not as a new launch.
+        # A click on the Dock icon while MicMic runs arrives here, not as a new launch:
+        # the same window the menu bar's "Show MicMic window" opens.
         self.showPanel_(None)
         return True
+
+    def applicationShouldTerminateAfterLastWindowClosed_(self, app):
+        # Closing the window hides it; MicMic keeps listening from the menu bar.
+        return False
+
+    def applicationDidBecomeActive_(self, note):
+        # Cmd-Tab to MicMic with no window up would leave her looking at a menu bar
+        # and nothing else. Looked at a moment later, once an alert or the About panel
+        # that caused this activation is on screen; never during launch, where the
+        # display setting (bar, none, launched at login) decides what appears.
+        if time.monotonic() - _LAUNCHED_AT < ACTIVATE_GRACE_S:
+            return
+        self.performSelector_withObject_afterDelay_("windowForActivation:", None, 0.3)
+
+    def windowForActivation_(self, _):
+        app = AppKit.NSApp()
+        if LISTENER.panel is None or not app.isActive():
+            return
+        if needs_window_on_activate(app.windows(), app.modalWindow()):
+            LISTENER.panel.show(activate=False)
+
+    def applicationWillTerminate_(self, note):
+        # Quit from the Dock, Cmd-Q, logging out: the same cleanup as the menu's Quit.
+        clean_up_before_quit()
+
+    def openSettings_(self, sender):
+        if LISTENER.panel is not None:
+            LISTENER.panel.open_settings()
+        else:
+            self.openWeb_(sender)
 
     def aboutMicMic_(self, sender):
         credit = "Understands you with Jev, by TypeSafe.\n" + HELP_URL + \
@@ -3077,8 +3952,113 @@ class Delegate(AppKit.NSObject):
         AppKit.NSWorkspace.sharedWorkspace().openFile_(LOG_PATH)
 
     def quitApp_(self, sender):
-        LISTENER.shutdown()
+        clean_up_before_quit()
         AppKit.NSApp().terminate_(self)
+
+
+# ---------------------------------------------------------------- a regular app
+# MicMic is in the Dock and in Cmd-Tab like any app (owner, 2026-10-03), with the menu
+# bar icon kept. A regular app's menu bar is its own, so it needs a real main menu:
+# Quit on Cmd-Q, and an Edit menu, without which Cmd-C/V/A do nothing in the window's
+# typing box (WKWebView takes copy:/paste: from the menu, not from the keys).
+ACTIVATE_GRACE_S = 2.0
+_LAUNCHED_AT = float("inf")   # until applicationDidFinishLaunching_ has run
+_CLEANED_UP = False
+
+
+def clean_up_before_quit() -> None:
+    """The menu's Quit, the Dock's Quit and Cmd-Q all end here, once."""
+    global _CLEANED_UP
+    if _CLEANED_UP:
+        return
+    _CLEANED_UP = True
+    LISTENER.shutdown()
+
+
+def needs_window_on_activate(windows, modal) -> bool:
+    """True when MicMic is frontmost with nothing of its own to look at: no alert, and
+    no titled window on screen (the menu bar icon, the bar and the guide ring are
+    untitled and do not count)."""
+    if modal is not None:
+        return False
+    titled = AppKit.NSWindowStyleMaskTitled
+    return not any(w.isVisible() and (w.styleMask() & titled) for w in (windows or ()))
+
+
+def _menu_item(menu, title, action, key="", target=None, mods=None):
+    item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action, key)
+    if target is not None:
+        item.setTarget_(target)
+    if mods is not None:
+        item.setKeyEquivalentModifierMask_(mods)
+    menu.addItem_(item)
+    return item
+
+
+def _submenu(main, title):
+    holder = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, None, "")
+    menu = AppKit.NSMenu.alloc().initWithTitle_(title)
+    holder.setSubmenu_(menu)
+    main.addItem_(holder)
+    return menu
+
+
+def build_main_menu(delegate):
+    """The app's main menu: MicMic, Edit, Window, Help. Returns (menu, services,
+    window, help) so install_main_menu() can hand the last three to NSApp."""
+    sel = lambda name: objc.selector(getattr(delegate, name), signature=b"v@:@")  # noqa: E731
+    cmd = AppKit.NSEventModifierFlagCommand
+    opt = AppKit.NSEventModifierFlagOption
+    main = AppKit.NSMenu.alloc().initWithTitle_("MainMenu")
+
+    app = _submenu(main, "MicMic")
+    _menu_item(app, "About MicMic", sel("aboutMicMic_"), target=delegate)
+    app.addItem_(AppKit.NSMenuItem.separatorItem())
+    _menu_item(app, "Settings…", sel("openSettings_"), ",", target=delegate)
+    app.addItem_(AppKit.NSMenuItem.separatorItem())
+    services = AppKit.NSMenu.alloc().initWithTitle_("Services")
+    _menu_item(app, "Services", None).setSubmenu_(services)
+    app.addItem_(AppKit.NSMenuItem.separatorItem())
+    _menu_item(app, "Hide MicMic", "hide:", "h")
+    _menu_item(app, "Hide Others", "hideOtherApplications:", "h", mods=cmd | opt)
+    _menu_item(app, "Show All", "unhideAllApplications:")
+    app.addItem_(AppKit.NSMenuItem.separatorItem())
+    _menu_item(app, "Quit MicMic", sel("quitApp_"), "q", target=delegate)
+
+    # No target: these go to whatever has focus (the typing box, a field in Settings).
+    edit = _submenu(main, "Edit")
+    _menu_item(edit, "Undo", "undo:", "z")
+    _menu_item(edit, "Redo", "redo:", "Z")
+    edit.addItem_(AppKit.NSMenuItem.separatorItem())
+    _menu_item(edit, "Cut", "cut:", "x")
+    _menu_item(edit, "Copy", "copy:", "c")
+    _menu_item(edit, "Paste", "paste:", "v")
+    _menu_item(edit, "Delete", "delete:")
+    _menu_item(edit, "Select All", "selectAll:", "a")
+
+    window = _submenu(main, "Window")
+    _menu_item(window, "Show MicMic Window", sel("showPanel_"), target=delegate)
+    window.addItem_(AppKit.NSMenuItem.separatorItem())
+    _menu_item(window, "Minimize", "performMiniaturize:", "m")
+    _menu_item(window, "Close", "performClose:", "w")
+    window.addItem_(AppKit.NSMenuItem.separatorItem())
+    _menu_item(window, "Bring All to Front", "arrangeInFront:")
+
+    help_menu = _submenu(main, "Help")
+    _menu_item(help_menu, "MicMic Help", sel("openHelp_"), target=delegate)
+    return main, services, window, help_menu
+
+
+def install_main_menu(delegate) -> None:
+    try:
+        main, services, window, help_menu = build_main_menu(delegate)
+        app = AppKit.NSApp()
+        app.setMainMenu_(main)
+        app.setServicesMenu_(services)
+        app.setWindowsMenu_(window)
+        app.setHelpMenu_(help_menu)
+    except Exception as e:  # noqa: BLE001
+        log(f"could not build the main menu: {e!r}")
 
 
 # ---------------------------------------------------------------- one copy only
@@ -3106,6 +4086,28 @@ def take_single_instance_lock() -> bool:
     return True                       # held until the process exits; the OS releases it
 
 
+# ---------------------------------------------------------------- run from Applications
+def relocate_from_disk_image() -> bool:
+    """True when this copy must quit now because MicMic opens from Applications instead.
+
+    Opened from the disk image window (or a translocated path), with or without a copy
+    already dragged into /Applications: savta/install_place.relocate_at_launch() opens
+    that copy (same version or newer) or puts this one there, silently. It runs before
+    the server and before any permission is asked, so macOS's grants belong to the copy
+    in Applications. Anything that goes wrong: run from here, as before."""
+    if not is_bundled() and not os.environ.get("MICMIC_BUNDLE_PATH"):
+        return False
+    try:
+        from savta import install_place as _place
+        what = _place.relocate_at_launch()
+    except Exception as e:  # noqa: BLE001
+        log(f"relocate: could not check where MicMic runs from: {e!r}")
+        return False
+    if what != "stay":
+        log(f"relocate: {what}")
+    return what in ("opened", "moved")
+
+
 def main() -> None:
     log("=" * 60)
     if not take_single_instance_lock():
@@ -3113,10 +4115,14 @@ def main() -> None:
         Foundation.NSDistributedNotificationCenter.defaultCenter() \
             .postNotificationName_object_userInfo_deliverImmediately_(SHOW_NOTE, None, None, True)
         return
+    if relocate_from_disk_image():
+        log(f"quitting: MicMic opens from Applications (pid={os.getpid()} exits)")
+        return
     log(f"MicMic listener starting  pid={os.getpid()}  server={SERVER}")
     ensure_server()
     app = AppKit.NSApplication.sharedApplication()
-    app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+    # In the Dock and in Cmd-Tab while it runs, with the menu bar icon as well.
+    app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyRegular)
     delegate = Delegate.alloc().init()
     app.setDelegate_(delegate)
     app.run()

@@ -22,6 +22,8 @@ RUN uv sync --locked --no-dev --no-install-project
 
 COPY proxy ./proxy
 COPY web ./web
+# Apple's public root certificates (not secrets), for checking App Store signatures.
+COPY certs ./certs
 
 # Listen on every interface, on the port the host gives in PORT. The database lives on
 # the volume mounted at /data, so it survives redeploys. Railway mounts volumes owned by
