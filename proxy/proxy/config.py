@@ -31,6 +31,9 @@ APPLE_UNSIGNED_ENVIRONMENTS = ("Xcode", "LocalTesting")
 # The dates the legal pages show as "Last updated". The phone compiles in the versions it
 # showed; a consent below the *_REQUIRED one is refused with 409 consent_outdated.
 LEGAL_VERSION = "2026-10-03"
+# Privacy moved on alone: iPhone build 5 turns English speech into text with MicMic's own
+# model, downloaded once from Hugging Face (2026-10-05). Terms and AI disclosure did not change.
+PRIVACY_LEGAL_VERSION = "2026-10-05"
 CONSENT_PROVIDERS = ("typesafe", "google_gemini", "elevenlabs")
 
 
@@ -250,7 +253,7 @@ class Config:
 
     # --- terms and AI-data consent (POST /v1/devices, POST /v1/consent)
     terms_version: str = LEGAL_VERSION
-    privacy_version: str = LEGAL_VERSION
+    privacy_version: str = PRIVACY_LEGAL_VERSION
     ai_disclosure_version: str = LEGAL_VERSION
     # None means the same as the current version.
     terms_required: str | None = None
@@ -261,6 +264,18 @@ class Config:
     # --- the iPhone brain, called only by account deletion (POST {brain_url}/v1/brain/forget)
     brain_url: str | None = None
     brain_timeout: float = 10.0
+
+    # --- diagnostics (POST /v1/diagnostics): the turn log a phone sends only while its
+    # owner has Share diagnostics on. Text and timings, never audio. Kept 30 days.
+    # DIAGNOSTICS_ENABLED=0 is the kill switch: every upload answers 503.
+    diagnostics_enabled: bool = True
+    diag_max_body: int = 64 * 1024
+    diag_max_items: int = 50                 # turns in one upload
+    diag_max_item_bytes: int = 16 * 1024     # one turn, as JSON
+    diag_daily_items: int = 600              # turns a device may send per UTC day
+    diag_per_minute: int = 6                 # uploads a device may make per minute
+    diag_retention_days: int = 30
+    diag_max_rows_per_device: int = 2000     # the oldest go first past this
 
     def __post_init__(self):
         if self.tts_voices is None:
@@ -400,10 +415,15 @@ class Config:
             apple_max_devices_per_sub=_int("APPLE_MAX_DEVICES_PER_SUB", 5),
             apple_expiry_leeway=_int("APPLE_EXPIRY_LEEWAY_SECONDS", 3600),
             terms_version=_opt("TERMS_VERSION") or LEGAL_VERSION,
-            privacy_version=_opt("PRIVACY_VERSION") or LEGAL_VERSION,
+            privacy_version=_opt("PRIVACY_VERSION") or PRIVACY_LEGAL_VERSION,
             ai_disclosure_version=_opt("AI_DISCLOSURE_VERSION") or LEGAL_VERSION,
             terms_required=_opt("TERMS_REQUIRED"),
             privacy_required=_opt("PRIVACY_REQUIRED"),
             ai_disclosure_required=_opt("AI_DISCLOSURE_REQUIRED"),
             brain_url=(_opt("BRAIN_URL") or "").rstrip("/") or None,
+            diagnostics_enabled=_flag("DIAGNOSTICS_ENABLED", True),
+            diag_daily_items=_int("DIAG_DAILY_ITEMS", 600),
+            diag_per_minute=_int("DIAG_PER_MINUTE", 6),
+            diag_retention_days=max(1, _int("DIAG_RETENTION_DAYS", 30)),
+            diag_max_rows_per_device=_int("DIAG_MAX_ROWS_PER_DEVICE", 2000),
         )

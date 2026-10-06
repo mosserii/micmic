@@ -168,6 +168,60 @@ def t_parser():
     res = tw.resolve(None, tw.parse_clock("7"), None, dt.datetime(2026, 10, 2, 22, 0))
     check("alarm 'seven' at 22:00 is 07:00 tomorrow",
           res["date"] == dt.date(2026, 10, 3) and res["time"] == "07:00", res)
+    # "Wake me up at 6:30 tomorrow" said at 22:57 was an alarm for 18:30 (MicMic Bench v1
+    # phone path, typed, 2026-10-04): waking up, or an alarm at 4 to 9, is the morning.
+    late = dt.datetime(2026, 10, 4, 22, 57)
+    for args, want in (((tw.parse_clock("at 6:30"), tw.parse_day("tomorrow")),
+                        dict(wake=True, alarm=True)),
+                       ((tw.parse_clock("6:30"), tw.parse_day("tomorrow")), dict(alarm=True)),
+                       ((tw.parse_clock("at 6"), tw.parse_day("on friday")), dict(wake=True)),
+                       ((tw.parse_clock("בשש וחצי"), tw.parse_day("מחר")), dict(alarm=True))):
+        res = tw.resolve(None, *args, late, **want)
+        check(f"alarm/wake {want} at {args[0]} is the morning", res["time"] in ("06:30", "06:00"),
+              res)
+    res = tw.resolve(None, tw.parse_clock("at 6:30"), None, dt.datetime(2026, 10, 4, 7, 0),
+                     wake=True)
+    check("'wake me up at 6:30' said at 07:00 is tomorrow 06:30",
+          res["date"] == dt.date(2026, 10, 5) and res["time"] == "06:30", res)
+    res = tw.resolve(None, tw.parse_clock("at 1"), tw.parse_day("tomorrow"), late)
+    check("not an alarm: 'tomorrow at 1' is still 13:00", res["time"] == "13:00", res)
+    res = tw.resolve(None, tw.parse_clock("at 2"), tw.parse_day("tomorrow"), late, alarm=True)
+    check("an alarm at 2 with no am or pm keeps the afternoon reading", res["time"] == "14:00", res)
+    check("wake words", all(tw.WAKE_RX.search(s) for s in (
+        "wake me up at 6:30 tomorrow", "תעירי אותי בשש", "разбуди меня в шесть",
+        "תעיר אותי מחר בשש", "I need to wake up at 6", "get me up at 7")))
+    # Review of the change above (2026-10-05): with no other day named, the wake-up is
+    # not forced into the morning. A nap is the afternoon; a morning already gone today
+    # with the evening far off is tomorrow morning.
+    for clock, day, now, want_day, want_t, why in (
+            ("at 3", None, dt.datetime(2026, 10, 5, 13, 0), 5, "15:00",
+             "'wake me up at 3' said at 13:00 is a nap at 15:00 today"),
+            ("at 6:30", None, dt.datetime(2026, 10, 5, 22, 0), 6, "06:30",
+             "'wake me up at 6:30' said at 22:00 is 06:30 tomorrow"),
+            ("at 5", None, dt.datetime(2026, 10, 5, 13, 0), 5, "17:00",
+             "'wake me up at 5' said at 13:00 is 17:00 today"),
+            ("at 6:30", "today", dt.datetime(2026, 10, 5, 5, 0), 5, "06:30",
+             "'wake me up today at 6:30' said at 05:00 is this morning"),
+            ("at 6:30", "today", dt.datetime(2026, 10, 5, 10, 0), 5, "18:30",
+             "'wake me up today at 6:30' said at 10:00 is this evening"),
+            ("at 6:30", "tomorrow", dt.datetime(2026, 10, 5, 13, 0), 6, "06:30",
+             "'wake me up tomorrow at 6:30' said at 13:00 is the morning")):
+        res = tw.resolve(None, tw.parse_clock(clock), tw.parse_day(day) if day else None,
+                         now, wake=True)
+        check(why, res["date"] == dt.date(2026, 10, want_day) and res["time"] == want_t, res)
+    res = tw.resolve(None, tw.parse_clock("at 5"), None, dt.datetime(2026, 10, 5, 13, 0),
+                     alarm=True)
+    check("an alarm at 5 said at 13:00 is still 17:00 today",
+          res["date"] == dt.date(2026, 10, 5) and res["time"] == "17:00", res)
+    # Waking someone else, or להעיר as "to remark", is not her wake-up: no morning
+    # forced, and the word guess does not call it an alarm.
+    for s in ("remind me at 5 to wake up dad", "remind me tomorrow at 5 to wake up dad",
+              "תזכירי לי להעיר לו על זה בחמש", "תעירי לו שהוא מאחר", "разбуди папу в шесть"):
+        check(f"not her wake-up: {s!r}",
+              not tw.WAKE_RX.search(s) and tw.guess(s)["kind"] != "alarm", tw.guess(s)["kind"])
+    for s in ("wake me up at 3", "תעירי אותי בשש", "set an alarm for 7", "שעון מעורר לשש"):
+        check(f"still an alarm by its words: {s!r}", tw.guess(s)["kind"] == "alarm",
+              tw.guess(s)["kind"])
 
     # The pre-check: only time words open the question.
     for s in ("remind me in fifty minutes", "set a timer for 25 minutes", "wake me up at 7",

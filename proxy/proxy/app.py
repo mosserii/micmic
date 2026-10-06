@@ -13,6 +13,7 @@
     POST /v1/apple/transaction                    an iPhone's signed StoreKit transaction
     POST /v1/apple/notifications                  App Store Server Notifications V2
     POST /v1/account/delete                       delete this device's account and data
+    POST /v1/diagnostics                          a phone's turn log, only while Share diagnostics is on
     GET  /health, /healthz                        liveness, no auth, no database
     GET  /ready                                   the database answers
     GET  /, /privacy, /terms, /support, /checkout/*   the public pages (pages.py)
@@ -55,6 +56,7 @@ import queue
 import re
 import signal
 import socket
+import ssl
 import sys
 import threading
 import time
@@ -78,6 +80,11 @@ MAX_WEBHOOK_BODY = 1024 * 1024
 MAX_APPLE_TX_BODY = 16 * 1024
 MAX_APPLE_NOTIFICATION_BODY = 64 * 1024
 MAX_SMALL_BODY = 4 * 1024
+# Keys that would carry sound. Diagnostics are text and timings only: an item holding
+# any of these anywhere is refused, not stripped.
+DIAG_AUDIO_KEYS = frozenset({"audio", "pcm", "samples", "wav", "recording", "waveform",
+                             "audio_base64", "sound"})
+DIAG_KIND_RE = re.compile(r"^[a-z_]{1,32}$")
 PLATFORMS = ("mac", "ios")
 APPLE_TX_SOURCES = ("purchase", "update", "restore", "launch")
 # Where an iPhone user cancels an Apple subscription (we cannot cancel it for her).
@@ -259,7 +266,13 @@ class UpstreamPool:
 
     def post(self, path: str, body: bytes, headers: dict) -> tuple[int, bytes]:
         for attempt in (0, 1):
+            # The retry is always a fresh connection: after a quiet spell every pooled
+            # one has gone stale together, and a second pooled one failed the same way
+            # (the first Jev and Gemini calls of a run answered 502, MicMic Bench v1
+            # phone path, 2026-10-04).
             try:
+                if attempt:
+                    raise queue.Empty
                 conn, reused = self._idle.get_nowait(), True
             except queue.Empty:
                 conn, reused = self._new(), False
@@ -270,11 +283,13 @@ class UpstreamPool:
             except (socket.timeout, TimeoutError):
                 conn.close()
                 raise UpstreamTimeout()
-            except (http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError):
+            except (http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError,
+                    ssl.SSLEOFError, ssl.SSLZeroReturnError):
                 conn.close()
                 # A pooled connection the upstream already closed while idle. The request
                 # never reached it, so one retry on a fresh connection is safe.
                 if reused and attempt == 0:
+                    self._drain()
                     continue
                 raise
             except BaseException:
@@ -292,6 +307,10 @@ class UpstreamPool:
         raise ConnectionError("upstream unreachable")
 
     def close(self) -> None:
+        self._drain()
+
+    def _drain(self) -> None:
+        """Close every idle connection: one went stale, so the rest of its age did too."""
         while True:
             try:
                 self._idle.get_nowait().close()
@@ -316,7 +335,14 @@ class UpstreamPool:
         resp = conn.getresponse()
         chunks = []
         while True:
-            sock.settimeout(left())
+            try:
+                sock.settimeout(left())
+            except OSError:
+                # getresponse() closed conn.sock because the upstream said it will close
+                # (Connection: close); the response still reads from its own reference,
+                # under the timeout already set. Setting it again raised EBADF and turned
+                # every such reply into a 502 (all Jev calls, 2026-10-05).
+                left()
             b = resp.read1(65536)
             if not b:
                 break
@@ -394,10 +420,35 @@ class ProxyServer(ThreadingHTTPServer):
         self.pages = pages.render(cfg)
         self.apple = apple.Apple(cfg)
         self._slots = threading.BoundedSemaphore(max(1, cfg.max_connections))
+        # Diagnostics uploads per device in the last minute (in memory: a restart only
+        # forgets a minute). The daily item cap lives in the usage table.
+        self.diag_rate: dict[str, list[float]] = {}
+        self.diag_lock = threading.Lock()
+        self._purge_stop = threading.Event()
         handler = type("BoundHandler", (Handler,), {"timeout": cfg.idle_timeout})
         super().__init__((cfg.host, cfg.port), handler)
+        self.purge_diagnostics()
+        threading.Thread(target=self._purge_loop, daemon=True, name="diag-purge").start()
+
+    def purge_diagnostics(self) -> int:
+        """Diagnostics older than DIAG_RETENTION_DAYS go. At start, hourly, and on every
+        upload; `admin diagnostics-purge` does the same by hand."""
+        cutoff = int(self.clock().timestamp()) - self.cfg.diag_retention_days * 86400
+        try:
+            n = self.store.purge_diagnostics(cutoff)
+        except Exception as e:  # noqa: BLE001
+            log.error("diagnostics purge failed: %s", type(e).__name__)
+            return 0
+        if n:
+            log.info("diagnostics purge removed %d row(s)", n)
+        return n
+
+    def _purge_loop(self) -> None:
+        while not self._purge_stop.wait(3600.0):
+            self.purge_diagnostics()
 
     def server_close(self):
+        self._purge_stop.set()
         super().server_close()
         self.jev_pool.close()
         self.gemini_pool.close()
@@ -717,7 +768,8 @@ class Handler(BaseHTTPRequestHandler):
                    "/v1/tts": self._tts, "/v1/consent": self._consent,
                    "/v1/apple/transaction": self._apple_transaction,
                    "/v1/apple/notifications": self._apple_notifications,
-                   "/v1/account/delete": self._account_delete}.get(path)
+                   "/v1/account/delete": self._account_delete,
+                   "/v1/diagnostics": self._diagnostics}.get(path)
         if service is not None:
             try:
                 status, tok = service()
@@ -1372,6 +1424,101 @@ class Handler(BaseHTTPRequestHandler):
                          "apple_subscription_active": res["apple_subscription_active"],
                          "manage_url": APPLE_MANAGE_URL})
         return 200, h
+
+    # ---------------------------------------------------------- diagnostics
+
+    def _diagnostics(self) -> tuple[int, str | None]:
+        """A phone's turn log, sent only while its owner has Share diagnostics on:
+        {"v": 1, "app_version", "build", "items": [{...one turn...}]}. Stored as sent
+        (text and timings, never audio) under the device id for DIAG_RETENTION_DAYS, for
+        the owner to read with `admin diagnostics`. Never logged, not even in part."""
+        cfg, store = self.server.cfg, self.server.store
+        who = self._auth()
+        if who is None:
+            self._drop_body()
+            self._unauthorized()
+            return 401, None
+        h, _ = who
+        if not cfg.diagnostics_enabled:
+            self._drop_body()
+            self._json(503, {"error": "diagnostics_disabled"}, {"Retry-After": "86400"})
+            return 503, h
+        now_ts = time.time()
+        with self.server.diag_lock:
+            recent = [t for t in self.server.diag_rate.get(h, []) if now_ts - t < 60.0]
+            if len(recent) >= max(1, cfg.diag_per_minute):
+                self.server.diag_rate[h] = recent
+                limited = True
+            else:
+                recent.append(now_ts)
+                self.server.diag_rate[h] = recent
+                limited = False
+            if len(self.server.diag_rate) > 10000:
+                for k in [k for k, v in self.server.diag_rate.items()
+                          if not v or now_ts - v[-1] > 60.0]:
+                    self.server.diag_rate.pop(k, None)
+        if limited:
+            self._drop_body()
+            self._json(429, {"error": "rate_limited", "retry_after_s": 60},
+                       {"Retry-After": "60"})
+            return 429, h
+        body, status, err = self._read_json(cfg.diag_max_body)
+        if err is not None:
+            self._json(status, err)
+            return status, h
+        items = body.get("items")
+        if not isinstance(items, list) or not 1 <= len(items) <= cfg.diag_max_items:
+            self._json(400, {"error": "bad_request", "max_items": cfg.diag_max_items})
+            return 400, h
+        app_version = body.get("app_version") if isinstance(body.get("app_version"), str) else ""
+        rows = []
+        for it in items:
+            if not isinstance(it, dict) or not it:
+                self._json(400, {"error": "bad_request"})
+                return 400, h
+            if _has_audio_key(it):
+                self._json(400, {"error": "audio_not_allowed"})
+                return 400, h
+            text = json.dumps(it, ensure_ascii=False, separators=(",", ":"))
+            if len(text.encode("utf-8")) > cfg.diag_max_item_bytes:
+                self._json(413, {"error": "item_too_large",
+                                 "max_bytes": cfg.diag_max_item_bytes})
+                return 413, h
+            at = it.get("at")
+            kind = it.get("kind") if isinstance(it.get("kind"), str) else "turn"
+            rows.append({"client_at": at if isinstance(at, str) and len(at) <= 40
+                         and CLIENT_TIME_RE.match(at) else None,
+                         "kind": kind if DIAG_KIND_RE.match(kind) else "turn",
+                         "body": text})
+        now = self.server.clock()
+        granted, _ = store.consume(h, "diag", _day(now), cfg.diag_daily_items, len(rows))
+        if not granted:
+            reset = _reset(now)
+            self._json(429, {"error": "diagnostics_limit", "limit": cfg.diag_daily_items,
+                             "resets_at": _iso(reset)},
+                       {"Retry-After": _seconds_to(reset, now)})
+            return 429, h
+        device_id = store.account(h)["device_id"]
+        n = store.add_diagnostics(device_id, rows, int(now.timestamp()),
+                                  cfg.diag_max_rows_per_device, app_version)
+        self.server.purge_diagnostics()
+        log.info("diagnostics stored %d item(s)", n)
+        self._json(200, {"stored": n, "max_items": cfg.diag_max_items,
+                         "retention_days": cfg.diag_retention_days})
+        return 200, h
+
+
+def _has_audio_key(obj, depth: int = 0) -> bool:
+    """True when any key at any depth names sound (DIAG_AUDIO_KEYS)."""
+    if depth > 12:
+        return True                          # nothing a phone sends is this deep
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if str(k).lower() in DIAG_AUDIO_KEYS or _has_audio_key(v, depth + 1):
+                return True
+    elif isinstance(obj, list):
+        return any(_has_audio_key(v, depth + 1) for v in obj)
+    return False
 
 
 def main() -> int:

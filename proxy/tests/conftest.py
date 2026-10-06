@@ -266,7 +266,7 @@ def apple_leak_check(log_buffer):
         assert secret not in text, "a transaction id or account token reached the log"
 
 
-CONSENT = {"terms_version": "2026-10-03", "privacy_version": "2026-10-03",
+CONSENT = {"terms_version": "2026-10-03", "privacy_version": "2026-10-05",
            "ai_disclosure_version": "2026-10-03",
            "providers": ["typesafe", "google_gemini", "elevenlabs"],
            "accepted_at": "2026-09-24T15:00:00+03:00", "locale": "he-IL",

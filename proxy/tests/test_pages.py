@@ -335,6 +335,22 @@ def test_privacy_page_covers_mac_and_iphone(make_proxy):
     assert 'href="mailto:help@example.com"' in html
 
 
+def test_privacy_describes_iphone_speech_as_build_5_does_it(make_proxy):
+    """Build 5: English through MicMic's own model (Parakeet, from Hugging Face), iOS for the
+    other languages and until the model is there; the sound stays in memory for the turn."""
+    html = _legal(make_proxy(), "/privacy")
+    iphone = _section(html, "iphone")
+    assert "MicMic&#39;s own speech model is on your iPhone" in iphone
+    assert "In other languages, in English until the model is on your iPhone" in iphone
+    assert "iOS sends your voice to Apple&#39;s speech service" in iphone
+    assert "kept in your iPhone&#39;s memory only while that request lasts" in iphone
+    assert "never saved or sent by MicMic" in iphone
+    assert "When you speak to MicMic on iPhone, iOS turns your voice into text." not in html
+    proc = _section(html, "processors")
+    assert "English speech model (about 464 MB)" in proc and "names add-on (about 103 MB)" in proc
+    assert "Hugging Face (huggingface.co)" in proc and "nothing about you" in proc
+
+
 def test_privacy_names_the_controller_and_every_processor(make_proxy):
     html = _legal(make_proxy(), "/privacy")
     who = _section(html, "controller")
@@ -363,12 +379,13 @@ def test_privacy_bases_rights_retention_and_changes(make_proxy):
                  "We do not sell or share personal information"):
         assert word in rights, word
     retention = _section(html, "retention")
-    # The real numbers from the code: brain idle 900 s, state TTL 30 days, tts_seen 30 days.
-    assert "15 minutes" in retention and retention.count("30 days") == 2
+    # The real numbers from the code: brain idle 900 s, state TTL 30 days, tts_seen 30 days,
+    # diagnostics 30 days (DIAG_RETENTION_DAYS, brain trace sweep).
+    assert "15 minutes" in retention and retention.count("30 days") == 3
     assert "stop using MicMic for 30 days" in html                   # the short version too
     changes = _section(html, "changes")
     assert "at least 14 days before it takes effect" in changes
-    assert '<p class="meta">Version 2026-10-03. Last updated 3 October 2026.' in html
+    assert '<p class="meta">Version 2026-10-05. Last updated 5 October 2026.' in html
     assert "18 or older" in _section(html, "children")
 
 
@@ -377,3 +394,30 @@ def test_legal_pages_without_a_support_email_still_render(make_proxy):
         html = _legal(make_proxy(), path)
         assert "mailto:" not in html, path
         assert "contact us." in html or "contact us first." in html, path
+
+
+def test_privacy_describes_diagnostics_as_the_app_and_servers_do_them(make_proxy):
+    """The on-device turn log, Share diagnostics (opt-in, off in every build; TestFlight asks once),
+    the 30 days, the brain's own trace, no audio, and how to stop and delete it."""
+    from proxy.config import Config
+    html = _legal(make_proxy(), "/privacy")
+    sec = _section(html, "diagnostics")
+    assert "last 200 requests" in sec and "Recent activity" in sec          # TurnLog.capacity
+    assert "It never contains audio" in sec and "never the sound itself" in sec
+    assert "only if <strong>Share diagnostics</strong> is on" in sec
+    assert "our server also keeps its own record" in sec                    # brain trace.jsonl
+    assert "30 days" in sec and Config.__dataclass_fields__["diag_retention_days"].default == 30
+    # Consent is the legal basis, so it is never on by default (a pre-ticked box is not
+    # consent): the page must not say any build shares from the start.
+    assert "off until you turn it on, in every version of MicMic" in sec and "TestFlight" in sec
+    assert "asks you once" in sec and "nothing is sent unless you tap Share" in sec
+    assert "on from the start" not in html
+    assert "Delete my account and data" in sec and "including names" in sec
+    assert "never for advertising or to train AI models" in sec
+    # Every blanket "we keep nothing" sentence names the exception.
+    assert "unless you choose to share diagnostics, we keep none of what you say" in html
+    assert "The exception is diagnostics you choose to share." in _section(html, "retention")
+    assert "Share diagnostics" in _section(html, "iphone")
+    assert "any diagnostics you shared" in _section(html, "delete")
+    assert "Share diagnostics" in _section(html, "stored")
+    assert "sharing diagnostics when you turn that on" in _section(html, "purposes")

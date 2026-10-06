@@ -179,7 +179,7 @@ def test_account_shape_for_a_free_device(proxy):
     assert {k: a.pop(k) for k in ("platform", "pro_source", "apple", "consent",
                                   "consent_required")} == {
         "platform": "mac", "pro_source": None, "apple": None, "consent": None,
-        "consent_required": {"terms_version": "2026-10-03", "privacy_version": "2026-10-03",
+        "consent_required": {"terms_version": "2026-10-03", "privacy_version": "2026-10-05",
                              "ai_disclosure_version": "2026-10-03"}}
     assert a == {"device_id": d["device_id"], "plan": "free",
                  "usage": {"jev": {"used": 1, "limit": 5}, "gemini": {"used": 0, "limit": 3},

@@ -743,6 +743,12 @@ def date_format(el: dict) -> str:
     return TEXT_DATE
 
 
+def _now() -> float:
+    """The clock the date fields read. A seam: a test pins a fixed day through it, so a
+    recorded "which date is next Friday?" request is the same request on any day."""
+    return time.time()
+
+
 def date_candidates(days: int = 30, iso: bool = False,
                     fmt: str | None = None) -> list[tuple[str, str]]:
     """Every date from today to a month out, as (value, plain description).
@@ -752,7 +758,7 @@ def date_candidates(days: int = 30, iso: bool = False,
     points at one — the same division of labour as everywhere else here.
     """
     out = []
-    now = time.localtime()
+    now = time.localtime(_now())
     base = time.mktime((now.tm_year, now.tm_mon, now.tm_mday, 12, 0, 0, 0, 0, -1))
     for i in range(days + 1):
         t = time.localtime(base + i * 86400)
@@ -809,7 +815,7 @@ def field_value(j, llm, goal: str, el: dict, page_title: str) -> str:
         opts["__none__"] = "The goal does not say what date this field wants."
         a = j.ask({"what_she_asked_for": goal,
                    "the_field": el.get("label") or el.get("name"),
-                   "today_is": time.strftime("%A %-d %B %Y")}, {
+                   "today_is": time.strftime("%A %-d %B %Y", time.localtime(_now()))}, {
             "pick": {"type": "choice",
                 "instructions": "Which date belongs in this field, given what she asked for?",
                 "criteria": opts}})
@@ -863,7 +869,7 @@ def field_text(llm, goal: str, el: dict, page_title: str) -> str:
         return ""
     if not (llm and llm.available):
         return ""
-    now = time.localtime()
+    now = time.localtime(_now())
     kind = field_kind(el)
     # Without the field's kind and today's date, "Departure" on a flight site reads as
     # a departure CITY and gets filled with "Tel Aviv" — over and over, because a date

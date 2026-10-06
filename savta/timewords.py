@@ -754,10 +754,35 @@ def _day_date(day: dict, today: _dt.date, hm: tuple[int, int] | None,
     return today
 
 
+# "Wake me up at 6:30 tomorrow" was an alarm for 18:30 (MicMic Bench v1 phone path,
+# typed, 2026-10-04): another day's 1 to 6 reads as the afternoon, which is right for
+# "lunch tomorrow at 1" and wrong for waking up. Only HER being woken counts: "remind
+# me at 5 to wake up dad" is about someone else, and in Hebrew להעיר is also "to
+# remark", so the Hebrew and Russian words need "me" (אותי, меня) beside them.
+WAKE_RX = re.compile(r"\bwake me\b|\bget me up\b|"
+                     r"\bwake up(?=\s*$|\s*[,.!?]|\s+(?:at|by|on|in|tomorrow|tonight|"
+                     r"early|before|around|for|\d))|"
+                     r"תעיר(?:י)? אותי|להשכים|صح[ّ]?يني|فيقيني|разбуди меня",
+                     re.IGNORECASE)
+
+# A wake-up with no am or pm and no other day named: the afternoon reading wins only
+# when it comes first and is near enough to be a nap ("wake me up at 3" said at 13:00 is
+# 15:00); otherwise it is the morning ("wake me up at 6:30" said at 07:00 is tomorrow's).
+_NAP = _dt.timedelta(hours=6)
+
+
+def _wants_morning(clock: dict, alarm: bool, wake: bool) -> bool:
+    h = clock["h"]
+    return (wake and 1 <= h <= 11) or (alarm and 4 <= h <= 9)
+
+
 def _hour(clock: dict, part: str | None, day_given: bool, d: _dt.date | None,
-          now: _dt.datetime) -> tuple[int, int] | list[tuple[int, int]]:
+          now: _dt.datetime, alarm: bool = False,
+          wake: bool = False) -> tuple[int, int] | list[tuple[int, int]]:
     """The hour on the 24-hour clock. A list when it is still open: "at 6:30" with no am,
-    pm or part of the day is the next 6:30 or 18:30, decided against the clock."""
+    pm or part of the day is the next 6:30 or 18:30, decided against the clock. Waking
+    up at 1 to 11, or an alarm at 4 to 9, with no am or pm, on another day is the
+    morning; today, resolve() decides between the two readings."""
     h, m = clock["h"], clock["m"]
     part = clock.get("part") or part
     mer = clock.get("mer")
@@ -775,6 +800,9 @@ def _hour(clock: dict, part: str | None, day_given: bool, d: _dt.date | None,
         return (h + 12 if 6 <= h < 12 else (0 if h == 12 else h)), m
     if part == "noon":
         return 12, m
+    if (_wants_morning(clock, alarm, wake) and day_given and d is not None
+            and d != now.date()):
+        return h, m
     if day_given and d is not None and d != now.date():
         # Another day with no am or pm: what people mean by "at 1" or "at 9".
         if 1 <= h <= 6:
@@ -784,7 +812,8 @@ def _hour(clock: dict, part: str | None, day_given: bool, d: _dt.date | None,
 
 
 def resolve(duration: float | None, clock: dict | None, day: dict | None,
-            now: _dt.datetime | None = None) -> dict:
+            now: _dt.datetime | None = None, *, alarm: bool = False,
+            wake: bool = False) -> dict:
     """When exactly, from what the parser read: {"mode": "in"|"at"|"day"|None,
     "at": datetime or None, "date": date or None, "time": "HH:MM" or None,
     "minutes": minutes from now or None}."""
@@ -806,8 +835,14 @@ def resolve(duration: float | None, clock: dict | None, day: dict | None,
         d = _day_date(day, today, None, now)
         return {"mode": "day", "at": None, "date": d, "time": None, "minutes": None}
     d0 = _day_date(day, today, None, now) if day else None
-    hm = _hour(clock, part, day is not None, d0, now)
+    hm = _hour(clock, part, day is not None, d0, now, alarm=alarm, wake=wake)
+    morning = isinstance(hm, list) and _wants_morning(clock, alarm, wake)
     if day is not None:
+        if morning and d0 == today:
+            # "Wake me up today at 6:30": the first of the two readings still ahead.
+            ahead = [x for x in hm if _dt.datetime.combine(today, _dt.time(*x)) > now]
+            if ahead:
+                hm = ahead[0]
         if isinstance(hm, list):
             hm = hm[0] if hm[0][0] >= 7 else hm[1]
         d = _day_date(day, today, hm, now)
@@ -823,6 +858,8 @@ def resolve(duration: float | None, clock: dict | None, day: dict | None,
                 t += _dt.timedelta(days=1)
             cands.append(t)
         at = min(cands)
+        if morning and at != cands[0] and at - now > _NAP:
+            at = cands[0]                        # not a nap: the morning she wakes up
     return {"mode": "at", "at": at, "date": at.date(), "time": at.strftime("%H:%M"),
             "minutes": (at - now).total_seconds() / 60}
 
@@ -853,8 +890,9 @@ def find(utterance: str) -> dict:
     return out
 
 
-_ALARM_WORDS = re.compile(r"\balarm|\bwake me|\bwake up|שעון מעורר|מעורר|תעירי|תעיר|להעיר|"
-                          r"منب[ّ]?ه|صح[ّ]?يني|فيقيني|будильник|разбуди", re.IGNORECASE)
+# Waking HER (WAKE_RX), not "remind me to wake up dad" or להעיר as "to remark".
+_ALARM_WORDS = re.compile(r"\balarm|שעון מעורר|מעורר|منب[ّ]?ه|будильник|"
+                          + WAKE_RX.pattern, re.IGNORECASE)
 _TIMER_WORDS = re.compile(r"\btimer|טיימר|مؤقت|تايمر|таймер", re.IGNORECASE)
 
 
@@ -1159,6 +1197,11 @@ LINES = {
     "fire_alarm": {"english": "Alarm. It is {t}.", "hebrew": "שעון מעורר. השעה {t}.",
                    "arabic": "المنبّه. الساعة {t}.", "russian": "Будильник. Сейчас {t}."},
     # A follow-up moved it.
+    # A timer moved by a follow-up ("make it 15 minutes"): it is a timer, not a reminder.
+    "timer_moved": {"english": "Alright, the timer is now {n} minutes.",
+                    "hebrew": "בסדר, הטיימר עכשיו על {n} דקות.",
+                    "arabic": "ماشي، المؤقت صار {n} دقيقة.",
+                    "russian": "Хорошо, таймер теперь на {n} мин."},
     "alarm_moved": {"english": "Alright, the alarm is now at {t}.",
                     "hebrew": "בסדר, השעון המעורר עכשיו ב-{t}.",
                     "arabic": "ماشي، المنبّه صار الساعة {t}.",

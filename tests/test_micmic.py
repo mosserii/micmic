@@ -3168,7 +3168,21 @@ def t_dates_are_worked_out_not_guessed(j):
     language model gets wrong often enough to matter, and it is free here."""
     import datetime
     from savta.actions import web
-    today = datetime.date.today()
+    # The day is pinned: the question sent to Jev carries today's date and the month of
+    # dates after it, so on an unpinned clock the recording made on one day was a
+    # REPLAY MISS the next (strict replay went red on 2026-10-05 with no code change).
+    # 2026-10-04, a Sunday, is the day the recording was made.
+    today = datetime.date(2026, 10, 4)
+    real_now = web._now
+    web._now = lambda: time.mktime((2026, 10, 4, 12, 0, 0, 0, 0, -1))
+    try:
+        _dates_on_a_pinned_day(j, web, today)
+    finally:
+        web._now = real_now
+
+
+def _dates_on_a_pinned_day(j, web, today):
+    import datetime
 
     def ask(phrase, field_type=""):
         el = {"id": 1, "kind": "type", "type": field_type, "name": "", "label": "Date",
@@ -4302,6 +4316,47 @@ def t_live_answers(j):
               f"did={r['did']} urls={src.urls}")
 
 
+def t_a_bare_app_change_keeps_the_person(j):
+    """Runs last: its scripted turns tick the habit clock, and every later recorded
+    request would move with it."""
+    # ---- a bare app change read as naming someone keeps the person ----------------
+    # MicMic Bench v1 phone path mt-003 (2026-10-04): Jev put contact_named for "on
+    # whatsapp" at 0.46-0.55; over 0.5 the draft lost its person ("Who should I send it
+    # to?"). Every word is an app or a filler, so nobody was named. A real name, or
+    # "to my sister", still leaves the old person behind.
+    arm_p, on_wa_p, sister_p = ("text Matan the package arrived this morning", "on whatsapp",
+                                "send it to my sister on whatsapp")
+    understood = {
+        arm_p: dict(contact="Matan", contact_named=0.98, has_message_content=0.9),
+        on_wa_p: dict(intent="message", intent_confidence=0.61, contact="nobody",
+                      contact_named=0.55, refers_back=0.48, amends_message=0.91,
+                      has_message_content=0.78, message_app="whatsapp", channel="whatsapp"),
+        sister_p: dict(intent="message", intent_confidence=0.8, contact="nobody",
+                       contact_named=0.7, refers_back=0.3, amends_message=0.9,
+                       has_message_content=0.5, message_app="whatsapp", channel="whatsapp"),
+    }
+    for follow, keeps in ((on_wa_p, True), (sister_p, False)):
+        reset_state()
+        with gates_on(), scripted_turns(understood) as s:
+            s.j.spans[arm_p], s.j.same[arm_p] = "the package arrived this morning", 0.9
+            r = router.handle(s.j, arm_p, speak=False)
+            check("en: the message to Matan is armed", r["did"] == "sending"
+                  and _d(r).get("to") == "Matan", f"did={r['did']} detail={short(_d(r))}")
+            r = router.handle(s.j, follow, speak=False)
+            aw = router.AWAITING or {}
+            if keeps:
+                check("en: a bare 'on whatsapp' read as a name keeps who and what",
+                      r["did"] == "confirm_send" and aw.get("contact") == "Matan"
+                      and aw.get("channel") == "whatsapp",
+                      f"did={r['did']} awaiting={short(aw)}")
+            else:
+                check("en: 'to my sister on whatsapp' does not go to Matan",
+                      r["did"] != "confirm_send" or aw.get("contact") != "Matan",
+                      f"did={r['did']} awaiting={short(aw)}")
+            check("en: nothing went out", not SENT and not WA, f"sent={SENT} wa={WA}")
+    reset_state()
+
+
 TESTS = [
     ("0zi. live answers: news, results, prices", t_live_answers),
     ("0zg. the small things she hears", t_small_things_she_hears),
@@ -4362,6 +4417,8 @@ TESTS = [
     ("17. the clock is on this machine", t_clock),
     ("18. the weather, in her town and her language", t_weather),
     ("19. the script she spoke in decides the language", t_language_from_script),
+    ("20. a bare app change keeps the person (phone bench mt-003)",
+     t_a_bare_app_change_keeps_the_person),
 ]
 
 

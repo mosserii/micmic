@@ -27,6 +27,7 @@ imports it) and Apple's `app-store-server-library` (only `apple.py` imports it).
 | `POST /v1/portal` | Bearer | 200 `{"url"}` to Stripe's billing portal. 404 `no_subscription`, 503, 502 as above. |
 | `POST /v1/stripe/webhook` | Stripe signature | the only place a plan changes. 200 on handled or ignored, 400 `bad_signature`, 503 without a webhook secret, 500 on a storage error (so Stripe retries). |
 | `POST /v1/jev`, `POST /v1/gemini/<model>:generateContent` | Bearer | metered forwarding, unchanged. |
+| `POST /v1/diagnostics` | Bearer | the phone's turn log, sent only while its owner has Share diagnostics on: `{"v": 1, "app_version", "build", "items": [{...one turn...}]}` (1 to 50 items, 16 KB each, 64 KB a body) → 200 `{"stored", "max_items", "retention_days"}`. 400 `bad_request` / `bad_json` / `audio_not_allowed` (any key naming sound, at any depth), 413 `item_too_large` / `body_too_large`, 429 `rate_limited` (`DIAG_PER_MINUTE` uploads a minute) / `diagnostics_limit` (`DIAG_DAILY_ITEMS` a UTC day, `resets_at`), 503 `diagnostics_disabled` (the kill switch). Stored as sent under the device id, never logged; kept `DIAG_RETENTION_DAYS` (purged at start, hourly and on every upload), at most `DIAG_MAX_ROWS_PER_DEVICE` per device; account deletion deletes them. Read with `python -m proxy.admin diagnostics <dev_ prefix>`. |
 | `POST /v1/tts` | Bearer | `{"text", "tag"?, "lead"?, "lang": "en"\|"he"\|"ar"\|"ru", "voice"?, "cache"?}` → 200, 24 kHz mono 16-bit PCM streamed as ElevenLabs makes it (`Transfer-Encoding: chunked`, `X-Audio-Format: pcm_s16le_24000`, `X-Cache: hit\|miss`). 400 `tag_not_allowed` / `bad_language` / `voice_not_allowed` / `text_too_long`, 429 `tts_limit` (`scope` total, month or day, `resets_at`), 503 `tts_disabled` (the kill switch) / `not_configured` (no key on the server: `{"error": "not_configured", "message": "voice not configured"}`, `Retry-After: 3600`) / `upstream_busy`, 504 `upstream_timeout`. See "The voice" below. |
 | `GET /v1/usage` | Bearer | the older usage shape, unchanged. |
 | `GET /health` (also `/healthz`) | none | liveness, no database work. |
@@ -112,9 +113,13 @@ works. The webhook needs only `STRIPE_WEBHOOK_SECRET`.
 | `APPLE_ONLINE_CHECKS` | `1` | OCSP revocation checks of Apple's certificates. |
 | `APPLE_MAX_DEVICES_PER_SUB` | `5` | Devices one subscription unlocks; the least recently linked is unlinked past it. |
 | `APPLE_EXPIRY_LEEWAY_SECONDS` | `3600` | Pro ends at expiry (or the end of grace) plus this, even with no notification. |
-| `TERMS_VERSION`, `PRIVACY_VERSION`, `AI_DISCLOSURE_VERSION` | `2026-10-03` | The pages' "Last updated" dates. |
+| `TERMS_VERSION`, `PRIVACY_VERSION`, `AI_DISCLOSURE_VERSION` | `2026-10-03` (privacy `2026-10-05`) | The pages' "Last updated" dates. |
 | `TERMS_REQUIRED`, `PRIVACY_REQUIRED`, `AI_DISCLOSURE_REQUIRED` | the current version | The oldest a consent may name. Raise only for a material change; a new AI provider always raises `AI_DISCLOSURE_REQUIRED`. |
 | `BRAIN_URL` | unset | The iPhone brain (`https://...` or the Railway private `http://...`), used only by account deletion to call `/v1/brain/forget`. Unset: a Mac's deletion skips the brain (`brain: "not_used"`); an iPhone's deletion answers 503 `deletion_unavailable` and deletes nothing, except in local development. Set it before (or together with) the iPhone brain taking any traffic. |
+| `DIAGNOSTICS_ENABLED` | `1` | `0` is the kill switch for `POST /v1/diagnostics` (503 `diagnostics_disabled`; the phone keeps its own log). |
+| `DIAG_RETENTION_DAYS` | `30` | Diagnostics older than this are deleted. The privacy page says 30 days: change both together. |
+| `DIAG_DAILY_ITEMS` / `DIAG_PER_MINUTE` | `600` / `6` | Turns a device may send per UTC day, uploads per minute. |
+| `DIAG_MAX_ROWS_PER_DEVICE` | `2000` | The oldest of a device's rows go past this. |
 
 ## The voice
 

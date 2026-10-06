@@ -113,6 +113,17 @@ CREATE TABLE IF NOT EXISTS device_links (
     parent_device_id TEXT NOT NULL,
     created_at       INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS diagnostics (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id   TEXT NOT NULL,
+    received_at INTEGER NOT NULL,
+    client_at   TEXT,
+    kind        TEXT NOT NULL DEFAULT 'turn',
+    app_version TEXT NOT NULL DEFAULT '',
+    body        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS diagnostics_device ON diagnostics (device_id, received_at);
+CREATE INDEX IF NOT EXISTS diagnostics_age ON diagnostics (received_at);
 """
 
 # Apple subscription states (apple_subscriptions.status).
@@ -310,6 +321,13 @@ class Store:
         prefix = prefix.lower()
         rows = self._conn().execute(
             "SELECT token_hash FROM tokens WHERE substr(token_hash, 1, ?) = ?",
+            (len(prefix), prefix)).fetchall()
+        return [r[0] for r in rows]
+
+    def resolve_device_prefix(self, prefix: str) -> list[str]:
+        """Device ids starting with `prefix` (e.g. "dev_3fa1")."""
+        rows = self._conn().execute(
+            "SELECT device_id FROM tokens WHERE substr(device_id, 1, ?) = ?",
             (len(prefix), prefix)).fetchall()
         return [r[0] for r in rows]
 
@@ -788,12 +806,59 @@ class Store:
                 pass
             raise
 
+    # ------------------------------------------------------------- diagnostics
+
+    def add_diagnostics(self, device_id: str, items: list[dict], now: int,
+                        max_rows: int, app_version: str = "") -> int:
+        """Keep one upload of a phone's turn log: each item is {client_at, kind, body}
+        with body already JSON text the caller checked. Past max_rows for the device the
+        oldest rows go, in the same transaction. Returns how many were stored."""
+        def work(c: sqlite3.Connection) -> int:
+            for it in items:
+                c.execute("INSERT INTO diagnostics (device_id, received_at, client_at, kind, "
+                          "app_version, body) VALUES (?, ?, ?, ?, ?, ?)",
+                          (device_id, now, it.get("client_at"), it.get("kind") or "turn",
+                           app_version[:32], it["body"]))
+            if max_rows > 0:
+                c.execute("DELETE FROM diagnostics WHERE device_id = ? AND id NOT IN ("
+                          "SELECT id FROM diagnostics WHERE device_id = ? "
+                          "ORDER BY id DESC LIMIT ?)", (device_id, device_id, max_rows))
+            return len(items)
+        return self._tx(work)
+
+    def purge_diagnostics(self, before: int, batch: int = 5000) -> int:
+        """Delete diagnostics received before `before` (epoch seconds). Returns how many."""
+        total = 0
+        while True:
+            cur = self._conn().execute(
+                "DELETE FROM diagnostics WHERE id IN (SELECT id FROM diagnostics "
+                "WHERE received_at < ? LIMIT ?)", (before, batch))
+            total += cur.rowcount
+            if cur.rowcount < batch:
+                return total
+
+    def diagnostics_for(self, device_id: str, limit: int = 50,
+                        since: int | None = None) -> list[dict]:
+        """A device's diagnostics, newest last."""
+        rows = self._conn().execute(
+            "SELECT id, received_at, client_at, kind, app_version, body FROM diagnostics "
+            "WHERE device_id = ? AND received_at >= ? ORDER BY id DESC LIMIT ?",
+            (device_id, since or 0, max(1, limit))).fetchall()
+        keys = ("id", "received_at", "client_at", "kind", "app_version", "body")
+        return [dict(zip(keys, r)) for r in reversed(rows)]
+
+    def diagnostics_count(self, device_id: str | None = None) -> int:
+        if device_id is None:
+            return self._conn().execute("SELECT COUNT(*) FROM diagnostics").fetchone()[0]
+        return self._conn().execute("SELECT COUNT(*) FROM diagnostics WHERE device_id = ?",
+                                    (device_id,)).fetchone()[0]
+
     # ------------------------------------------------------------- account deletion
 
     def delete_account(self, token_hash: str, now: int, leeway: int = 3600) -> dict | None:
         """Delete everything this server keeps about one device, in one transaction: its
         Apple links (and each subscription row no other device is linked to), its
-        Mac-iPhone links, its usage counts and its row. Only an anonymous count of
+        Mac-iPhone links, its usage counts, its diagnostics and its row. Only an anonymous count of
         deletions per day is kept. None when the device does not exist."""
         day = time.strftime("%Y-%m-%d", time.gmtime(now))
 
@@ -817,6 +882,7 @@ class Store:
             c.execute("DELETE FROM device_links WHERE child_device_id = ? OR parent_device_id = ?",
                       (dev, dev))
             c.execute("DELETE FROM usage WHERE token_hash = ?", (token_hash,))
+            c.execute("DELETE FROM diagnostics WHERE device_id = ?", (dev,))
             c.execute("DELETE FROM tokens WHERE token_hash = ?", (token_hash,))
             c.execute("INSERT INTO deletions (day, n) VALUES (?, 1) "
                       "ON CONFLICT (day) DO UPDATE SET n = n + 1", (day,))

@@ -1598,6 +1598,278 @@ def t_named_app_switch_on_reject():
     router.yt.search = REAL_YT_SEARCH
 
 
+# The owner's iPhone, build 5 (2026-10-05): a sunset song on YouTube, then "Play it on
+# Apple Music" said many times. Each time MicMic searched "popular songs" (the subject
+# "it" was empty) or replayed the old search with every song already played left out.
+SUNSET = {"resultCount": 4, "results": [
+    _song(7001, "Sunset", "TWOPILOTS & Heleen", "Sunset - Single", 7100, date="2023-05-05"),
+    _song(7002, "Sunset Listen Through", "Hymn Of Heaven", "Worship", 7200, date="2021-01-01"),
+    _song(7003, "Sunset Lover", "Petit Biscuit", "Presence", 7300, date="2015-06-01"),
+    _song(7004, "Sunset", "The Midnight", "Endless Summer", 7400, date="2016-08-05"),
+]}
+POPULAR = {"resultCount": 1, "results": [
+    _song(7101, "Popular Songs", "Li Ronghao", "Hits", 7500)]}
+SUNSET_VIDEO = [{"id": "tp1sunset1", "title": "TWOPILOTS, Heleen - Sunset (Official Video)",
+                 "channel": "TWOPILOTS", "length": "3:12", "views": "2M views"},
+                {"id": "hymn000001", "title": "Sunset Listen Through - Hymn Of Heaven",
+                 "channel": "Hymn Of Heaven", "length": "4:01", "views": "10K views"}]
+
+
+def _sunset_on_youtube():
+    """The owner's turn 4: a sunset song, on YouTube."""
+    fresh()
+    STATE["more"] = {"sunset": SUNSET, "popular": POPULAR, "1969": CATALOG}
+    STATE["library"] = []
+    queries: list[str] = []
+    router.yt.search = lambda q, n=18: (queries.append(q), [dict(v) for v in SUNSET_VIDEO])[1]
+    turn("Okay, so just play me a song that is nice to hear when there are sunsets.",
+         subject="a song for sunsets")
+    FETCHED.clear()
+    OPENS.clear()
+    tm.OPENED.clear()
+    tm.TABS_CLOSED.clear()
+    queries.clear()
+    return queries
+
+
+def t_handoff_units():
+    for last, want in [
+            ({"player": "youtube", "title": "TWOPILOTS, Heleen - Sunset (Official Video)"},
+             ("Sunset", "TWOPILOTS, Heleen")),
+            ({"player": "youtube", "title": "Adele - Hello (Lyrics) [HD]"}, ("Hello", "Adele")),
+            ({"player": "youtube", "title": "Hello | Live at the BBC", "channel": "Adele - Topic"},
+             ("Hello", "Adele")),
+            ({"player": "youtube", "title": "Bad Bunny - MÍA ft. Drake (Official Video)"},
+             ("MÍA", "Bad Bunny")),
+            ({"player": "apple_music", "title": "1969", "artist": "The Stooges"},
+             ("1969", "The Stooges")),
+            ({"player": "youtube", "title": "1969 - Remastered 2009"}, ("1969 - Remastered 2009", ""))]:
+        got = router.song_of(last)
+        check(f"song_of {last['title']!r} -> {want}", got == want, got)
+
+
+def t_handoff_youtube_to_apple_music():
+    queries = _sunset_on_youtube()
+    check("setup: the sunset song plays on YouTube",
+          (router.MEM.last_played or {}).get("player") == "youtube"
+          and "TWOPILOTS" in router.MEM.last_played.get("title", ""), router.MEM.last_played)
+    r, j = turn("Play it on Apple Music.", player="apple_music", extra={"refers_back": 0.8})
+    det = r.get("detail") or {}
+    check("'play it on apple music': the SAME song, in Apple Music",
+          r["did"] in ("playing", "opened_in_app") and det.get("player") == "apple_music"
+          and det.get("title") == "Sunset" and det.get("artist") == "TWOPILOTS & Heleen",
+          (r["did"], r.get("say"), det))
+    terms = [u.split("term=")[1].split("&")[0] for u in FETCHED if "term=" in u]
+    check("  Apple Music was searched for Sunset TWOPILOTS", any(
+        t.lower().replace("+", " ") == "sunset twopilots" for t in terms), terms)
+    check("  never 'popular songs', never her sentence's 'it'",
+          not any("popular" in t.lower() for t in terms), terms)
+    check("  not as 'another one': nothing already played was left out",
+          "already_played" not in det and det.get("handoff_exact"), det)
+    check("  no extra pick round trip: the exact song was in the search",
+          j.calls == 1, j.calls)
+    check("  the line names it", r["say"].startswith("Sunset by TWOPILOTS & Heleen"), r["say"])
+    check("  the YouTube tab MicMic opened was closed (paused there)",
+          tm.TABS_CLOSED and "tp1sunset1" in tm.TABS_CLOSED[-1], tm.TABS_CLOSED)
+    check("  and no new YouTube search", not queries, queries)
+    check("  the detail says it was moved", det.get("handoff", {}).get("from") == "youtube", det)
+    router.yt.search = REAL_YT_SEARCH
+
+    # The owner said it again: still the same song, never a different one.
+    queries = _sunset_on_youtube()
+    r, _ = turn("Play it on Apple Music.", player="apple_music", extra={"rejects_last": 0.6})
+    check("said as a refusal too: still the same song in Apple Music",
+          (r.get("detail") or {}).get("title") == "Sunset", (r["did"], r.get("detail")))
+    router.yt.search = REAL_YT_SEARCH
+
+    # The named-app question did not ride along: her words still name the player.
+    queries = _sunset_on_youtube()
+    r, _ = turn("play it on apple music")
+    check("player read from her words when the named-app answer is missing",
+          (r.get("detail") or {}).get("player") == "apple_music"
+          and (r.get("detail") or {}).get("title") == "Sunset", (r["did"], r.get("detail")))
+    router.yt.search = REAL_YT_SEARCH
+
+
+def t_handoff_hebrew():
+    for said in ("תשימי את זה באפל מיוזיק", "תנגני את זה באפל מיוזיק"):
+        _sunset_on_youtube()
+        r, _ = turn(said, player="apple_music", lang="hebrew")
+        det = r.get("detail") or {}
+        check(f"Hebrew {said!r}: the same song in Apple Music, answered in Hebrew",
+              det.get("player") == "apple_music" and det.get("title") == "Sunset"
+              and r["lang"] == "hebrew", (r["did"], r.get("say"), det))
+        router.yt.search = REAL_YT_SEARCH
+
+
+def t_handoff_apple_music_to_spotify_and_youtube():
+    fresh()
+    am.spotify_installed = lambda: True
+    try:
+        turn("put 1969 on apple music", player="apple_music", subject="1969",
+             pick=by("The Stooges", lib=False))
+        OPENS.clear()
+        SCRIPTS.clear()
+        r, j = turn("put this on Spotify", player="spotify")
+        check("'put this on Spotify' after Apple Music: that song, on Spotify",
+              r["did"] == "opened_in_app" and (r.get("detail") or {}).get("player") == "spotify"
+              and OPENS and OPENS[-1] == ["open", "spotify:search:1969%20The%20Stooges"],
+              (r["did"], r.get("detail"), OPENS))
+        check("  no pick round trip", j.calls == 1, j.calls)
+        check("  Music was paused", any("pause" in s and 'application "Music"' in s
+                                        for s in SCRIPTS), SCRIPTS)
+    finally:
+        am.spotify_installed = lambda: False
+
+    fresh()
+    turn("put 1969 on apple music", player="apple_music", subject="1969",
+         pick=by("The Stooges", lib=False))
+    queries: list[str] = []
+    vids = [{"id": "st1969aaaa", "title": "The Stooges - 1969", "channel": "The Stooges",
+             "length": "4:05", "views": "1M views"}]
+    router.yt.search = lambda q, n=18: (queries.append(q), [dict(v) for v in vids])[1]
+    SCRIPTS.clear()
+    tm.OPENED.clear()
+    r, _ = turn("play it on youtube", player="youtube")
+    check("Apple Music to YouTube: the same song searched there",
+          r["did"] == "playing" and queries and queries[0].lower().startswith("1969 the stooges"),
+          (r["did"], queries))
+    check("  and Music paused", any("pause" in s and 'application "Music"' in s
+                                    for s in SCRIPTS), SCRIPTS)
+    router.yt.search = REAL_YT_SEARCH
+
+    # A new name in the same breath is a new request, in the app she named.
+    _sunset_on_youtube()
+    STATE["more"]["abba"] = ABBA
+    r, _ = turn("play Abba on apple music", player="apple_music", subject="Abba",
+                pick=by("ABBA"))
+    check("a new name with the player: that name, not the song that was on",
+          (r.get("detail") or {}).get("artist") == "ABBA", (r["did"], r.get("detail")))
+    router.yt.search = REAL_YT_SEARCH
+
+    # "Something" there, or the app itself, is never the song that was on.
+    _sunset_on_youtube()
+    r, _ = turn("play something on apple music", player="apple_music")
+    check("'play something on apple music' over a YouTube song: not a handoff",
+          not (r.get("detail") or {}).get("handoff"), (r["did"], r.get("detail")))
+    _sunset_on_youtube()
+    r, _ = turn("open apple music", intent="open_app", player="apple_music")
+    check("'open apple music' over a YouTube song: not a handoff",
+          not (r.get("detail") or {}).get("handoff") and r["did"] not in ("playing",),
+          (r["did"], r.get("detail")))
+    router.yt.search = REAL_YT_SEARCH
+
+
+def t_garbled_stop_never_a_different_song():
+    """Turn 9: "Hey, don't happen music." (Apple heard "It on Apple Music"), intent stop
+    0.77 with a refusal score: it replayed the old search and played "Sunset Listen
+    Through - Hymn Of Heaven"."""
+    queries = _sunset_on_youtube()
+    r, _ = turn("Hey, don't happen music.", intent="stop",
+                extra={"rejects_last": 0.9, "intent_confidence": 0.77})
+    check("garbled stop over YouTube: no new search, no new song",
+          not queries and not tm.OPENED and r["did"] != "playing",
+          (r["did"], queries, tm.OPENED))
+    check("  it stops what plays (MicMic's own tab)", r["did"] in ("stopped", "nothing_playing")
+          or tm.TABS_CLOSED, (r["did"], tm.TABS_CLOSED))
+    router.yt.search = REAL_YT_SEARCH
+
+
+def t_garbled_stop_then_play_it_on_apple_music():
+    """The owner's whole sequence (build 5, 2026-10-05): the sunset song on YouTube, the
+    garbled "Hey, don't happen music." read as a stop (it stopped the song), then "Play it
+    on Apple Music." said again. The retry moved nothing and played "Popular Songs by Li
+    Ronghao": the stop had forgotten the song."""
+    queries = _sunset_on_youtube()
+    r, _ = turn("Hey, don't happen music.", intent="stop",
+                extra={"rejects_last": 0.9, "intent_confidence": 0.77})
+    check("3-turn: the garbled stop stops, plays nothing", r["did"] != "playing"
+          and not queries, (r["did"], queries))
+    check("  nothing is on any more", not router.MEM.last_played, router.MEM.last_played)
+    FETCHED.clear()
+    tm.TABS_CLOSED.clear()
+    r, j = turn("Play it on Apple Music.", player="apple_music", extra={"refers_back": 0.8})
+    det = r.get("detail") or {}
+    terms = [u.split("term=")[1].split("&")[0] for u in FETCHED if "term=" in u]
+    check("3-turn: 'Play it on Apple Music.' after the stop: the song she just stopped",
+          r["did"] in ("playing", "opened_in_app") and det.get("player") == "apple_music"
+          and det.get("title") == "Sunset" and det.get("artist") == "TWOPILOTS & Heleen",
+          (r["did"], r.get("say"), det))
+    check("  never 'popular songs'", not any("popular" in t.lower() for t in terms)
+          and "Li Ronghao" not in (r.get("say") or ""), (terms, r.get("say")))
+    check("  moved from YouTube", (det.get("handoff") or {}).get("from") == "youtube", det)
+    check("  nothing closed again (it was already stopped)", not tm.TABS_CLOSED, tm.TABS_CLOSED)
+    router.yt.search = REAL_YT_SEARCH
+
+    # Stopped on YouTube, "play it on YouTube": the same song back on, not a question.
+    _sunset_on_youtube()
+    turn("Hey, don't happen music.", intent="stop",
+         extra={"rejects_last": 0.9, "intent_confidence": 0.77})
+    queries = []
+    router.yt.search = lambda q, n=18: (queries.append(q), [dict(v) for v in SUNSET_VIDEO])[1]
+    r, _ = turn("play it on youtube", player="youtube", extra={"refers_back": 0.8})
+    check("stopped on YouTube, 'play it on YouTube': that song again",
+          r["did"] == "playing" and queries and queries[0].lower().startswith("sunset twopilots"),
+          (r["did"], r.get("say"), queries))
+    router.yt.search = REAL_YT_SEARCH
+
+    # Long after the stop, "it" points at nothing: asked, never popular songs.
+    _sunset_on_youtube()
+    turn("Hey, don't happen music.", intent="stop",
+         extra={"rejects_last": 0.9, "intent_confidence": 0.77})
+    router.MEM.last_stopped["stopped_at"] -= router.STOPPED_TTL + 1
+    FETCHED.clear()
+    r, _ = turn("Play it on Apple Music.", player="apple_music", extra={"refers_back": 0.8})
+    terms = [u.split("term=")[1].split("&")[0] for u in FETCHED if "term=" in u]
+    check("past the window: 'play it on Apple Music' asks which song",
+          r["did"] == "need_what" and r.get("asked_back")
+          and "Li Ronghao" not in (r.get("say") or ""),
+          (r["did"], r.get("say")))
+    check("  and searched nothing", not terms, terms)
+    router.yt.search = REAL_YT_SEARCH
+
+    # Nothing ever played: the same question, never "popular songs".
+    fresh()
+    STATE["more"] = {"popular": POPULAR}
+    r, _ = turn("play it on apple music", player="apple_music")
+    check("nothing ever on: 'play it on apple music' asks which song",
+          r["did"] == "need_what" and "Li Ronghao" not in (r.get("say") or ""),
+          (r["did"], r.get("say")))
+
+
+def t_handoff_never_for_a_new_request_with_this_or_that():
+    """'This' or 'that' inside a new request is not the song that is on: probes with a
+    YouTube song on, with and without a subject read out."""
+    for said, player, subj in [
+            ("play this week's top hits on Spotify", "spotify", "this week's top hits"),
+            ("play that song from yesterday on Spotify", "spotify", "that song from yesterday"),
+            ("play the song that goes la la la on apple music", "apple_music",
+             "the song that goes la la la"),
+            ("play this artist's newest album on apple music", "apple_music",
+             "this artist's newest album")]:
+        for with_subj in (True, False):
+            _sunset_on_youtube()
+            if player == "spotify":
+                am.spotify_installed = lambda: True
+            try:
+                r, _ = turn(said, player=player, subject=subj if with_subj else None)
+            finally:
+                am.spotify_installed = lambda: False
+            det = r.get("detail") or {}
+            check(f"not a handoff: {said!r} (subject {'read' if with_subj else 'missing'})",
+                  not det.get("handoff") and det.get("title") != "Sunset",
+                  (r["did"], r.get("say"), det.get("handoff")))
+            router.yt.search = REAL_YT_SEARCH
+    for said in ("play this song on apple music", "put that one on apple music",
+                 "play the same song on apple music", "play this on apple music"):
+        _sunset_on_youtube()
+        r, _ = turn(said, player="apple_music", subject=said.split(" on ")[0].split(" ", 1)[1])
+        check(f"a pointer is still the handoff: {said!r}",
+              (r.get("detail") or {}).get("title") == "Sunset"
+              and (r.get("detail") or {}).get("handoff"), (r["did"], r.get("detail")))
+        router.yt.search = REAL_YT_SEARCH
+
+
 def t_reject_plays_another_never_not_found():
     """"not this one" / "look well for sure you should find": rejecting a song must
     hand her another real one by the artist, never "not found" - the owner's
@@ -2025,7 +2297,12 @@ def main():
               t_warms_apple_music_and_shorter_press_wait,
               t_misheard_artist_youtube, t_exact_artist_no_extra_lookup,
               t_misheard_artist_apple_music, t_youtube_empty_retried_once,
-              t_artist_by_sound_units, t_youtube_page_fetch, t_podcast):
+              t_artist_by_sound_units, t_youtube_page_fetch, t_podcast,
+              t_handoff_units, t_handoff_youtube_to_apple_music, t_handoff_hebrew,
+              t_handoff_apple_music_to_spotify_and_youtube,
+              t_garbled_stop_never_a_different_song,
+              t_garbled_stop_then_play_it_on_apple_music,
+              t_handoff_never_for_a_new_request_with_this_or_that):
         print(f"\n{t.__name__}")
         try:
             t()

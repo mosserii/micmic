@@ -203,6 +203,19 @@ def test_busy_upstream_is_retried_then_fails_like_before(clean_env, monkeypatch,
     assert len(proxy.upstream.hits) == 3
 
 
+def test_upstream_error_is_retried(clean_env, monkeypatch, proxy):
+    """The proxy's 502 upstream_error (refunded by the proxy) is tried three times, and
+    the next question goes through (MicMic Bench v1 phone path, 2026-10-04)."""
+    use_proxy(monkeypatch, proxy, proxy.mint())
+    proxy.upstream.mode = "error500"
+    j = Jev()
+    with pytest.raises(RuntimeError, match="jev call failed: HTTP 502"):
+        j.ask("s", QS)
+    assert len(proxy.upstream.hits) == 3
+    proxy.upstream.mode = "ok"
+    assert j.ask("s", QS) == JEV_ANSWER["answers"]
+
+
 def test_proxy_restart_between_calls_is_survived(clean_env, monkeypatch, proxy):
     """The kept-alive connection dies when the proxy closes it; the next ask reconnects."""
     use_proxy(monkeypatch, proxy, proxy.mint())
@@ -273,6 +286,19 @@ def test_gemini_upstream_failure_via_proxy_is_generic(clean_env, monkeypatch, pr
     assert llm.generate_content([{"parts": [{"text": "x"}]}]) is None
     assert llm.last_error == "HTTP 502 upstream_error"
     assert FAKE_JEV_KEY not in llm.last_error and llm.out_of_credit is False
+
+
+def test_gemini_upstream_error_is_tried_once_more(clean_env, monkeypatch, proxy):
+    """The proxy's 502 is refunded: one more try (a stale upstream connection failed the
+    first Gemini call after a quiet spell, MicMic Bench v1 phone path, 2026-10-04)."""
+    use_proxy(monkeypatch, proxy, proxy.mint())
+    proxy.upstream.mode = "error500"
+    llm = LLM()
+    n0 = len(proxy.upstream.hits)
+    assert llm.generate_content([{"parts": [{"text": "x"}]}]) is None
+    assert len(proxy.upstream.hits) - n0 == 2
+    proxy.upstream.mode = "ok"
+    assert llm.generate_content([{"parts": [{"text": "x"}]}]) is not None
 
 
 def test_own_gemini_key_is_used_directly_even_without_a_jev_key(clean_env, monkeypatch,

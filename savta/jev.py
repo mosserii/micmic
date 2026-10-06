@@ -318,8 +318,11 @@ class Jev:
         headers = {"Authorization": f"Bearer {self._auth}", "Content-Type": "application/json",
                    "Connection": "keep-alive"}
         # Through the proxy, 503 is "Jev is busy, try again" and 429 is reserved for the
-        # daily allowance, which retrying cannot fix.
-        retry_on = (429, 529) if self.mode == "own_key" else (503, 529)
+        # daily allowance, which retrying cannot fix. 502 is the proxy's "upstream_error"
+        # (Jev answered 5xx, garbage, or could not be reached), always refunded, so a retry
+        # costs her nothing: once failed whole turns on the phone ("Something went wrong",
+        # 3 of 383 in MicMic Bench v1's phone path, 2026-10-04).
+        retry_on = (429, 529) if self.mode == "own_key" else (502, 503, 529)
         last = None
         fresh = False            # after a failure, never trust another idle connection
         hedged = False           # at most one duplicate per question, retries included

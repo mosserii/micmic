@@ -964,9 +964,174 @@ def _sound_match(j: Jev, utterance: str, said_words: str, artist: str) -> dict |
     return pick if good >= 0.4 else matches[0]
 
 
+# ---------------------------------------------------------------- the same song, elsewhere
+# "Play it on Apple Music" right after a song on YouTube (the owner's iPhone, build 5,
+# 2026-10-05, asked it many times): the song that is on NOW, moved to the player she
+# named. It used to search "popular songs" (the subject "it" was empty, so
+# _something_she_likes ran) or replay the old search with every song already played
+# left out (fresh_only), so the one she wanted moved could never come back.
+# Her words point at what is on ("it", "this", "the same song") or name nothing but
+# the player; a new title or singer is an ordinary request for that, in that app.
+_HANDOFF_SAME = re.compile(
+    r"\b(?:it|this|that)\b|\bthe\s+same\b|\bsame\s+(?:song|track|one|thing)\b|"
+    r"(?<![֐-׿])(?:זה|זאת|אותו|אותה|השיר\s+הזה)(?![֐-׿])|"
+    r"(?<![؀-ۿ])(?:هاد|هاي|هيدا|هيدي|هذا|هذه|ياها|إياها|نفس\s+(?:ال)?أغنية)(?![؀-ۿ])|"
+    r"\b(?:это|эту|его|её|ее|ту\s+же|эту\s+же|ту\s+самую)\b", re.I)
+# What is left of "ok so play it there now please" once the asking, pointing and
+# player words are gone: nothing that names a song.
+# Never "something", "another", "else", "different": "play something on Spotify" over a
+# song on YouTube asks for something else there, not the same song.
+_HANDOFF_FILLER = set("""
+no not ok okay so now there here instead rather actually then just switch move change put
+continue keep keeping playing same again over into onto from app the please hey hi and
+also too song track this that it its play listen start well
+לא זה זאת
+עכשיו במקום תעבירי תעביר להעביר תחליפי תחליף תמשיכי תמשיך גם שם פה טוב אוקיי אז הזה
+הזאת אותו אותה רגע
+الآن هلق هلّق بدل كمان هون هناك نفس طيب حوّلي حولي كملي كمّلي
+сейчас теперь вместо там тут лучше переключи продолжи давай это эту его ту же самую
+""".split())
+
+
+# Her whole subject only points at what is on: "it", "this one", "that song", "the same
+# track", "את זה", "השיר הזה", "نفس الأغنية", "эту песню". "This week's top hits" or
+# "that song from yesterday" merely CONTAIN a pointer word: they name a new thing, and
+# are searched in the app she named (never the song that was on, moved).
+_HANDOFF_POINTER = re.compile(
+    r"(?:(?:this|that|the)\s+)?same(?:\s+(?:song|track|one|thing|music|video))?|"
+    r"(?:it|this|that)(?:\s+(?:same\s+)?(?:song|track|one|tune|music|video|thing))?|"
+    r"(?:את\s+)?(?:זה|זאת|אותו|אותה)(?:\s+(?:שיר|דבר))?|(?:את\s+)?השיר\s+הזה|"
+    r"(?:هاد|هاي|هيدا|هيدي|هذا|هذه|ياها|إياها)(?:\s+(?:ال)?أغنية)?|هالأغنية|"
+    r"نفس\s+(?:ال)?أغنية|"
+    r"(?:это|эту|его|её|ее|ту\s+же|эту\s+же|ту\s+самую)(?:\s+(?:песню|трек))?",
+    re.I)
+# What is left of her words that still names something else, once a pointer did not
+# cover it: "play that song from yesterday on Spotify" with no subject read out.
+_HANDOFF_NEW = set("""
+from yesterday today tonight week week's weeks month year top hits hit chart charts
+newest latest best album albums playlist playlists artist artist's singer band goes
+called named about by with radio station
+""".split())
+
+# Words that ask for a DIFFERENT song: never the handoff, whatever else is said.
+_HANDOFF_NOT = set("""
+something anything else another different other new more random
+משהו אחר אחרת שונה חדש
+إشي اشي شي تاني غير جديد
+что-нибудь что-то другое другую другой новое
+""".split())
+
+
+def _player_said(utterance: str) -> str:
+    """The one player her own words name, by code ("" when none, or more than one):
+    for the handoff only, when the named-app question did not ride along."""
+    u = utterance or ""
+    hits = [k for k, rx in (("apple_music", am.PLAYER_WORDS_APPLE),
+                            ("spotify", am.PLAYER_WORDS_SPOTIFY),
+                            ("youtube", r"you\s?tube|יו\s?טיוב|يوتيو?ب|ють?юб\w*"))
+            if re.search(rx, u, re.I)]
+    return hits[0] if len(hits) == 1 else ""
+
+
+def song_of(last: dict | None) -> tuple[str, str]:
+    """(title, artist) of what was put on, as a catalog would name them. A YouTube
+    video's title carries its artist ("TWOPILOTS, Heleen - Sunset (Official Video)")
+    and its noise ("(Lyrics)", "[HD]", "| Label"); the channel is the artist when the
+    title names none ("Adele - Topic")."""
+    last = last or {}
+    title = str(last.get("title") or "")
+    artist = str(last.get("artist") or "")
+    t = re.sub(r"[\(\[][^\(\)\[\]]*[\)\]]", " ", title)
+    t = re.sub(r"\s*[|│｜].*$", "", t)
+    t = re.sub(r"(?i)\b(?:official\s+(?:music\s+)?video|official\s+audio|lyric\s+video|"
+               r"lyrics?|visuali[sz]er|hd|4k|mv)\b", " ", t)
+    t = re.sub(r"[\"“”„«»]", " ", t)
+    parts = re.split(r"\s[-–—]\s", t, maxsplit=1)
+    if not artist and len(parts) == 2 and parts[0].strip() and parts[1].strip() \
+            and not am._VERSION.match(parts[1].strip()):
+        artist, t = parts[0], parts[1]
+    if not artist and last.get("player") == "youtube" and last.get("channel"):
+        artist = re.sub(r"(?i)\s*-\s*topic$|vevo$", "", str(last["channel"])).strip()
+    t = re.sub(r"\s(?:feat\.?|ft\.?|featuring)\s.*$", "", t, flags=re.I)
+    t = re.sub(r"\s+", " ", t).strip(" -–—:,.")
+    return (t or title.strip()), re.sub(r"\s+", " ", artist).strip(" -–—:,.")
+
+
+def _handoff_to(u: dict, utterance: str) -> str:
+    """The player she wants the song that is on NOW moved to, or "". A player named
+    that is not the one it plays in, and nothing else named: "play it on Apple Music",
+    "put this on Spotify", "תשימי את זה באפל מיוזיק", "ok so on YouTube"."""
+    # What is on, or the song she stopped a moment ago (STOPPED_TTL): a misheard "play
+    # it on Apple Music" read as a stop must not leave the retry with nothing to move.
+    last = MEM.last_played or MEM.recent_stopped() or {}
+    src = last.get("player")
+    if src not in tg.PLAYERS or not last.get("title") or last.get("words_only"):
+        return ""
+    if u.get("control_action", "not_applicable") != "not_applicable":
+        return ""
+    if u.get("intent") not in ("music", "watch", "player", "again", "open_app", "chitchat",
+                               "unclear", "radio"):
+        return ""
+    # "Open Spotify" is the app; only "open it on Spotify" points at the song.
+    if u.get("intent") not in ("music", "watch", "radio") and \
+            not _HANDOFF_SAME.search(am.without_player(utterance)):
+        return ""
+    to = _named_place(u) or _player_said(utterance)
+    # The same player is a move only for a song already stopped: "play it on YouTube"
+    # right after it was stopped there puts it back on.
+    if to not in tg.PLAYERS or (to == src and not last.get("stopped_at")):
+        return ""
+    said = re.sub(r"[^\w\s'-]", " ", tg.without_names(am.without_player(utterance)))
+    if any(w.lower() in _HANDOFF_NOT for w in said.split()):
+        return ""
+    left = [w for w in said.split() if w.lower() not in am._ASKING
+            and w.lower() not in tg.PRONOUNS and w.lower() not in _HANDOFF_FILLER]
+    subj = ((u.get("spans") or {}).get("subject") or (None, 0.0))[0] or ""
+    subj = tg.without_names(am.without_player(str(subj))).strip(" .,!?")
+    title, artist = song_of(last)
+    known = am._plain(f"{title} {artist} {last.get('title') or ''}")
+
+    def about_it(words: str) -> bool:
+        w = am._plain(words)
+        return not w or tg.is_pronoun(words) \
+            or bool(_HANDOFF_POINTER.fullmatch(re.sub(r"\s+", " ", words.strip(" .,!?")))) \
+            or all(x in known.split() for x in w.split())
+    # A subject that is not wholly a pointer, nor the song that is on, names a new
+    # thing: that, in the app she named ("this week's top hits on Spotify").
+    if subj and not about_it(subj):
+        return ""
+    if not left or about_it(" ".join(left)):
+        return to
+    # Words left over that no pointer covers (a mishearing, a stray word): still the
+    # song that is on when she pointed at it, unless what is left describes another one.
+    if any(w.lower().strip("'") in _HANDOFF_NEW for w in left):
+        return ""
+    if _HANDOFF_SAME.search(am.without_player(utterance)) or u.get("refers_back", 0) > 0.5:
+        return to
+    return ""
+
+
+def _pause_player(last: dict | None) -> None:
+    """What a song was just moved away from, paused: Music or Spotify by their own
+    pause, a video by closing MicMic's own tab (never Cmd-W to the front app). On the
+    phone MicMic's players switch by themselves (brain/walls.py makes this a no-op)."""
+    last = last or {}
+    app = last.get("player")
+    try:
+        if app == "apple_music":
+            am.control("pause")
+        elif app == "spotify":
+            am.spotify_control("pause")
+        elif app == "youtube" or app in tg.VIDEO:
+            _close_micmic_tab(last)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _play_in_app(j: Jev, app: str, subject: str, utterance: str, lang: str,
                  named: bool = True, fresh_only: bool = False,
-                 preset: dict | None = None, artist_hint: str = "") -> tuple[str, str, dict]:
+                 preset: dict | None = None, artist_hint: str = "",
+                 want: dict | None = None) -> tuple[str, str, dict]:
     """Find the song and play it in Music, or open it in Spotify (its web player when
     the app is not on this Mac).
 
@@ -990,7 +1155,10 @@ def _play_in_app(j: Jev, app: str, subject: str, utterance: str, lang: str,
     search above finds nothing playable. A misheard title ("nueva yella" for
     NUEVAYoL, "where all" for a real Bad Bunny song) is not in Apple's own lexical
     search results at all; matched by sound and spelling against that artist's real
-    songs instead (actions/music.by_sound)."""
+    songs instead (actions/music.by_sound).
+
+    `want`: {"title", "artist"} of the song she asked to have moved here (the
+    handoff): when the search found that very song it is played, with no pick asked."""
     web = app == "spotify" and not am.spotify_installed()
     limit = 25 if fresh_only else 10
     phrases, words = am.search_terms(subject if named else None, utterance)
@@ -1047,10 +1215,19 @@ def _play_in_app(j: Jev, app: str, subject: str, utterance: str, lang: str,
             else:
                 return "exhausted", _sp(lang, "exhausted", q=term), base
     pick = None
+    exact = None
+    if want and not preset:
+        wk = am.song_key(want.get("title") or "", want.get("artist") or "")
+        exact = next((r for r in rows if r["where"] == "library"
+                      and am.same_key(am.row_key(r), wk)), None) or next(
+            (r for r in rows if am.same_key(am.row_key(r), wk)), None)
     if preset:
         pick = next((r for r in rows if r["where"] == "library"
                      and am.same_song(preset, r)), None) or {**preset, "term": term}
         base.update(preset=True)
+    elif exact:
+        pick = exact
+        base.update(handoff_exact=True)
     elif rows:
         pick, pconf, good = pick_from(j, rows, _song_label,
                                       _SONG_PICK.format(want=f"{term}, as a song"),
@@ -1552,7 +1729,9 @@ def _time_turn(j: Jev, u: dict, utterance: str, lang: str, rq: dict, contacts: l
     if kind == "calendar":
         return _spoken_event(j, u, utterance, lang, rq, about, contacts, finish, det, now)
 
-    when = tw.resolve(rq.get("duration"), rq.get("clock"), rq.get("day"), now)
+    when = tw.resolve(rq.get("duration"), rq.get("clock"), rq.get("day"), now,
+                      alarm=kind == "alarm",
+                      wake=kind in ("alarm", "reminder") and bool(tw.WAKE_RX.search(utterance)))
     mode = when["mode"]
     asked_about = "time_about" in (u.get("raw") or {})
     if not about and not asked_about and kind == "reminder":
@@ -1862,6 +2041,8 @@ def _follow_up(j: Jev, u: dict, ch: dict, lang: str, utterance: str = "") -> dic
         new_t = tw.clock_words(_dt.datetime.fromtimestamp(row["at"]))
         if tkind == "alarm":
             say = tw.line("alarm_moved", lang, t=new_t)
+        elif tkind == "timer" and not clocked:
+            say = tw.line("timer_moved", lang, n=max(1, round(mins)))
         elif clocked:
             say = fu.line("timer_at", lang, t=new_t)
         else:
@@ -4209,6 +4390,28 @@ CONFIRM_YES_GATE = 0.6
 EVENT_TIME_GATE = 0.4
 
 
+# "On WhatsApp", "oh I meant on WhatsApp", "בוואטסאפ": every word an app or a filler, so
+# no person was named, whatever Jev's contact_named says (it sat at 0.46-0.55 for a bare
+# "on whatsapp" and, over 0.5, dropped the draft's person: "Who should I send it to?",
+# MicMic Bench v1 phone path mt-003, 2026-10-04). Any other word keeps the old reading,
+# so "send it to my sister on WhatsApp" still leaves the old person behind.
+_APP_WORDS = {"whatsapp", "imessage", "messages", "message", "sms", "text", "telegram",
+              "signal", "וואטסאפ", "ווטסאפ", "בוואטסאפ", "בווטסאפ", "בווצאפ", "וואצאפ",
+              "בוואצאפ", "בהודעה", "בסמס", "בטלגרם", "واتس", "واتساب", "بالواتس", "بالواتساب",
+              "ватсап", "вотсап", "ватсапе", "вотсапе", "whatsapp'e"}
+_APP_FILLER = set("""on in by via with through over using use send it that this the a an app
+    please instead actually oh no wait sorry i meant mean make do rather just now and
+    ב תשלחי תשלח שלחי את זה בעצם לא סליחה התכוונתי דרך
+    على عبر ب ابعتها ابعت لا قصدي
+    в через по нет отправь это лучше""".split())
+
+
+def _only_names_app(utterance: str) -> bool:
+    ws = re.findall(r"[^\W\d_]+", (utterance or "").lower())
+    return (bool(ws) and any(w in _APP_WORDS for w in ws)
+            and all(w in _APP_WORDS or w in _APP_FILLER for w in ws))
+
+
 def _why_confirm(body: str, said_now: bool, asr_conf: float | None) -> str | None:
     """Why this message needs a yes rather than a countdown, or None if it does not."""
     if prefs.always_confirm():
@@ -5610,6 +5813,10 @@ class Memory:
         # "MIA (feat. Drake)" and then "MÍA (feat. Drake)").
         self.played_keys: list[tuple[str, str]] = []
         self.last_played: dict | None = None
+        # The song that was on until a stop, or until the phone stopped reporting it
+        # (STOPPED_TTL): what "play it on Apple Music" right after a stop still means.
+        # Never what plays now: "pause" or "what's playing" do not see it.
+        self.last_stopped: dict | None = None
         self.last_file: str | None = None
         self.last_app: str | None = None
         # The message being prepared, sent or stopped. See DRAFT_TTL.
@@ -5666,6 +5873,19 @@ class Memory:
             if not any(am.same_key(k, o) for o in self.played_keys):
                 self.played_keys = (self.played_keys + [k])[-40:]
 
+    def stopped(self, last: dict | None) -> None:
+        """What was on, just stopped (by her stop, or the phone no longer reporting it)."""
+        if last and last.get("title") and not last.get("words_only") \
+                and last.get("player") in tg.PLAYERS:
+            self.last_stopped = {**last, "stopped_at": time.time()}
+
+    def recent_stopped(self) -> dict | None:
+        st = self.last_stopped
+        if st and time.time() - float(st.get("stopped_at") or 0) <= STOPPED_TTL:
+            return st
+        self.last_stopped = None
+        return None
+
     def reject_current(self):
         if self.last_played and self.last_played.get("id"):
             vid = self.last_played["id"]
@@ -5681,6 +5901,11 @@ class Memory:
 
 
 MEM = Memory()
+# How long the song she just stopped is still "it" for moving it to another player. The
+# owner's iPhone (build 5, 2026-10-05): a misheard "play it on Apple Music" was read as a
+# stop, the song stopped, and the "Play it on Apple Music." he said right after had
+# nothing to move ("Popular Songs by Li Ronghao").
+STOPPED_TTL = 5 * 60.0
 
 
 DAILY_INTERRUPT_BUDGET = 3     # including the morning greeting
@@ -8113,6 +8338,16 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
     # First thing she says today: greet her and tell her what changed, then still do
     # the thing she asked for. Never make her listen to a briefing before being helped.
     day_open = ""
+    # Never in front of a cry for help: the emergency line (and its countdown) does not
+    # wait on the weather, and is not made longer by a greeting. The day is given back,
+    # so her next ordinary turn still opens it.
+    if brief_later is not None and (u.get("emergency", 0.0) >= 0.18
+                                    or u.get("distress", 0.0) >= 0.8
+                                    or people.emergency_kind(utterance)
+                                    or people.in_trouble(utterance)
+                                    or EMERGENCY_PENDING is not None):
+        _unclaim_briefing()
+        brief_later = None
     if brief_later is not None:
         try:
             day_open = brief_later()
@@ -8583,9 +8818,34 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
     # not: YouTube's search makes sense of them and Jev picks among real results.
     asks_about_it = (bool(MEM.last_played) and u["intent"] == "look_up"
                      and u["intent_confidence"] >= ACT_ON_INTENT)
+    # "Play it on Apple Music" over a song on YouTube: the same song, moved there
+    # (_handoff_to). Before the correction and refusal paths below: "it" was taken as
+    # the one she meant instead (and the song on now refused), or the old search was
+    # replayed with every song already played left out.
+    handoff = None
+    to_h = "" if asks_about_it else _handoff_to(u, utterance)
+    if to_h:
+        last_h = dict(MEM.last_played or MEM.recent_stopped() or {})
+        title_h, artist_h = song_of(last_h)
+        if title_h:
+            q_h = f"{title_h} {am.main_artist(artist_h)}".strip()
+            handoff = {"to": to_h, "from": last_h, "title": title_h, "artist": artist_h,
+                       "query": q_h}
+            u["spans"] = {**(u.get("spans") or {}), "subject": (q_h, 1.0)}
+            u["intent"] = ("watch" if last_h.get("player") == "youtube"
+                           and MEM.play_kind not in ("song_or_music", "not_applicable")
+                           else "music")
+            u["names_title"] = 1.0
+            u["intent_confidence"] = max(u["intent_confidence"], ACT_ON_INTENT)
+            u["rejects_last"], u["describes_instead"] = 0.0, 0.0
+            u["describes_song"], u["screen_song"] = 0.0, 0.0
+            u["named_app"] = to_h
+            u["named_app_confidence"] = max(u.get("named_app_confidence", 0.0), PLAYER_GATE)
+            if u["media_kind"] == "not_applicable":
+                u["media_kind"] = "song_or_music" if u["intent"] == "music" else MEM.play_kind
     instead = None
     raw = u.get("raw") or {}
-    if (MEM.last_played and not asks_about_it and "span_instead" in raw
+    if (MEM.last_played and not asks_about_it and not handoff and "span_instead" in raw
             and raw.get("span_instead_exists", {}).get("noul", 0.0) > NAMES_INSTEAD_GATE
             and u["control_action"] == "not_applicable"
             and u["intent"] in ("watch", "music", "chitchat", "unclear", "stop", "again",
@@ -8607,7 +8867,7 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
     # its gate, it landed here as "I only caught part of that" on some runs.
     describing_swap = bool(MEM.last_played) and u["describes_instead"] > DESCRIBES_GATE
     if (u["is_complete"] < 0.35 and u["rejects_last"] < REJECTS_GATE and not describing_swap
-            and not instead):
+            and not instead and not handoff):
         if open_mic:
             # The microphone is still running; she may genuinely be mid-sentence.
             return finish("waiting", None, detail="she is still speaking")
@@ -8697,8 +8957,15 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
     # "another one" replays the same search. "something more manly" does NOT: it says
     # what she wants instead, and replaying discarded that — the same children's song
     # came back. Those fall through to the music request below, which searches for it.
+    # A garbled stop said over a song ("Hey, don't happen music.", intent stop 0.77 on
+    # the owner's iPhone, 2026-10-05: Apple's recogniser had "It on Apple Music") is
+    # never a refusal that starts a DIFFERENT song: the stop branch below stops it. A
+    # bare refusal ("no", "לא", "not this one") still plays another one, as always.
+    stop_said = (u["intent"] == "stop" and u["intent_confidence"] >= ACT_ON_INTENT
+                 and bool(_rejection_leftover(utterance)))
     if (u["rejects_last"] > REJECTS_GATE and MEM.play_query and MEM.last_played
             and not asks_about_it and not instead and not identified and not screen_song
+            and not handoff and not stop_said
             and u["describes_instead"] < DESCRIBES_GATE
             and u["control_action"] == "not_applicable"):
         in_app = (MEM.last_played or {}).get("player")
@@ -9036,8 +9303,12 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
 
     # "Play it", "play that song" and nothing to point at: no title in her words,
     # nothing playing or just played, nothing just answered, no song on her screen.
-    play_ref = _play_ref_only(utterance)
-    if (play_ref and not place and not MEM.last_played and not MEM.play_query
+    # Also "play it on Apple Music" with nothing on and nothing just stopped (the song
+    # that was on is moved, _handoff_to): which song, never "popular songs".
+    in_player = place in tg.PLAYERS
+    play_ref = _play_ref_only(am.without_player(utterance) if in_player else utterance)
+    if (play_ref and (not place or in_player) and not MEM.last_played
+            and (in_player or not MEM.play_query)
             and not screen_song and not identified and not instead
             and not ((u.get("spans") or {}).get("subject") or (None, 0.0))[0]
             and u.get("player_action", "not_applicable") == "not_applicable"
@@ -9464,6 +9735,7 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             last_v = dict(MEM.last_played)
             did_s, say_s, det_s = _stop_video(last_v, lang)
             if did_s in ("stopped", "nothing_playing") and not det_s.get("paused"):
+                MEM.stopped(last_v)
                 MEM.last_played = None
             elif det_s.get("paused"):
                 MEM.last_played = {**last_v, "paused": True}
@@ -9541,6 +9813,7 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                 last_v = dict(MEM.last_played)
                 did_s, say_s, det_s = _stop_video(last_v, lang)
                 if did_s in ("stopped", "nothing_playing") and not det_s.get("paused"):
+                    MEM.stopped(last_v)
                     MEM.last_played = None
                 elif det_s.get("paused"):
                     MEM.last_played = {**last_v, "paused": True}
@@ -9712,11 +9985,21 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                 # the real song.
                 subject if (identified or screen_song) else utterance, lang,
                 named=bool(named or want_text),
-                fresh_only=follow_up and not identified and u["names_title"] < 0.5,
-                preset=(identified or {}).get("preset"), artist_hint=artist_hint)
+                fresh_only=(follow_up and not identified and not handoff
+                            and u["names_title"] < 0.5),
+                preset=(identified or {}).get("preset"), artist_hint=artist_hint,
+                want=({"title": handoff["title"], "artist": handoff["artist"]}
+                      if handoff else None))
             none_there = _not_a_song_there(did_a, subject)
             if none_there:
                 return none_there
+            if handoff:
+                det_a = {**det_a, "handoff": {"from": handoff["from"].get("player"),
+                                              "title": handoff["title"],
+                                              "artist": handoff["artist"] or None}}
+                if did_a in ("playing", "opened_in_app", "not_started") \
+                        and not handoff["from"].get("stopped_at"):
+                    _pause_player(handoff["from"])
             if named:
                 longterm.note("music", subject)
             if intro and did_a in ("playing", "opened_in_app", "not_started"):
@@ -9845,6 +10128,8 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             # Her correction replaces what is playing, as "something else" does: the
             # tab MicMic opened for it, never Cmd-W to the front app (P1-4).
             _close_micmic_tab(playing_before)
+        elif handoff and not handoff["from"].get("stopped_at"):
+            _pause_player(handoff["from"])      # moved here from Music or Spotify
         mac.open_url(url)
         # Name it. "Here you go" tells someone who cannot see the screen nothing at all
         # about whether it found the right thing.
@@ -9860,6 +10145,10 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                               "channel": pick["channel"], "views": pick["views"],
                               "pick_conf": round(pconf, 2), "any_good": round(good, 2),
                               "candidates": len(results), "corrected": bool(instead),
+                              **({"handoff": {"from": handoff["from"].get("player"),
+                                              "title": handoff["title"],
+                                              "artist": handoff["artist"] or None}}
+                                 if handoff else {}),
                               **({"podcast": True} if podcast else {}),
                               **({"heard_as": heard, "artist_fixed": fixed["name"]}
                                  if fixed and pick else {})})
@@ -10035,7 +10324,7 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                 to = (u["contact"] if _same_person(j, utterance, u["contact"])
                       >= SAME_PERSON_GATE else None)
             elif u["contact"] == "nobody" and u["contact_named"] >= 0.5 \
-                    and u["refers_back"] <= 0.5:
+                    and u["refers_back"] <= 0.5 and not _only_names_app(utterance):
                 to = None                        # she named someone not in her book
             if new_words is not None:
                 got, _ = new_words()

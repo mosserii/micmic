@@ -22,7 +22,7 @@ UPDATED = "3 October 2026"
 # *_REQUIRED variables together.
 DOC_VERSIONS = {
     "/terms": "2026-10-03",
-    "/privacy": "2026-10-03",
+    "/privacy": "2026-10-05",
 }
 
 # path -> template file

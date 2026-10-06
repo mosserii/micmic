@@ -29,7 +29,8 @@ def test_iphone_needs_consent_and_it_is_stored_with_the_server_time(proxy):
     assert s == 201 and set(d) == {"token", "device_id", "plan", "apple_account_token"}
     row = proxy.store.account(hash_token(d["token"]))
     assert row["platform"] == "ios"
-    assert row["consent_terms"] == row["consent_privacy"] == row["consent_ai"] == "2026-10-03"
+    assert row["consent_terms"] == row["consent_ai"] == "2026-10-03"
+    assert row["consent_privacy"] == "2026-10-05"
     assert row["consent_providers"] == "typesafe,google_gemini,elevenlabs"
     assert row["consent_client_at"] == "2026-09-24T15:00:00+03:00"
     assert row["consent_locale"] == "he-IL" and row["consent_method"] == "checkbox"
@@ -81,9 +82,18 @@ def test_outdated_consent_is_409_with_the_current_versions(make_proxy):
     p = make_proxy(ai_disclosure_required="2026-11-01")
     s, d = ios_signup(p)
     assert s == 409 and d == {"error": "consent_outdated", "consent_required": {
-        "terms_version": "2026-10-03", "privacy_version": "2026-10-03",
+        "terms_version": "2026-10-03", "privacy_version": "2026-10-05",
         "ai_disclosure_version": "2026-11-01"}}
     assert ios_signup(p, consent(ai_disclosure_version="2026-11-01"))[0] == 201
+
+
+def test_a_privacy_consent_older_than_2026_10_05_is_outdated(make_proxy):
+    """Privacy 2026-10-05 (iPhone speech model, Hugging Face): a build that agreed to the
+    2026-10-03 policy is asked again; terms and the AI disclosure did not move."""
+    s, d = ios_signup(make_proxy(), consent(privacy_version="2026-10-03"))
+    assert s == 409 and d["consent_required"] == {"terms_version": "2026-10-03",
+                                                  "privacy_version": "2026-10-05",
+                                                  "ai_disclosure_version": "2026-10-03"}
 
 
 # 27
@@ -92,11 +102,11 @@ def test_consent_route_updates_and_account_reports_it(make_proxy):
     _, d = ios_signup(p)
     t = d["token"]
     a = p.request("GET", "/v1/account", token=t)[1]
-    assert a["consent"] == {"terms_version": "2026-10-03", "privacy_version": "2026-10-03",
+    assert a["consent"] == {"terms_version": "2026-10-03", "privacy_version": "2026-10-05",
                             "ai_disclosure_version": "2026-10-03",
                             "accepted_at": "2026-09-24T12:00:00Z"}
     assert a["consent_required"] == {"terms_version": "2026-10-03",
-                                     "privacy_version": "2026-10-03",
+                                     "privacy_version": "2026-10-05",
                                      "ai_disclosure_version": "2026-10-03"}
     # The owner raises the AI disclosure (a new provider): the phone shows the screen
     # again and sends the new record.

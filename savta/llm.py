@@ -370,7 +370,8 @@ class LLM:
                                {"X-goog-api-key": self.key}, timeout, None)
 
     def _post_kept(self, payload: dict, https: bool, host: str, port: int, path: str,
-                   auth: dict, timeout: float, token: str | None) -> dict | None:
+                   auth: dict, timeout: float, token: str | None,
+                   _again: bool = True) -> dict | None:
         """One call on the kept-alive connection: a screen description already waits on
         Gemini, it should not also wait on a handshake. `token` is set through the
         proxy, whose refusals mean something of their own."""
@@ -432,6 +433,14 @@ class LLM:
                 self.last_error = f"HTTP {status}"
             return None
         err = str(d.get("error", ""))
+        if status in (502, 503) and _again:
+            # The proxy's upstream_error / upstream_busy, refunded there: once more. The
+            # first Gemini call after a quiet spell answered 502 (a stale upstream
+            # connection in the proxy's pool) and a French message was not written,
+            # three MicMic Bench v1 phone runs in a row (2026-10-04).
+            time.sleep(0.3)
+            return self._post_kept(payload, https, host, port, path, auth, timeout, token,
+                                   _again=False)
         if status == 429 and err == "daily_limit":
             self.quota_exceeded = _jev.QuotaExceeded(int(d.get("limit", 0)),
                                                      str(d.get("resets_at") or ""),
