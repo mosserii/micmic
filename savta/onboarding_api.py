@@ -283,7 +283,7 @@ def act(action: str) -> tuple[int, dict]:
 # material change bumps the date there and here together (tests/onboarding holds them
 # equal), and every Mac set up before it then shows the "We've updated our Terms" line once.
 TERMS_VERSION = "2026-10-03"
-PRIVACY_VERSION = "2026-10-03"
+PRIVACY_VERSION = "2026-10-05"   # privacy moved on alone (e3ef3a7, iPhone speech model); terms stay 2026-10-03
 LEGAL_URLS = {
     "terms": "https://getmicmic.vercel.app/terms",
     "privacy": "https://getmicmic.vercel.app/privacy",

@@ -274,7 +274,7 @@ music_mod.ensure_running = lambda app: None
 music_mod.control = lambda action: (_rec("music", f"apple:{action}"), (True, "ok"))[1]
 music_mod.spotify_control = lambda action: (_rec("music", f"spotify:{action}"), (True, "ok"))[1]
 music_mod.open_in_music = lambda url: (_rec("music", f"open:{url}"), True)[1]
-music_mod.state = lambda app: "stopped"
+music_mod.state = lambda app, ask=True: "stopped"   # the real signature (router asks ask=False since 54b744c)
 music_mod.music_dialog = lambda: False
 music_mod.press_song_play = lambda *a, **k: (_rec("music", f"press:{a[1] if len(a) > 1 else ''}"), (False, {"why": "bench: Music walled"}))[1]
 music_mod.spotify_installed = lambda: "Spotify" in INSTALLED
