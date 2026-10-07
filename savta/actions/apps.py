@@ -505,7 +505,7 @@ PRESS_WORDS = re.compile(
 _OPS = {
     "+": "+ plus add added ועוד פלוס زائد زايد плюс прибавить прибавь",
     "-": "- − – minus subtract take פחות מינוס ناقص минус вычесть отними",
-    "×": "× * x times multiplied multiply כפול ضرب ضربي умножить умножь",
+    "×": "× ✕ * x times multiplied multiply כפול ضرب ضربي умножить умножь",
     "÷": "÷ / divided divide over חלקי لحلق تقسيم قسمة разделить раздели",
     "=": "= equals equal שווה يساوي равно",
     ".": ". point dot decimal נקודה فاصلة точка",
@@ -513,6 +513,8 @@ _OPS = {
     "AC": "clear ac",
 }
 _KEY_OF = {w: k for k, ws in _OPS.items() for w in ws.split()}
+# A comma followed by exactly three digits, after a digit: "1,280".
+_THOUSANDS = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
 _UNITS = {"zero": 0, "oh": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
           "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
           "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
@@ -545,7 +547,9 @@ def key_sequence(text: str, app_name: str = "") -> list[str] | None:
     if m:
         t = t[m.end():]
     skip = {w.lower() for w in re.findall(r"[^\W\d_]+", app_name or "")}
-    toks = re.findall(r"\d+(?:[.,]\d+)?|[+\-−–×*÷/=%.]|[^\W\d_]+", t)
+    # "1,280 × 12": a thousands comma is not a decimal point (it pressed 1.280).
+    t = _THOUSANDS.sub("", t)
+    toks = re.findall(r"\d+(?:[.,]\d+)?|[+\-−–×✕*÷/=%.]|[^\W\d_]+", t)
     keys: list[str] = []
     i = 0
     while i < len(toks):

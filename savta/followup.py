@@ -495,7 +495,8 @@ _APP_LABEL = {"whatsapp": "WhatsApp", "imessage": "text message", "telegram": "T
 _SENT_WHAT = {"send_link": "the link to the web page she had open",
               "send_screen": "text she had selected on her screen",
               "send_screenshot": "a screenshot of her screen",
-              "send_window": "the text of a document or an email she had open"}
+              "send_window": "the text of a document or an email she had open",
+              "send_song": "the link to the song that had just played"}
 
 
 QUESTION = "follow_up"
@@ -863,6 +864,8 @@ LINES = {
                     "english": "text"},
     "same_shot": {"hebrew": "צילום המסך", "arabic": "صورة الشاشة", "russian": "тот же скриншот",
                   "english": "screenshot"},
+    "same_song": {"hebrew": "השיר", "arabic": "الأغنية", "russian": "ту же песню",
+                  "english": "song"},
     "same_words": {"hebrew": "ההודעה", "arabic": "الرسالة", "russian": "то же сообщение",
                    "english": "message"},
     "msg_recall": {"hebrew": "ההודעה האחרונה יצאה {at_he} {on_app}: {what}.",
@@ -880,6 +883,8 @@ LINES = {
                        "russian": "выделенный текст", "english": "the text you selected"},
     "sent_window": {"hebrew": "הטקסט שהיה פתוח", "arabic": "النص اللي كان مفتوح",
                     "russian": "открытый текст", "english": "the text you had open"},
+    "sent_song": {"hebrew": "הקישור לשיר", "arabic": "رابط الأغنية", "russian": "ссылка на песню",
+                  "english": "the link to the song"},
     "sent_shot": {"hebrew": "צילום מסך", "arabic": "صورة شاشة", "russian": "скриншот",
                   "english": "a screenshot"},
     "msg_apps": {"hebrew": "אני יכולה לשלוח הודעות רק בהודעת טקסט או בוואטסאפ, או לפתוח אותן בטלגרם או בסיגנל.",
@@ -894,9 +899,11 @@ LINES = {
 
 # Which of the lines above names what a message from her screen was.
 SAME_WHAT = {"send_link": "same_link", "send_screen": "same_selection",
-             "send_screenshot": "same_shot", "send_window": "same_window"}
+             "send_screenshot": "same_shot", "send_window": "same_window",
+             "send_song": "same_song"}
 SENT_WHAT = {"send_link": "sent_link", "send_screen": "sent_selection",
-             "send_screenshot": "sent_shot", "send_window": "sent_window"}
+             "send_screenshot": "sent_shot", "send_window": "sent_window",
+             "send_song": "sent_song"}
 
 
 def line(key: str, lang: str, **fmt) -> str:

@@ -376,24 +376,75 @@ def _send_and_say(utterance: str) -> bool:
 
 
 # What "it" is in "send it to Tamar" just after a song or a video played: its link.
+# Only "it" standing for a thing: followed by who, where, "please", "and ..." or the end
+# of the sentence. "Send that I'm late to Dana" and "send this: ..." are her words, and
+# never match (review of the build 6 fix: the song replaced the words she dictated).
 _SEND_IT = re.compile(
-    r"\b(?:send|share|forward|text|whatsapp)\s+(?:it|this|that|the\s+(?:song|video|clip|link))\b|"
-    r"(?:תשלח(?:י)?|שלח(?:י)?)\s+(?:את\s+)?(?:זה|השיר|הסרטון)|"
-    r"(?:ابعت|ابعث|ارسل)(?:ي)?\s*(?:ها|هيدا|الأغنية|الفيديو)|"
-    r"(?:отправь|перешли)(?:те)?\s+(?:это|песню|видео)", re.I)
+    r"\b(?:send|share|forward|text|whatsapp)\s+(?:it|this|that|the\s+(?:song|video|clip|link))\b"
+    r"(?=\s*,?\s*(?:(?:to|on|via|over|through|using|with|please|and)\b|[.!?]*\s*$))|"
+    r"(?:תשלח(?:י)?|שלח(?:י)?)\s+(?:את\s+)?(?:זה|השיר(?:\s+הזה)?|הסרטון(?:\s+הזה)?)"
+    r"(?=\s*,?\s*(?:[לבו]\S|[.!?]*\s*$))|"
+    r"(?:ابعت|ابعث|ارسل)(?:ي)?\s*(?:ها|هيدا|الأغنية|الفيديو)"
+    r"(?!\s*:|\s+(?:إنه|انه|إنو|انو|إني|اني)\b)|"
+    r"(?:отправь|перешли)(?:те)?\s+(?:это|песню|видео)(?!\s*:|\s*,?\s*что\b)", re.I)
 PLAYED_LINK_FOR = 30 * 60.0          # "it" is the song for this long after it started
+# "The song" as the whole answer to "What should it say?": the song. Only words that
+# name a song or a video: "this" or "the link" alone still mean her screen (screen_ref).
+_THE_SONG_ANSWER = re.compile(
+    r"^\W*(?:(?:just|only)\s+)?(?:send\s+|share\s+)?(?:(?:the|this|that)\s+)?"
+    r"(?:(?:link\s+(?:to|of)\s+(?:the|this|that)\s+)?(?:song|video|clip|track))"
+    r"(?:\s+please)?\W*$|"
+    r"^\W*(?:את\s+)?(?:השיר|הסרטון)(?:\s+הזה)?\W*$|^\W*(?:الأغنية|الفيديو)\W*$|"
+    r"^\W*(?:эту\s+|этот\s+)?(?:песню|видео)\W*$", re.I)
+
+
+def _played_thing(utterance: str, answer: bool = False) -> dict | None:
+    """What just played, when her words send "it" ("send it to Tamar", "send the song
+    to Dana"; with `answer`, "the song" said to "What should it say?"): {"link", "title",
+    "artist", "player"}, else None. The song that is on, else the one stopped a moment
+    ago (STOPPED_TTL), and only within PLAYED_LINK_FOR of its start.
+
+    A YouTube video is its watch link; an Apple Music song its catalog link (the
+    row's own url, else music.apple.com/song/<track id>), which the Music app opens on
+    her contact's iPhone; Spotify or a podcast only when its link is known. TestFlight
+    build 6 (2026-10-06): "send it to <the contact> on WhatsApp" right after an Apple
+    Music song asked "What should it say?", since only YouTube had a link here."""
+    words = utterance or ""
+    if not (_THE_SONG_ANSWER.search(words) if answer else _SEND_IT.search(words)):
+        return None
+    last = MEM.last_played
+    if last and time.time() - float(last.get("at") or 0) > PLAYED_LINK_FOR:
+        last = None
+    last = last or MEM.recent_stopped()
+    if not last or not last.get("id") or last.get("words_only"):
+        return None
+    player = last.get("player")
+    rid = str(last["id"])
+    url = str(last.get("url") or "")
+    link = ""
+    if player in (None, "youtube"):
+        if not rid.startswith("yt:"):          # a title the phone sent, not a video id
+            link = yt.watch_url(rid)
+    elif player == "apple_music":
+        tid = str(last.get("track_id") or "")
+        if not tid and rid.startswith("am:") and rid[3:].isdigit():
+            tid = rid[3:]
+        if url.startswith("https://music.apple.com/"):
+            link = url
+        elif tid.isdigit():
+            link = f"https://music.apple.com/song/{tid}"
+    elif url.startswith("https://"):
+        link = url
+    if not link:
+        return None
+    title, artist = song_of(last)
+    return {"link": link, "title": title, "artist": artist, "player": player}
 
 
 def _played_link(utterance: str) -> str:
     """The link of what just played when her words send "it", else ""."""
-    last = MEM.last_played or {}
-    if not _SEND_IT.search(utterance or "") or not last.get("id"):
-        return ""
-    if last.get("player") not in (None, "youtube"):
-        return ""
-    if time.time() - float(last.get("at") or 0) > PLAYED_LINK_FOR:
-        return ""
-    return yt.watch_url(last["id"])
+    thing = _played_thing(utterance)
+    return thing["link"] if thing else ""
 
 
 # A message is understand() and then _BODY_SPAN, two round trips one after the other:
@@ -1885,6 +1936,34 @@ def _close_micmic_tab(last: dict | None) -> bool:
         return False
 
 
+# "Next" over MicMic's YouTube tab when Chrome will not let MicMic close it (she said
+# Not now to MicMic's line, macOS's question went unanswered, or it is turned off): the
+# replacement is not opened over a video still playing. She hears YouTube's own key.
+_TAB_BLOCKED = {
+    "english": "Chrome has not let MicMic control its tabs, so the video is still on. "
+               "To skip to the next one, press Shift and N in YouTube.",
+    "hebrew": "Chrome לא נתן ל-MicMic לשלוט בלשוניות, אז הסרטון עדיין מתנגן. "
+              "כדי לעבור לבא, «לחצי|לחץ» Shift ו-N ביוטיוב.",
+    "arabic": "Chrome ما سمح لـ MicMic يتحكم بالتبويبات، فالفيديو لسا شغّال. "
+              "للفيديو اللي بعده، «اكبسي|اكبس» Shift و N بيوتيوب.",
+    "russian": "Chrome не разрешил MicMic управлять вкладками, поэтому видео всё ещё "
+               "играет. Чтобы перейти к следующему, нажмите Shift и N в YouTube.",
+}
+
+
+def _tab_blocked(last: dict | None) -> str:
+    """Close MicMic's own tab before something replaces it. "" when it was closed or
+    is gone (go ahead); the reason ("automation_declined:Google Chrome", ...) when
+    Chrome would not let MicMic touch it: then nothing new is opened over it."""
+    fail = getattr(mac, "LAST_CLOSE_FAILURE", None)
+    if fail is not None:
+        fail[0] = ""
+    if _close_micmic_tab(last):
+        return ""
+    why = str(fail[0]) if fail is not None else ""
+    return why if why.startswith("automation_") else ""
+
+
 def _stop_video(last: dict, lang: str) -> tuple[str, str, dict]:
     """"Stop" over a video MicMic put on: its own tab is closed; if Chrome will not
     close it, the video is paused in that tab; if neither works she hears how to do
@@ -2541,6 +2620,11 @@ _SCREEN_SAY.update({
                   "arabic": "ببعت {at_ar} رابط الصفحة المفتوحة. احكيلي«|» لأ وبوقّف.",
                   "russian": "Отправляю {who} ссылку на открытую страницу. Скажите «нет», и я не отправлю.",
                   "english": "Sending {who} the link to the page you have open. Say no and I will stop."},
+    # "Send it to Dana" right after a song: its link, named by the song (_played_thing).
+    "send_song": {"hebrew": "שולחת {at_he} את השיר {what}. תגיד«י|» לי לא ואני עוצרת.",
+                  "arabic": "ببعت {at_ar} أغنية {what}. احكيلي«|» لأ وبوقّف.",
+                  "russian": "Отправляю {who} песню {what}. Скажите «нет», и я не отправлю.",
+                  "english": "Sending {who} the song {what}. Say no and I will stop."},
     # Screenshots have no undo: this project keeps no delete path anywhere (rule 2,
     # tests/test_micmic.py t_no_delete_path), so a saved screenshot stays in
     # Pictures, MicMic (screen.shots_dir) and nothing here ever offers to take that
@@ -2585,6 +2669,8 @@ _SCREEN_SAY.update({
     "what_link": {"hebrew": "את הקישור לדף שפתוח", "arabic": "رابط الصفحة المفتوحة",
                  "russian": "ссылку на открытую страницу",
                  "english": "the link to the page you have open"},
+    "what_song": {"hebrew": "את השיר {what}", "arabic": "أغنية {what}",
+                  "russian": "песню {what}", "english": "the song {what}"},
     "what_screenshot": {"hebrew": "צילום מסך של {what}", "arabic": "صورة شاشة لـ {what}",
                         "russian": "скриншот {what}", "english": "a screenshot of {what}"},
     "ask_screen_send": {"hebrew": "לשלוח {at_he} {what}? תגיד«י|» כן ואני שולחת.",
@@ -2744,6 +2830,8 @@ def _answer_from_screen(question: str, lang: str, ctx: dict | None,
         # No Accessibility: Chrome's page, or what she copied (P1-6). Only when the
         # question is surely about her screen: a guess never waits on a page fetch.
         ctx, why = _readable_screen(ctx)
+    if not why and sure:
+        ctx = _with_chrome_page(ctx)          # the article, not Chrome's toolbar
     if why:
         if sure and why != "empty":
             return "screen_unavailable", _screen_why_line(why, lang), {
@@ -2950,7 +3038,9 @@ def _screen_content(lang: str) -> dict:
     """What "this" is when she sends it: what she selected, else the page she has open,
     else a screenshot she took a moment ago. {"why": ...} when the screen cannot be
     read, {} when there is nothing to send, else {"body", "kind", "attachment",
-    "shot_what"}; kind is send_screen, send_link or send_screenshot."""
+    "shot_what"} (and "ask": True when a whole window must be read back first); kind
+    is send_screen, send_link, send_screenshot or send_window (an open email, note or
+    document)."""
     ctx, why = _readable_screen(_screen_context(max_chars=2000))
     if why:
         return {"why": why}
@@ -3110,6 +3200,27 @@ _TAG = re.compile(r"(?s)<[^>]+>")
 _BLOCK_END = re.compile(r"(?i)</?(?:p|div|li|h[1-6]|tr|br|section|article|header|footer)\b[^>]*>")
 
 
+_MAIN_RX = re.compile(r"(?is)<(main|article)\b[^>]*>(.*?)</\1\s*>")
+_WIKI_PAGE = re.compile(r"^/wiki/([^?#/]+)$")
+
+
+def _wiki_article_text(scheme: str, host: str, title: str, max_chars: int) -> str:
+    """A Wikipedia article's plain text from Wikipedia's own API ("" on any failure)."""
+    import urllib.request
+    api = (f"{scheme}://{host}/w/api.php?action=query&prop=extracts&explaintext=1"
+           f"&redirects=1&format=json&titles={title}")
+    try:
+        req = urllib.request.Request(api, headers={"User-Agent": "MicMic (macOS assistant)"})
+        with urllib.request.urlopen(req, timeout=PAGE_FETCH_TIMEOUT) as resp:
+            data = json.loads(resp.read(PAGE_FETCH_MAX).decode("utf-8", errors="replace"))
+        pages = (data.get("query") or {}).get("pages") or {}
+        text = next((p.get("extract") or "" for p in pages.values()), "")
+    except Exception:  # noqa: BLE001
+        return ""
+    lines = [ln.strip() for ln in str(text).split("\n")]
+    return "\n".join(ln for ln in lines if ln)[:max_chars]
+
+
 def _page_text(url: str, max_chars: int = PAGE_TEXT_MAX) -> str:
     """The readable text of a web page, fetched by MicMic itself ("" on any failure).
     Only http(s), never a page on this Mac, short timeout."""
@@ -3122,6 +3233,14 @@ def _page_text(url: str, max_chars: int = PAGE_TEXT_MAX) -> str:
     if parts.scheme not in ("http", "https") or parts.hostname in (
             None, "", "localhost", "127.0.0.1", "::1"):
         return ""
+    wm = (_WIKI_PAGE.match(parts.path or "")
+          if (parts.hostname or "").endswith(".wikipedia.org") else None)
+    if wm:
+        # A Wikipedia article: the article's own plain text, not the page around it
+        # (its menus and sidebars filled the first thousands of characters).
+        got = _wiki_article_text(parts.scheme, parts.hostname, wm.group(1), max_chars)
+        if got:
+            return got
     try:
         req = urllib.request.Request(url, headers={
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) MicMic",
@@ -3135,6 +3254,10 @@ def _page_text(url: str, max_chars: int = PAGE_TEXT_MAX) -> str:
     except Exception:  # noqa: BLE001
         return ""
     text = raw.decode(enc, errors="replace")
+    # The page's own content when it marks it (<main>, <article>): not its menus.
+    body = max((m.group(2) for m in _MAIN_RX.finditer(text)), key=len, default="")
+    if len(body) > 2000:
+        text = body
     text = _TAGS_DROP.sub(" ", text)
     text = _BLOCK_END.sub("\n", text)
     text = _html.unescape(_TAG.sub(" ", text))
@@ -3207,6 +3330,45 @@ def _screen_without_ax(ctx: dict | None) -> dict | None:
                 _CLIP_HINT.clear()
                 return {**base, "via": "clipboard", "selected": _scr.redact(text[:6000])}
     return None
+
+
+# Chrome builds a page's accessibility tree only for an assistive app that asks for
+# it, so with Accessibility granted a Chrome window can still read as its tabs and
+# toolbar alone (~230 characters). The 2026-10-07 shoot: "what's this article about?"
+# over a Wikipedia article was summarized as "you have Chrome open with ...", 6 of 6.
+# Below this much page text, the page Chrome names (_chrome_page, Automation asked
+# with MicMic's line first) is fetched by MicMic and read instead.
+THIN_PAGE = 400
+
+
+def _with_chrome_page(ctx: dict | None) -> dict | None:
+    """ctx, or ctx with Chrome's front page in place of a read that holds no page text
+    (see THIN_PAGE). Selected text, a context already rebuilt ("via") and any app but
+    Chrome are left exactly as they were."""
+    if not ctx or ctx.get("via") or (ctx.get("selected") or "").strip():
+        return ctx
+    fm = ctx.get("frontmost") or {}
+    if not ((fm.get("app") or "").strip().lower() in CHROME_APPS
+            or fm.get("bundle_id") == "com.google.Chrome"):
+        return ctx
+    vis = ctx.get("visible") or {}
+    if len(vis.get("document") or "") >= THIN_PAGE:
+        return ctx
+    page = _chrome_page()
+    if not page:
+        return ctx
+    text = _page_text(page["url"])
+    if len(text) < THIN_PAGE or len(text) <= len(vis.get("text") or ""):
+        return ctx
+    try:
+        from .actions import screen as _scr
+        red = _scr.redact
+    except Exception:  # noqa: BLE001
+        return ctx
+    return {**ctx, "via": "chrome_page",
+            "page": {"url": red(page["url"]), "title": red(page["title"])},
+            "visible": {"text": red(text), "document": red(text),
+                        "truncated": len(text) >= PAGE_TEXT_MAX}}
 
 
 def _readable_screen(ctx: dict | None) -> tuple[dict | None, str | None]:
@@ -4451,7 +4613,9 @@ def _ask_to_send(to: str, body: str, lang: str, channel: str, why: str,
         what_txt = (_ss("what_screenshot", lang).format(what=shot_what or _ss("this_screen", lang))
                    if from_screen == "send_screenshot"
                    else _ss("what_window", lang).format(what=shot_what or "")
-                   if from_screen == "send_window" else _ss(what_key, lang))
+                   if from_screen == "send_window"
+                   else _ss("what_song", lang).format(what=shot_what or "")
+                   if from_screen == "send_song" else _ss(what_key, lang))
         return _ss("ask_screen_send", lang).format(who=who, at_he=at_he, at_ar=at_ar, what=what_txt)
     MEM.remember_draft(to, body, channel, lang, in_lang)
     if held:
@@ -4929,7 +5093,9 @@ def _resume(j: Jev, utterance: str, contacts: list[str]) -> dict | None:
     # Pointing at the page, the same again or an app IS an answer to "what should it
     # say?", however much it sounds like a new request ("send her this page").
     pointed = bool(got) and got["is"] != "words"
-    if _n(a, "is_answer") < 0.4 and not pointed:
+    # "The song", right after one played: its link is the message (send_song).
+    song_ans = _played_thing(utterance, answer=True) if kind == "body" else None
+    if _n(a, "is_answer") < 0.4 and not pointed and not song_ans:
         AWAITING = None
         return None                      # she changed the subject; handle it fresh
     who, wconf, _ = _c(a, "contact")
@@ -4951,6 +5117,9 @@ def _resume(j: Jev, utterance: str, contacts: list[str]) -> dict | None:
             return {"unresolved": True, "lang": slot.get("lang", "english"),
                     "intent": slot.get("intent"), "misses": slot["misses"]}
         slot["contact"] = who
+    elif kind == "body" and song_ans:
+        slot.update(body=song_ans["link"], from_screen="send_song",
+                    shot_what=song_ans["title"], attachment=None)
     elif kind == "body":
         # An app she names switches to it, unless it is inside the words themselves
         # ("I'm on WhatsApp now, call me there" is a message).
@@ -7012,6 +7181,96 @@ _GUIDE_ME = re.compile(
     r"провед[иь]т?е?\s+меня|по\s+шагам|шаг\s+за\s+шагом", re.I)
 # Above this, a "none" from the guidance question outweighs the words.
 GUIDE_NOT_GATE = 0.7
+# Asking HOW is never asking for it done. The 2026-10-07 shoot: "show me how to turn on
+# Night Shift" read as intent control, control_action darker, and the screen was
+# dimmed with "Alright". A code check on her words (the request to Jev is unchanged):
+# when they ask how and the intent would DO something on this Mac, the guide answers
+# (it says each step and changes nothing itself). Questions, small talk and screen
+# reads are answered as before ("how do you say thank you in Spanish").
+_SHOW_HOW = re.compile(
+    r"\b(?:show|teach|tell)\s+me\s+how\s+(?:to|(?:do|can|could|would|should)\s+(?:i|you|we)"
+    r"|i\s+(?:can|could|would|should|do))\b|"
+    r"(?:תראי|תראה|הראי|הראה|תלמדי|תלמד|תסבירי|תסביר)\s+(?:לי|אותי)\s+איך|"
+    r"(?:وريني|ورجيني|فرجيني|ورّيني|علميني|علمني|اشرحلي|اشرحيلي)\s+كيف|"
+    r"(?:покажи|покажите|научи|научите|объясни|объясните)\s+(?:мне\s+)?как", re.I)
+# The same asked as a question, from its first word: "how do I turn on Night Shift".
+_HOW_DO_I = re.compile(
+    r"^\W*(?:(?:hey|ok(?:ay)?|so|please|and|um+|uh+|micmic|mic\s+mic)\W+)*"
+    r"(?:how\s+(?:to|(?:do|can|could|would|should)\s+(?:i|you|we|one))"
+    r"|what(?:'s|\s+is)\s+the\s+way\s+to)\b|"
+    r"^\W*איך\s+(?:אני|אפשר|עושים)(?:\s|$)|"
+    r"^\W*كيف\s+(?:بقدر|بعمل|ممكن)(?:\s|$)|"
+    r"^\W*как\s+(?:мне|можно)(?:\s|$)", re.I)
+# Intents that answer rather than act: a how-to read as one of these goes on as it did.
+_HOWTO_ANSWERED = ("look_up", "help", "chitchat", "unclear", "screen")
+
+
+def _asks_how(utterance: str, intent: str = "") -> bool:
+    """Her words ask to be shown or told how ("show me how to ...", "how do I ...",
+    "walk me through ..."), not for it to be done. For a song or a film only the
+    explicit asks count: "How Do I Live" and "How to Save a Life" are titles."""
+    text = utterance or ""
+    if _SHOW_HOW.search(text) or _GUIDE_ME.search(text):
+        return True
+    return intent not in ("watch", "music", "radio") and bool(_HOW_DO_I.search(text))
+
+
+# Display features MicMic cannot switch, which a model reads as brightness: "turn on
+# Night Shift" read as darker (the same shoot). Said plainly, with where it lives.
+_DISPLAY_FEATURES = (
+    ("night_shift", re.compile(r"night\s*shift|נייט\s*שיפט|ночн\w*\s+режим", re.I)),
+    ("true_tone", re.compile(r"true\s*tone|טרו\s*טון", re.I)),
+    ("dark_mode", re.compile(r"\b(?:dark|light)\s+mode\b|מצב\s+(?:כהה|חשוך|בהיר)|"
+                             r"الوضع\s+(?:الداكن|المظلم|الليلي)|(?:тёмн|темн|светл)\w*\s+(?:режим|тем)",
+                             re.I)),
+)
+_SWITCH_WORDS = re.compile(
+    r"\b(?:turn|switch|put|flip|set|enable|disable|activate|deactivate|start|stop|use|open)\b|"
+    r"תדליק|תפעיל|תכב|להדליק|להפעיל|לכבות|הדליקי|הפעילי|כבי|תעבירי|תשימי|תפתחי|פתחי|"
+    r"شغّل|شغل|طفّي|طفي|فعّل|فعل|حط|افتح|"
+    r"включ|выключ|отключ|постав|откр", re.I)
+_DISPLAY_FEATURE_NAME = {
+    "night_shift": {"english": "Night Shift", "hebrew": "Night Shift", "arabic": "Night Shift",
+                    "russian": "Night Shift"},
+    "true_tone": {"english": "True Tone", "hebrew": "True Tone", "arabic": "True Tone",
+                  "russian": "True Tone"},
+    "dark_mode": {"english": "dark mode", "hebrew": "מצב כהה", "arabic": "الوضع الداكن",
+                  "russian": "тёмный режим"},
+}
+_DISPLAY_FEATURE_SAY = {
+    "opened": {
+        "english": "I can't switch {f} on or off myself, so I opened the display settings. "
+                   "{f} is there, near the bottom.",
+        "hebrew": "אני לא יכולה להדליק או לכבות את {f} בעצמי, אז פתחתי את הגדרות המסך. "
+                  "{f} נמצא שם, למטה.",
+        "arabic": "ما بقدر شغّل أو طفّي {f} بنفسي، ففتحت إعدادات الشاشة. {f} موجود هناك، تحت.",
+        "russian": "Я не могу сама включить или выключить {f}, поэтому открыла настройки "
+                   "дисплея. {f} там, внизу."},
+    "displays": {
+        "english": "I can't switch {f} on or off myself. It is in System Settings, under Displays.",
+        "hebrew": "אני לא יכולה להדליק או לכבות את {f} בעצמי. זה נמצא בהגדרות המערכת, תחת מסכים.",
+        "arabic": "ما بقدر شغّل أو طفّي {f} بنفسي. موجود بإعدادات النظام، تحت الشاشات.",
+        "russian": "Я не могу сама включить или выключить {f}. Это в Системных настройках, "
+                   "в разделе Дисплеи."},
+    "appearance": {
+        "english": "I can't switch {f} on or off myself. It is in System Settings, under Appearance.",
+        "hebrew": "אני לא יכולה להדליק או לכבות את {f} בעצמי. זה נמצא בהגדרות המערכת, תחת מראה.",
+        "arabic": "ما بقدر شغّل أو طفّي {f} بنفسي. موجود بإعدادات النظام، تحت المظهر.",
+        "russian": "Я не могу сама включить или выключить {f}. Это в Системных настройках, "
+                   "в разделе Оформление."},
+}
+
+
+def _display_feature(utterance: str) -> str:
+    """"night_shift", "true_tone" or "dark_mode" when her words ask to switch one, else ""."""
+    text = utterance or ""
+    for key, rx in _DISPLAY_FEATURES:
+        if rx.search(text) and (_SWITCH_WORDS.search(rx.sub(" ", text))
+                                or re.search(f"(?:{rx.pattern})\\s+(?:on|off)\\b", text, re.I)):
+            return key
+    return ""
+
+
 # Replies that are an answer to her: the chip rides on these, never on a refusal, a
 # question back, a limit or an emergency.
 _NO_CHIP = ("ignored", "waiting", "half_heard", "daily_limit", "emergency",
@@ -8035,7 +8294,7 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             body = slot["body"]
             _fmt_kw = dict(who=who, at_he=with_prefix("ל", who, "hebrew"),
                            at_ar=with_prefix("لـ", who, "arabic"))
-            if slot.get("from_screen") in ("send_screenshot", "send_window"):
+            if slot.get("from_screen") in ("send_screenshot", "send_window", "send_song"):
                 _fmt_kw["what"] = slot.get("shot_what") or _ss("this_screen", lang)
             narration = (_ss(slot["from_screen"], lang).format(**_fmt_kw)
                          if slot.get("from_screen")
@@ -8120,6 +8379,8 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                 narration += " " + _MONEY_LINE.get(lang, _MONEY_LINE["english"])
             return respond("sending", narration, lang,
                            to=slot["contact"], display=who, text=body,
+                           **({"song": slot.get("shot_what")}
+                              if slot.get("from_screen") == "send_song" else {}),
                            from_screen=slot.get("from_screen"),
                            attachment=slot.get("attachment"),
                            channel=slot.get("channel", "imessage"),
@@ -9026,7 +9287,11 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                 # replacement in a browser window without closing the first, so two
                 # videos played over each other. MicMic's own tab is closed, by its
                 # address, never Cmd-W to whatever is in front (P1-4).
-                _close_micmic_tab(MEM.last_played)
+                blocked = _tab_blocked(MEM.last_played)
+                if blocked:
+                    return finish("cannot_control", _TAB_BLOCKED.get(lang, _TAB_BLOCKED["english"]),
+                                  detail={"why": blocked, "after_rejection": True,
+                                          "player": "youtube", **_fix("automation")})
                 MEM.played(MEM.play_query, MEM.play_kind, MEM.play_full,
                            {**pick, "player": "youtube"}, MEM.play_lang)
                 url = yt.watch_url(pick["id"])
@@ -9213,6 +9478,30 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                      and not (u.get("guidance") == "none"
                               and u.get("guidance_confidence", 0.0) >= GUIDE_NOT_GATE)))):
         return _start_guide(utterance, u, lang, speak, finish)
+    # "Show me how to turn on Night Shift" read as control/darker and dimmed the screen
+    # (the 2026-10-07 shoot). Her words ask how: the guide shows her, nothing is changed.
+    # A message or a call is included here: asking how to call is not a call.
+    if not amending and intent not in _HOWTO_ANSWERED and _asks_how(utterance, intent):
+        if depth == 0:
+            return _start_guide(utterance, u, lang, speak, finish)
+        intent, conf = "look_up", max(conf, ACT_ON_INTENT)   # answered with the steps
+    # "Turn on Night Shift" read as darker: the screen was dimmed instead. MicMic cannot
+    # switch Night Shift, True Tone or dark mode; it says so, and where they are.
+    feature = (_display_feature(utterance)
+               if intent in ("control", "stop", "player", "open_app", "unclear") else "")
+    if feature:
+        f_name = _DISPLAY_FEATURE_NAME[feature].get(lang, _DISPLAY_FEATURE_NAME[feature]["english"])
+        how = None
+        if feature == "dark_mode":
+            key = "appearance"
+        else:
+            opened, how = mac.open_display_settings()
+            key = "opened" if opened else "displays"
+        return finish("cannot_control",
+                      _DISPLAY_FEATURE_SAY[key].get(lang, _DISPLAY_FEATURE_SAY[key]["english"])
+                      .format(f=f_name),
+                      detail={"asked_for": feature, "intent": intent, "opened": how,
+                              "control": u.get("control_action")})
     # "How do I add an API key here?" reads as asking what MicMic can do (help: 0.96
     # measured) and was answered with the list of MicMic's own features. It is a
     # question about the app in front of her: answered like any other question, from
@@ -9451,6 +9740,9 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                           detail={"why": why, **_why_fix(why)})
         task = screen_task if screen_task in ("describe", "summarize", "translate",
                                               "read_aloud", "add_to_calendar") else "describe"
+        if task in ("summarize", "translate", "read_aloud"):
+            # "What's this article about?" over Chrome: the article, not its toolbar.
+            ctx = _with_chrome_page(ctx)
         text = _screen_text(ctx)
         seen = len(((ctx.get("visible") or {}).get("text") or "")) + len(ctx.get("selected") or "")
         # Only what was read and how much: the screen itself never goes into the trace.
@@ -10119,15 +10411,23 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         # often enough that the retry-and-apologise machinery around it cost more than
         # it ever returned. A tab always plays.
         playing_before = dict(MEM.last_played or {})
+        replaces = bool(instead or (identified and follow_up))
+        if replaces:
+            # Her correction replaces what is playing, as "something else" does: the
+            # tab MicMic opened for it, never Cmd-W to the front app (P1-4). Chrome
+            # would not let it be closed: nothing new is opened over it.
+            blocked = _tab_blocked(playing_before)
+            if blocked:
+                return finish("cannot_control", _TAB_BLOCKED.get(lang, _TAB_BLOCKED["english"]),
+                              detail={"why": blocked, "player": "youtube",
+                                      **_fix("automation")})
         MEM.played(subject, kind, full, {**pick, "player": "youtube"}, lang)
         # Only what she named is a taste. A fallback pick is our guess, and learning
         # it would feed our own guess back to us as her preference.
         if named and not podcast:
             longterm.note("watch" if kind in ("film", "video") else "music", subject)
-        if instead or (identified and follow_up):
-            # Her correction replaces what is playing, as "something else" does: the
-            # tab MicMic opened for it, never Cmd-W to the front app (P1-4).
-            _close_micmic_tab(playing_before)
+        if replaces:
+            pass                                # closed above
         elif handoff and not handoff["from"].get("stopped_at"):
             _pause_player(handoff["from"])      # moved here from Music or Spotify
         mac.open_url(url)
@@ -10168,6 +10468,26 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         thing_link = _played_link(utterance)
         if thing_link:
             u = {**u, "refers_to_screen": 0.0}
+    # "Send it to <the contact> on WhatsApp" on its own, right after a song (TestFlight
+    # build 6, 2026-10-06: "What should it say?"): the song is what goes, its link the
+    # whole message, sent the way a page from her screen is (screen_kind "send_song").
+    # What she selected, shared with MicMic or has open is "it" before the song, so a
+    # page on the Mac goes as it always did; the screen is read once, here, and reused.
+    # Only when she gave no words of her own: "send this to Dana, I'm running late" is
+    # her words, whatever played (the song never replaces what she dictated).
+    played = None
+    pre_screen = None
+    if (intent == "message" and not amending and not thing_link and not wants_shot
+            and u["has_message_content"] < 0.5):
+        played = _played_thing(utterance)
+        if played:
+            pre_screen = _screen_content(lang)
+            if pre_screen.get("kind") in ("send_screen", "send_link", "send_screenshot",
+                                          "send_window"):
+                played = None
+                u = {**u, "refers_to_screen": 1.0}       # that is what "it" is
+            else:
+                u = {**u, "refers_to_screen": 0.0}
     # "Send it to 054-123-4567": a number she says is the recipient, book or no book.
     num_to = ""
     if intent == "message" and not amending and u["contact"] == "nobody":
@@ -10348,7 +10668,10 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         screen_body, screen_kind, attachment, shot_what = None, None, None, None
         screen_ask_first = False
         shot_clip = None                 # no Screen Recording, person not settled yet
-        if not amending and wants_shot:
+        if played:
+            # The song that just played: its link is the message (see `played` above).
+            screen_body, screen_kind, shot_what = played["link"], "send_song", played["title"]
+        elif not amending and wants_shot:
             # "send the screenshot to Dana" / "take a screenshot and send it to
             # Dana": a contact was already named, or this line would not have become
             # intent "message" above. Capture now, rather than earlier, so a version
@@ -10384,7 +10707,7 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                              else _ss("this_screen", lang))
                 _remember_shot(attachment, shot["app"], shot["window"])
         elif not amending and u.get("refers_to_screen", 0) > SCREEN_SEND_GATE:
-            got_s = _screen_content(lang)
+            got_s = pre_screen if pre_screen is not None else _screen_content(lang)
             if got_s.get("why"):
                 return finish("screen_unavailable", _screen_why_line(got_s["why"], lang),
                               detail={"why": got_s["why"], **_why_fix(got_s["why"])})
@@ -10524,11 +10847,12 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                       attachment=attachment, from_screen=screen_kind, shot_what=shot_what)
             fmt_kw = dict(who=who, at_he=with_prefix("ל", who, "hebrew"),
                           at_ar=with_prefix("لـ", who, "arabic"))
-            if screen_kind in ("send_screenshot", "send_window"):
+            if screen_kind in ("send_screenshot", "send_window", "send_song"):
                 fmt_kw["what"] = shot_what
             return finish("sending", (_ss("send_long", lang) + " " if cut_long else "")
                           + _ss(screen_kind, lang).format(**fmt_kw),
                           detail={"to": u["contact"], "display": who, "channel": chan,
+                                  **({"song": shot_what} if screen_kind == "send_song" else {}),
                                   "from_screen": screen_kind, "chars": len(screen_body or ""),
                                   "attachment": attachment, "countdown": CANCEL_WINDOW})
         if u["has_message_content"] < 0.5:

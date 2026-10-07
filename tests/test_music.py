@@ -1070,6 +1070,48 @@ def t_another_one_never_repeats():
           r["did"] == "playing" and router.MEM.last_played["id"] == "y3",
           f"{r['did']} {router.MEM.last_played and router.MEM.last_played.get('title')}")
 
+    # The 2026-10-07 shoot: "next" over MicMic's YouTube tab. Closing that tab is an
+    # Apple Event to Chrome; when Chrome will not let MicMic (her Not now to MicMic's
+    # line, macOS's question unanswered, or switched off), nothing is opened over the
+    # video still playing: she hears why and YouTube's own key, at once.
+    for why in ("automation_declined:Google Chrome", "automation_denied:Google Chrome",
+                "automation_unanswered:Google Chrome"):
+        fresh()
+        router.yt.search = lambda q, n=18: [dict(v) for v in vids]
+        turn("play bad bunny", subject="bad bunny")
+        first = (router.MEM.last_played or {}).get("id")
+        opened0 = len(tm.OPENED)
+        real_close = mac.close_tab_with
+
+        def refused(frag, why=why):
+            mac.LAST_CLOSE_FAILURE[0] = why
+            return False
+        mac.close_tab_with = refused
+        try:
+            t0 = time.time()
+            r, _ = turn("next", extra={"rejects_last": 0.95})
+            took = time.time() - t0
+        finally:
+            mac.close_tab_with = real_close
+        fix = ((r.get("detail") or {}).get("fix") or {}) if isinstance(r.get("detail"), dict) else {}
+        check(f"next, {why.split(':')[0]}: no second video over the first, the key to press",
+              r["did"] == "cannot_control" and "Shift and N" in (r.get("say") or "")
+              and len(tm.OPENED) == opened0 and fix.get("pane") == "automation"
+              and (router.MEM.last_played or {}).get("id") == first and took < 5,
+              (r["did"], r.get("say"), tm.OPENED[opened0:], fix, round(took, 2)))
+    # A tab already gone (she closed it): the next one is simply played.
+    fresh()
+    router.yt.search = lambda q, n=18: [dict(v) for v in vids]
+    turn("play bad bunny", subject="bad bunny")
+    real_close = mac.close_tab_with
+    mac.close_tab_with = lambda frag: False
+    try:
+        r, _ = turn("next", extra={"rejects_last": 0.95})
+    finally:
+        mac.close_tab_with = real_close
+    check("next with MicMic's tab already gone: the next video plays",
+          r["did"] == "playing", (r["did"], r.get("say")))
+
 
 class FakeLLM:
     available = True

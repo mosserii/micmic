@@ -625,6 +625,78 @@ def t_router():
     check("a message is never taken for a guide", not str(r["did"]).startswith("guide")
           and len(m.requests) == n0, r["did"])
 
+    # The 2026-10-07 shoot: "show me how to turn on Night Shift" read as intent control,
+    # control_action darker, and MicMic dimmed the screen and said "Alright". Asking how
+    # goes to the guide and never changes anything itself, whatever Jev's guidance says.
+    bright, vol, closed, calls, per_turn = [], [], [], [], []
+    saved = (mac.brightness, mac.volume, mac.close_front_window, router._call_contact)
+    mac.brightness = lambda d: (bright.append(d), (True, "level:40"))[1]
+    mac.volume = lambda d: (vol.append(d), (True, "50"))[1]
+    mac.close_front_window = lambda: (closed.append(1), (True, "closed"))[1]
+    router._call_contact = lambda *a, **k: calls.append(a) or ("called", "Calling.", {})
+    try:
+        for said, over in (
+                ("Show me how to turn on Night Shift",
+                 {"intent": ("control", 0.92), "control_action": ("darker", 0.81)}),
+                ("show me how to turn on night shift",
+                 {"intent": ("control", 0.92), "control_action": ("darker", 0.81),
+                  "guidance": ("none", 0.95)}),
+                ("how do I turn on Night Shift",
+                 {"intent": ("control", 0.8), "control_action": ("darker", 0.7)}),
+                ("how to make the screen brighter",
+                 {"intent": ("control", 0.9), "control_action": ("brighter", 0.9)}),
+                ("can you show me how to turn the volume down",
+                 {"intent": ("control", 0.9), "control_action": ("quieter", 0.9)}),
+                ("teach me how to close this window",
+                 {"intent": ("control", 0.9), "control_action": ("close_this", 0.9)}),
+                ("show me how to call Dana on FaceTime", {"intent": ("call", 0.9)}),
+                ("walk me through turning on Night Shift",
+                 {"intent": ("control", 0.9), "control_action": ("darker", 0.9),
+                  "guidance": ("none", 0.9)}),
+                ("תראי לי איך להדליק Night Shift",
+                 {"intent": ("control", 0.9), "control_action": ("darker", 0.9),
+                  "language": ("hebrew", 0.99)}),
+                ("покажи как включить Night Shift",
+                 {"intent": ("control", 0.9), "control_action": ("darker", 0.9),
+                  "language": ("russian", 0.99)})):
+            m.script = [step("Open System Settings and click Displays.", 1)]
+            n0, c0 = len(m.requests), j.calls
+            j.over = {**base, **over}
+            r = router.handle(j, said, speak=False)
+            per_turn.append(j.calls - c0)
+            check(f"{said!r}: the guide shows her how, with the first step",
+                  r["did"] == "guide_step" and len(m.requests) == n0 + 1
+                  and m.requests[-1]["goal"] == said, (r["did"], r.get("say")))
+            check(f"{said!r}: nothing on the Mac was changed or called",
+                  not bright and not vol and not closed and not calls,
+                  (bright, vol, closed, calls))
+            router.GUIDE.stop()
+        # The same words with a question's intent are answered as before: no guide.
+        n0 = len(m.requests)
+        j.over = {**base, "intent": ("look_up", 0.95)}
+        r = router.handle(j, "how do you say thank you in Spanish", speak=False)
+        check("a how question read as a question is answered, not guided",
+              r["did"] == "answered" and len(m.requests) == n0, r["did"])
+        # A song whose title asks how is still a song: only the explicit asks count
+        # there. (Checked in code: this suite has no fake player to play it with.)
+        check("the how-to words, as code; 'How Do I Live' (music) is a title",
+              router._asks_how("how do I turn on Night Shift", "control")
+              and router._asks_how("show me how to play music on Spotify", "music")
+              and not router._asks_how("How Do I Live", "music")
+              and not router._asks_how("how to save a life by the fray", "music")
+              and not router._asks_how("make the screen darker", "control")
+              and not router._asks_how("show me how many messages I have", "read_msgs"))
+        # A plain request is still done.
+        j.over = {**base, "intent": ("control", 0.95), "control_action": ("darker", 0.95)}
+        r = router.handle(j, "make the screen darker", speak=False)
+        check("'make the screen darker' still dims the screen", r["did"] == "darker"
+              and bright == [-1], (r["did"], bright))
+    finally:
+        mac.brightness, mac.volume, mac.close_front_window, router._call_contact = saved
+        router.GUIDE.stop()
+    check("the how-to check costs no extra request to Jev: one per turn",
+          per_turn and all(n == 1 for n in per_turn), per_turn)
+
 
 # ---------------------------------------------------------------- the native ring
 def t_overlay_follower():

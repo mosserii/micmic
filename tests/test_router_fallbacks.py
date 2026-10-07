@@ -33,6 +33,7 @@ stub wall is tests/test_micmic.py. No osascript, no `open`, nothing reaches
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import sys
 import time
@@ -370,6 +371,54 @@ def t_control():
                    extra={"control_action": "darker"})
     check("brightness that worked still says Alright, with its undo",
           r["did"] == "darker" and tm.BRIGHT, (r["did"], tm.BRIGHT))
+
+    # The 2026-10-07 shoot: "turn on Night Shift" (and its how-to) read as darker and
+    # the screen was dimmed. MicMic cannot switch Night Shift: it says so, opens
+    # Displays, and the brightness is never touched, whatever Jev's intent was.
+    for said, intent, extra, feature in (
+            ("turn on Night Shift", "control", {"control_action": "darker"}, "night_shift"),
+            ("switch night shift off", "stop", {}, "night_shift"),
+            ("Night Shift on please", "control", {"control_action": "brighter"}, "night_shift"),
+            ("turn on True Tone", "control", {"control_action": "brighter"}, "true_tone"),
+            ("open night shift", "open_app", {}, "night_shift")):
+        for lang in LANGS:
+            fresh()
+            opened.clear()
+            bright: list = []
+            with patched(mac, brightness=lambda d: (bright.append(d), (True, "level:40"))[1],
+                         open_display_settings=lambda: (opened.append(1),
+                                                        (True, "opened_display_settings"))[1]):
+                r, _ = tf.turn(said, intent=intent, lang=lang, extra=extra)
+            check(f"{lang}: {said!r} ({intent}): never the brightness, said it can't, "
+                  f"Displays opened",
+                  r["did"] == "cannot_control" and not bright and not tm.BRIGHT and opened
+                  and det(r).get("asked_for") == feature
+                  and "—" not in (r.get("say") or "")
+                  and (r.get("say") or "").strip(" .") != router._sp(lang, "ok").strip(" ."),
+                  (r["did"], r.get("say"), bright))
+    fresh()
+    bright = []
+    with patched(mac, brightness=lambda d: (bright.append(d), (True, "level:40"))[1],
+                 open_display_settings=lambda: (False, "open_failed")):
+        r, _ = tf.turn("turn on Night Shift", intent="control",
+                       extra={"control_action": "darker"})
+    check("Displays would not open: where Night Shift is, in words",
+          r["did"] == "cannot_control" and "System Settings" in (r.get("say") or "")
+          and "Night Shift" in (r.get("say") or "") and not bright,
+          (r["did"], r.get("say"), bright))
+    fresh()
+    bright = []
+    with patched(mac, brightness=lambda d: (bright.append(d), (True, "level:40"))[1],
+                 open_display_settings=lambda: (opened.append(1), (True, "x"))[1]):
+        r, _ = tf.turn("turn on dark mode", intent="control",
+                       extra={"control_action": "darker"})
+    check("dark mode is not the brightness either: where it is, in words",
+          r["did"] == "cannot_control" and "Appearance" in (r.get("say") or "")
+          and not bright, (r["did"], r.get("say"), bright))
+    fresh()
+    r, _ = tf.turn("I'm working the night shift tonight", intent="chitchat")
+    check("a night shift at work is small talk, not a display setting",
+          r["did"] != "cannot_control", (r["did"], r.get("say")))
 
 
 # ================================================================== P0-10, P0-13, P2-3
@@ -980,6 +1029,80 @@ def t_accessibility():
     check("_page_text keeps the words, drops scripts and styles",
           "Trip" in txt and "Leaves & arrives at 08:15" in txt and "var a" not in txt
           and "p{}" not in txt, txt)
+
+    # The 2026-10-07 shoot, 6 of 6: "what's this article about?" over a Wikipedia
+    # article in Chrome, Accessibility ON, was summarized as "you have Chrome open
+    # with ...": Chrome showed only its tabs and toolbar (~230 characters). With no
+    # page text in the read, the page Chrome names is fetched and summarized.
+    toolbar = ("Olive - Wikipedia | New Tab | Back | Forward | Reload | "
+               "en.wikipedia.org/wiki/Olive | Bookmark this tab | Extensions | "
+               "Google Chrome | Side panel | Customize and control Google Chrome")
+    article = ("The olive, botanical name Olea europaea, is a species of small tree in "
+               "the family Oleaceae, found traditionally in the Mediterranean Basin. ") * 12
+    chrome_ax = {"permissions": {"accessibility": True, "screen_recording": False},
+                 "frontmost": {"app": "Google Chrome", "pid": 2,
+                               "bundle_id": "com.google.Chrome", "window": "Olive - Wikipedia"},
+                 "selected": "", "focused": {}, "page": None, "has_image": False,
+                 "visible": {"text": toolbar, "document": "", "truncated": False}}
+    for task, said, did in (("summarize", "what's this article about", "summarized_screen"),
+                            ("translate", "translate this article to Hebrew",
+                             "translated_screen")):
+        fresh()
+        told.clear()
+        fetched.clear()
+        with patched(router, _screen_context=lambda max_chars=6000: dict(chrome_ax),
+                     _page_text=lambda url, max_chars=6000: (fetched.append(url), article)[1]), \
+                patched(mac, _tell=lambda app, script, timeout=4.0, launch=True, ask=True: (
+                    told.append((app, launch)),
+                    (True, "https://en.wikipedia.org/wiki/Olive\nOlive - Wikipedia"))[1]):
+            n0 = len(tf.LLM.prompts)
+            r, _ = tf.turn(said, intent="screen", extra={"screen_task": task})
+        prompt = tf.LLM.prompts[-1][1] if len(tf.LLM.prompts) > n0 else ""
+        check(f"{task}: Chrome's page is fetched when the read holds only its toolbar",
+              told == [("Google Chrome", False)]
+              and fetched == ["https://en.wikipedia.org/wiki/Olive"], (told, fetched))
+        check(f"{task}: the article goes to the model, not the toolbar",
+              r["did"] == did and "Olea europaea" in prompt and "Bookmark this tab" not in prompt,
+              (r["did"], prompt[:300]))
+    # A read that already holds the page, or another app in front: nothing extra.
+    for ctx_x, why in (({**chrome_ax, "visible": {"text": toolbar + " " + article,
+                                                  "document": article, "truncated": False}},
+                        "Chrome with its page already read"),
+                       ({**chrome_ax, "frontmost": {"app": "Notes", "pid": 3,
+                                                    "bundle_id": "com.apple.Notes",
+                                                    "window": ""}}, "Notes in front"),
+                       ({**chrome_ax, "selected": "Olives are picked in autumn."},
+                        "selected text")):
+        fresh()
+        told.clear()
+        fetched.clear()
+        with patched(router, _screen_context=lambda max_chars=6000, c=ctx_x: dict(c),
+                     _page_text=lambda url, max_chars=6000: (fetched.append(url), article)[1]), \
+                patched(mac, _tell=lambda app, script, timeout=4.0, launch=True, ask=True: (
+                    told.append((app, launch)), (True, "https://x.org/a\nA"))[1]):
+            r, _ = tf.turn("what's this article about", intent="screen",
+                           extra={"screen_task": "summarize"})
+        check(f"{why}: no Apple Event to Chrome and no fetch",
+              not told and not fetched and r["did"] == "summarized_screen",
+              (told, fetched, r["did"]))
+    # A Wikipedia article is read through Wikipedia's API: its text, not its menus.
+    asked: list = []
+    api = json.dumps({"query": {"pages": {"1": {"extract": "The olive is a tree.\n\nIt grows."}}}})
+
+    def wiki_open(req, timeout=0):
+        asked.append(getattr(req, "full_url", req))
+        return _Resp(api.encode())
+    with patched(_ur, urlopen=wiki_open):
+        txt = router._page_text("https://en.wikipedia.org/wiki/Olive")
+    check("a Wikipedia article: the article's own text, from Wikipedia's API",
+          txt == "The olive is a tree.\nIt grows." and asked
+          and "api.php" in asked[0] and "titles=Olive" in asked[0], (txt, asked))
+    main_html = (b"<html><body><nav>" + b"Menu item " * 300 + b"</nav><main><p>"
+                 + b"The real story. " * 200 + b"</p></main></body></html>")
+    with patched(_ur, urlopen=lambda req, timeout=0: _Resp(main_html)):
+        txt = router._page_text("https://example.com/story")
+    check("a page that marks its <main>: that, not its menus",
+          txt.startswith("The real story.") and "Menu item" not in txt, txt[:80])
 
     # Guide mode blocked by Accessibility carries the pane (L5).
     with patched(router, _ax_missing=lambda: True):

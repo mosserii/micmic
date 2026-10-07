@@ -153,6 +153,54 @@ def t_consent():
     check("no explainer registered: runs, with the long timeout",
           ok and OSA == [("x", mac.FIRST_ASK_TIMEOUT)], OSA)
 
+    # The 2026-10-07 shoot: "next" over MicMic's YouTube tab put up macOS's "MicMic
+    # wants access to control Google Chrome" with no MicMic line, and the turn sat out
+    # the 60 s first ask. The release registers its line with savta.consent
+    # (native/listener.py ensure_server), which _tell never asked. Now it does.
+    from savta import consent
+    try:
+        reset("Google Chrome=not_asked")
+        consent._reset_for_tests()
+        order = []
+        consent.register(lambda app: (order.append(("line", app)), True)[1])
+        mac._osa = lambda s, timeout=4.0: (order.append(("osa", timeout)), (True, "0"))[1]
+        try:
+            ok, _ = mac._tell("Google Chrome", "x", timeout=6.0, launch=False)
+        finally:
+            mac._osa = fake_osa
+        check("the line registered with savta.consent comes before macOS's question",
+              ok and order == [("line", "Google Chrome"), ("osa", mac.FIRST_ASK_TIMEOUT)], order)
+        reset("Google Chrome=not_asked")
+        consent._reset_for_tests()
+        consent.register(lambda app: None)          # no answer within CONSENT_WAIT
+        ok, why = mac._tell("Google Chrome", "x", timeout=6.0, launch=False)
+        check("her line unanswered: automation_declined at once, no script, no 60 s wait",
+              (ok, why) == (False, "automation_declined:Google Chrome") and not OSA, (ok, why, OSA))
+        reset("Google Chrome=not_asked")
+        consent._reset_for_tests()
+        consent.register(lambda app: False)          # Not now
+        closed = mac.close_tab_with("abc123")
+        check("a tab Chrome would not let MicMic close says why (LAST_CLOSE_FAILURE)",
+              closed is False and mac.LAST_CLOSE_FAILURE[0] == "automation_declined:Google Chrome"
+              and not OSA, (closed, mac.LAST_CLOSE_FAILURE, OSA))
+        reset("Google Chrome=granted")
+        consent._reset_for_tests()
+        OSA_RULES.append(("close t", (True, "1")))
+        closed = mac.close_tab_with("abc123")
+        check("a closed tab clears it", closed is True and mac.LAST_CLOSE_FAILURE[0] == "",
+              (closed, mac.LAST_CLOSE_FAILURE))
+        reset("Messages=not_asked")
+        consent._reset_for_tests()
+        consent.register(lambda app: (order.append(("consent", app)), True)[1])
+        order.clear()
+        mac.set_automation_explainer(lambda app: (order.append(("own", app)), True)[1])
+        mac._tell("Messages", "x")
+        check("a host's own explainer still wins, shown once",
+              [o for o in order if o[0] in ("own", "consent")] == [("own", "Messages")], order)
+    finally:
+        consent.register(None)
+        consent._reset_for_tests()
+
     reset("Music=not_asked")
     called = []
     mac.set_automation_explainer(lambda app: called.append(app) or True)

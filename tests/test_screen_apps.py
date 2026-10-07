@@ -487,7 +487,24 @@ def t_key_sequence():
                        ("press 12.5 plus 3", ["1", "2", ".", "5", "+", "3", "="]),
                        ("במחשבון תלחצי 5 כפול 3", ["5", "×", "3", "="]),
                        ("нажми 7 плюс 8", ["7", "+", "8", "="]),
-                       ("press the blue button", None)):
+                       ("press the blue button", None),
+                       # The 2026-10-07 shoot: macOS wrote "1280 × 12"; the listener's
+                       # cleanup dropped the sign and 128012 was pressed. Every way she
+                       # can say it, and what the listener now sends (native/listener.py
+                       # spell_math), presses 1280, times, 12, equals.
+                       ("in Calculator, press 1280 × 12", list("1280") + ["×"] + list("12") + ["="]),
+                       ("in Calculator, press 1280 times 12", list("1280") + ["×"] + list("12") + ["="]),
+                       ("in Calculator, press 1280 x 12", list("1280") + ["×"] + list("12") + ["="]),
+                       ("in calculator press 1280 times 12", list("1280") + ["×"] + list("12") + ["="]),
+                       ("press 1,280 × 12", list("1280") + ["×"] + list("12") + ["="]),
+                       ("press 1280 ✕ 12", list("1280") + ["×"] + list("12") + ["="]),
+                       ("press 100 ÷ 4", list("100") + ["÷", "4", "="]),
+                       ("press 100 divided by 4", list("100") + ["÷", "4", "="]),
+                       ("press 1280 − 12", list("1280") + ["-"] + list("12") + ["="]),
+                       ("press 1280 minus 12", list("1280") + ["-"] + list("12") + ["="]),
+                       ("press 12 plus 3 equals", ["1", "2", "+", "3", "="]),
+                       ("press 1280 point 5 times 2", list("1280") + [".", "5", "×", "2", "="]),
+                       ("press 50 percent", ["5", "0", "%"])):
         got = apps.key_sequence(tg.without_place(said, "app:Calculator"), "Calculator")
         check(f"keys of {said!r}: {want}", got == want, got)
 
@@ -519,6 +536,22 @@ def t_calculator_presses_exact_keys():
     check("the spelled-out phrasing presses the same four keys",
           calc.presses == ["5", "×", "3", "="] and r["say"] == "Calculator shows 15.",
           f"{calc.presses} {r['say']!r}")
+
+
+def t_calculator_times_sign():
+    """The 2026-10-07 shoot, 3 of 3: "in Calculator, press 1280 × 12" pressed 128012.
+    The sign as macOS writes it, and the words the listener now sends, press 1280 x 12 =."""
+    for said in ("in Calculator, press 1280 × 12", "in calculator press 1280 times 12",
+                 "in Calculator press 1280 x 12"):
+        reset()
+        u = _u("open_app", intent_confidence=0.6, inside_an_app=0.98,
+               named_app="app:Calculator", named_app_confidence=0.98)
+        with calculator() as calc, understood(u), model(None):
+            calc.running = True
+            r = router.handle(_ScriptedJev(), said, speak=False)
+        check(f"{said!r}: pressed 1280, times, 12, equals",
+              calc.presses == list("1280") + ["×"] + list("12") + ["="], calc.presses)
+        check(f"{said!r}: she hears 15360", r["say"] == "Calculator shows 15360.", r["say"])
 
 
 def t_calculator_missing_key_stops():
@@ -578,6 +611,7 @@ TESTS = [
     ("1h. the numbers check", t_numbers_check),
     ("4a. keys from her words", t_key_sequence),
     ("4b. calculator presses exactly 5 x 3 =", t_calculator_presses_exact_keys),
+    ("4b2. 1280 × 12 keeps its times", t_calculator_times_sign),
     ("4c. a missing key stops it", t_calculator_missing_key_stops),
     ("4d. calculator in Hebrew", t_calculator_hebrew),
     ("5. read-out messages end once", t_read_messages_single_stops),

@@ -178,9 +178,22 @@ def _launch_hidden(app: str) -> str:
 
 
 def _explain(app: str) -> bool:
+    """MicMic's line before macOS first asks about `app`; True to go ahead.
+
+    The release's line is registered with savta/consent.py (native/listener.py
+    ensure_server: consent.register(LISTENER.explain_automation)), and nothing ever
+    called set_automation_explainer, so this always said yes with no line: the
+    2026-10-07 shoot's "next" over a YouTube tab put up macOS's "MicMic wants access to
+    control Google Chrome" with no word from MicMic, and the turn sat out the 60 s first
+    ask. A host that set its own explainer here still wins; otherwise consent.explain
+    (no line registered: yes, as before; no answer in time: no, take the fallback)."""
     fn = _explain_automation
     if fn is None:
-        return True
+        try:
+            from .. import consent
+        except Exception:  # noqa: BLE001
+            return True
+        return consent.explain(app)
     try:
         return bool(fn(app))
     except Exception:  # noqa: BLE001
@@ -521,6 +534,13 @@ def set_volume(level: int) -> bool:
 # as pause_failed and she hears how to pause it herself (space bar, K).
 
 
+# Why the last close_tab_with() did not close anything: "" (closed, or no such tab), or
+# "automation_denied:Google Chrome" / "automation_declined:..." / "automation_unanswered:..."
+# when Chrome would not let MicMic touch its tabs. A replacement is then not opened
+# over a video still playing (router._tab_blocked).
+LAST_CLOSE_FAILURE = [""]
+
+
 def close_tab_with(fragment: str) -> bool:
     """Close only the Chrome tab whose address contains this fragment (a video id).
 
@@ -528,6 +548,7 @@ def close_tab_with(fragment: str) -> bool:
     whatever app is in front when she presses Undo, which by then may be a document
     in another app entirely. Finding the tab by its address can only close the thing
     MicMic opened; if it is already gone, nothing else is touched."""
+    LAST_CLOSE_FAILURE[0] = ""
     frag = fragment.replace('"', "")
     if not frag:
         return False
@@ -545,6 +566,8 @@ def close_tab_with(fragment: str) -> bool:
         '  end repeat\n'
         '  return n\n'
         'end tell', timeout=6.0, launch=False)
+    if not ok and (out or "").startswith("automation_"):
+        LAST_CLOSE_FAILURE[0] = out
     return ok and out.strip().isdigit() and int(out.strip()) > 0
 
 

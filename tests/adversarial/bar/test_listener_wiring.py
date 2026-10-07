@@ -607,6 +607,65 @@ def test_empty_final_after_shown_words_is_sent():
           "turn ended with nothing said" not in LOGS, LOGS[-4:])
 
 
+def test_normalize_keeps_arithmetic_signs():
+    """The 2026-10-07 shoot, 3 of 3: macOS wrote "press 1280 × 12", normalize() dropped
+    the sign and MicMic pressed 128012. A sign is now the word she said; text with no
+    arithmetic in it is cleaned exactly as before."""
+    n = listenermod.normalize
+    for said, want in (
+            ("Hey MicMic, in Calculator, press 1280 × 12",
+             "hey micmic in calculator press 1280 times 12"),
+            ("1280 × 12 =", "1280 times 12 equals"),
+            ("100 ÷ 4", "100 divided by 4"),
+            ("1280 − 12", "1280 minus 12"),
+            ("5 - 3", "5 minus 3"),
+            ("12 + 3", "12 plus 3"),
+            ("what is 3 * 4", "what is 3 times 4"),
+            ("8 / 2", "8 divided by 2"),
+            ("press 50%", "press 50 percent"),
+            ("1,280.5 × 2", "1280 point 5 times 2"),
+            ("1280 x 12", "1280 x 12"),
+            # Not arithmetic: unchanged from before.
+            ("call 054-1234567", "call 054 1234567"),
+            ("+972 54 123 4567", "972 54 123 4567"),
+            ("remind me on 7/10", "remind me on 7 10"),
+            ("version 1.2.5, please", "version 1 2 5 please"),
+            ("Wi-Fi off", "wi fi off"),
+            ("מיקמיק, תתקשרי לדנה!", "מיקמיק תתקשרי לדנה")):
+        got = n(said)
+        check(f"normalize({said!r}) == {want!r}", got == want, got)
+    check("spell_math leaves a sentence with no sign untouched, character for character",
+          listenermod.spell_math("Call Dana, 054-1234567.") == "Call Dana, 054-1234567.")
+
+
+def test_wake_sentence_with_a_times_sign_keeps_it():
+    """The shoot's exact path: the wake word and the command in one Apple final."""
+    LOGS.clear()
+    lst, bar, sent = turn_listener()
+    lst.variants = listenermod.wake_variants(listenermod.DEFAULT_WAKE)
+    lst.on_result(lst.gen, FakeResult("Hey MicMic, in Calculator, press 1280 × 12",
+                                      final=True, conf=0.9), None)
+    end = time.time() + 2.0
+    while time.time() < end and not sent:
+        time.sleep(0.02)
+    check("the command after the wake word goes out with 'times' in it",
+          sent == [("in calculator press 1280 times 12", "wake")], (sent, LOGS[-4:]))
+
+
+def test_held_turn_with_a_times_sign_keeps_it():
+    """The same through the talk key."""
+    LOGS.clear()
+    lst, bar, sent = turn_listener()
+    lst.locale = "en-US"
+    lst.push_to_talk()
+    partial(lst, "in Calculator press 1280 × 12")
+    lst.push_to_talk()
+    final(lst, "in Calculator press 1280 × 12", conf=0.9)
+    settle_turn(lst, sent)
+    check("a talk-key turn keeps the sign as 'times'",
+          sent == [("in calculator press 1280 times 12", "push")], (sent, LOGS[-4:]))
+
+
 def test_one_language_no_this_stays_english():
     """The owner's 2026-09-28 session: "no this" (en-US 0.24) went out as Hebrew
     "נודס" because a second recogniser read the turn in Hebrew and scored 0.37. She
@@ -2875,6 +2934,9 @@ def main():
               test_view_heard_ignores_empty_text,
               test_armed_window_expiry_via_watchdog,
               test_empty_final_after_shown_words_is_sent,
+              test_normalize_keeps_arithmetic_signs,
+              test_wake_sentence_with_a_times_sign_keeps_it,
+              test_held_turn_with_a_times_sign_keeps_it,
               test_one_language_no_this_stays_english,
               test_local_reading_wins_and_does_not_wait_for_apple,
               test_local_read_that_fails_falls_back_to_apple,

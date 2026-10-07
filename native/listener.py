@@ -160,6 +160,22 @@ ENGINE_STALL = 2.0      # no audio buffer at all for this long means the engine 
                         # (it delivers ~23 a second, muted or not). Was 6 s, and only
                         # counted while unmuted: a send's countdown hid a dead engine.
 ENGINE_STALL_MAX = 60.0 # a rebuild that brings nothing back waits twice as long each time
+ENGINE_REBUILD_MAX = 8  # ...and after this many in a row the watchdog stops trying (about
+                        # 4 min of backoff). A wake, a route change or a key press still
+                        # rebuilds it; churning a dead device forever did not bring it back.
+# Recognition sessions. 1.2.4 reached 560% CPU with ~143 Apple sessions alive in the
+# process (the owner's Mac 2026-10-07; the sample of 2026-10-03, same build, shows the
+# same thing): every session MicMic recycled after Apple had already ended it (silence
+# 1110, a final, our own cancel) had endAudio() called on it, and Apple's
+# -[SFLocalSpeechRecognitionClient stopSpeech] on a closed client errors, logs, fails
+# the task and is dispatched again, forever, one serial queue per session. Sessions are
+# now cancelled only while they are still live, never ended twice, and counted.
+SESSION_CAP = 4         # stopped sessions Apple has not yet confirmed as over: past this,
+                        # no new one is opened (and it is logged) until they drain
+SESSION_FORGET = 30.0   # a stopped session never confirmed this long is dropped from the count
+START_WINDOW = 60.0     # the loop guard: more session starts than START_BURST in this
+START_BURST = 40        # window is a restart loop (normal wake-mode churn is ~12 a minute)
+SESSION_HOLD_MAX = 30.0 # how long a tripped guard holds new sessions back, at most
 STAND_IN = 0.5          # the confidence of text the recogniser never scored
 TURN_AUDIO_FRESH = 0.5  # a turn opening with no buffer this recent rebuilds the engine first
                         # means the engine died under us, not that the room is quiet
@@ -488,18 +504,53 @@ def log(msg: str) -> None:
 _WS = re.compile(r"\s+")
 _NON_WORD = re.compile(r"[^\w]+", re.UNICODE)
 
+# macOS dictation writes arithmetic as signs: "in Calculator, press 1280 times 12" came
+# back "... press 1280 × 12", _NON_WORD dropped the sign, and MicMic pressed 128012
+# (the 2026-10-07 shoot, 3 of 3). A sign becomes the word she said before anything is
+# stripped; savta/actions/apps.key_sequence reads those words as keys, and Jev reads
+# them as she said them. Signs that are never anything but arithmetic are always
+# spelled; "+", "-", "*" and "/" only between two numbers, so a phone number
+# ("054-1234567", "+972"), a date ("7/10") or a hyphenated word is left as it was.
+_MATH_SIGNS = (("×", " times "), ("✕", " times "), ("✖", " times "),
+               ("÷", " divided by "), ("−", " minus "), ("=", " equals "))
+_MATH_BETWEEN = (
+    (re.compile(r"(?<=\d)\s*\+\s*(?=\d)"), " plus "),
+    (re.compile(r"(?<=\d)\s+[-–]\s+(?=\d)"), " minus "),
+    (re.compile(r"(?<=\d)\s*\*\s*(?=\d)"), " times "),
+    (re.compile(r"(?<=\d)\s+/\s+(?=\d)"), " divided by "),
+    (re.compile(r"(?<=\d)\s*%"), " percent "),
+)
+# Inside a sum only: "1,280.5 × 2" is 1280.5, not 1 280 5.
+_THOUSANDS = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
+_DECIMAL = re.compile(r"(?<=\d)\.(?=\d)")
+
+
+def spell_math(text: str) -> str:
+    """Arithmetic signs as words ("1280 × 12" -> "1280 times 12"). Text with no sign in
+    it comes back unchanged, character for character."""
+    out = text
+    for sign, word in _MATH_SIGNS:
+        if sign in out:
+            out = out.replace(sign, word)
+    for rx, word in _MATH_BETWEEN:
+        out = rx.sub(word, out)
+    if out != text:
+        out = _DECIMAL.sub(" point ", _THOUSANDS.sub("", out))
+    return out
+
 
 def normalize(text: str) -> str:
     """Lowercase, drop punctuation and Hebrew/Arabic diacritics, collapse spaces.
 
     Hebrew recognition comes back with and without niqqud and with assorted
     punctuation depending on the sentence, so every comparison in this file
-    happens on this normalized form.
+    happens on this normalized form. Arithmetic signs are kept as words (spell_math).
     """
     if not text:
         return ""
     text = unicodedata.normalize("NFKD", text)
     text = "".join(c for c in text if not unicodedata.combining(c))
+    text = spell_math(text)
     text = _NON_WORD.sub(" ", text.lower())
     return _WS.sub(" ", text).strip()
 
@@ -1534,6 +1585,16 @@ class Listener:
         self.gen = 0                  # session generation; stale callbacks are dropped
         self.request = None
         self.task = None
+        self.task_gen = 0             # the gen the live session was opened with
+        # gen -> {"task", "started", "stopped", "done", "ended"}: every session opened
+        # and not yet known to be over (see SESSION_CAP). At most one is live (not
+        # stopped); the rest are cancelled ones Apple has not confirmed yet.
+        self.sessions: dict[int, dict] = {}
+        self.start_times: list[float] = []   # recent session starts, for the loop guard
+        self.session_hold_until = 0.0        # a tripped guard: no new session before this
+        self.session_holds = 0               # guard trips in a row (the hold doubles)
+        self.recovering = False       # an engine rebuild is queued or running
+        self.engine_gave_up = False   # ENGINE_REBUILD_MAX fruitless rebuilds: logged once
         self.tap_installed = False
 
         self.transcript = ""          # normalized, current recognition task only
@@ -2464,37 +2525,59 @@ class Listener:
             self.set_status(L("mic_failed", self.locale), "⚠")
             return False
 
-    def recover_engine(self, why: str) -> None:
+    def recover_engine(self, why: str, fresh: bool = False, session: bool = True) -> None:
         """AVAudioEngine does not restart itself after a route/config change (a
         device plugged/unplugged) or across sleep — README used to list both as
         "not tested" (bugs #2). Sleep/wake and device-change notifications, plus
-        the watchdog's own buffer-stall check below, both land here."""
-        log(f"rebuilding audio engine: {why}")
+        the watchdog's own buffer-stall check below, both land here.
+
+        The old engine is torn down completely (tap removed, stopped, released) and the
+        recognition session with it, so nothing is left feeding or waiting on a dead
+        engine; a fresh session is opened on the new one. `fresh` (a wake, a route
+        change: new hardware, so a new start) resets the rebuild count. `session=False`
+        is a caller that opens its own session right after (a turn opening)."""
         try:
-            if self.engine is not None:
-                self.engine.stop()
-        except Exception:  # noqa: BLE001
-            pass
-        self.tap_installed = False
-        ok = self.start_engine()
-        self.last_buffers_at = time.time()
-        self.last_buffers = self.buffers
-        if ok:
-            log("audio engine rebuilt")
-        else:
-            log("audio engine rebuild failed — still deaf")
-            self.announce_failure("mic_failed")
+            log(f"rebuilding audio engine: {why}")
+            if fresh:
+                self.stall_rebuilds = 0
+                self.engine_gave_up = False
+            self.stop_task()
+            old, self.engine = self.engine, None
+            if old is not None:
+                if self.tap_installed:
+                    try:
+                        old.inputNode().removeTapOnBus_(0)
+                    except Exception:  # noqa: BLE001
+                        pass
+                try:
+                    old.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+            self.tap_installed = False
+            old = None
+            ok = self.start_engine()
+            self.last_buffers_at = time.time()
+            self.last_buffers = self.buffers
+            if ok:
+                log("audio engine rebuilt")
+                if session and self.running and not self.paused:
+                    self.start_task(force=True)
+            else:
+                log("audio engine rebuild failed — still deaf")
+                self.announce_failure("mic_failed")
+        finally:
+            self.recovering = False
 
     def install_recovery_observers(self) -> None:
         nc = Foundation.NSNotificationCenter.defaultCenter()
         nc.addObserverForName_object_queue_usingBlock_(
             AVFoundation.AVAudioEngineConfigurationChangeNotification, None,
             Foundation.NSOperationQueue.mainQueue(),
-            lambda note: self.recover_engine("audio route/config change"))
+            lambda note: self.recover_engine("audio route/config change", fresh=True))
         AppKit.NSWorkspace.sharedWorkspace().notificationCenter().addObserverForName_object_queue_usingBlock_(
             AppKit.NSWorkspaceDidWakeNotification, None,
             Foundation.NSOperationQueue.mainQueue(),
-            lambda note: self.recover_engine("system wake from sleep"))
+            lambda note: self.recover_engine("system wake from sleep", fresh=True))
 
     def check_update(self) -> None:
         """Show "Update available" in the menu when the releases page has a newer one."""
@@ -2937,7 +3020,8 @@ class Listener:
             # hears what she says next.
             log(f"turn open: no audio for {quiet:.1f}s, rebuilding the engine first")
             self.view_wait(L("one_moment", self.locale))
-            self.recover_engine("no audio when a turn opened")
+            # The turn opens its own session just below, on the new engine.
+            self.recover_engine("no audio when a turn opened", session=False)
         # Taken after any rebuild: its time must not count as holding the key.
         now = time.time()
         if self.turn is not None:
@@ -3036,11 +3120,7 @@ class Listener:
             if t is None or t["finish_at"]:
                 return
             t["finish_at"] = time.time()
-            if self.request is not None:
-                try:
-                    self.request.endAudio()
-                except Exception:  # noqa: BLE001
-                    pass
+            self.end_audio()
         log(f"turn finishing: {why}")
         # Say so NOW. The final words and the local read take a moment, and
         # with nothing changing on screen she pressed again and threw the turn away.
@@ -3089,12 +3169,39 @@ class Listener:
         error our own cancel() raises looks like a recognition failure, which
         triggers a restart, whose cancel raises the same error — a loop that
         hammered Apple three times a second the first time this ran.
+
+        At most one session is live: the previous one is stopped first (see
+        stop_task). Two guards keep a fault from turning into the 560% CPU of 1.2.4:
+        no new session while more than SESSION_CAP stopped ones are still unconfirmed
+        by Apple, and no more than START_BURST starts a minute (a restart loop). Either
+        one logs and holds new sessions back for a while, doubling up to
+        SESSION_HOLD_MAX; the session that is open stays open meanwhile.
         """
         with self.lock:
             now = time.time()
             if now - self.task_started < 0.7 and not force:
                 return                       # rate limit: never churn sessions
+            if now < self.session_hold_until:
+                return                       # a guard below tripped: wait it out
+            self.start_times = [t for t in self.start_times if now - t < START_WINDOW]
+            draining = self._prune_sessions(now)
+            why = ""
+            if len(self.start_times) >= START_BURST:
+                why = (f"{len(self.start_times)} recognition sessions started in the last "
+                       f"{START_WINDOW:.0f}s: a restart loop")
+            elif draining > SESSION_CAP:
+                why = (f"{draining} stopped recognition sessions not yet released by Apple "
+                       f"(cap {SESSION_CAP})")
+            if why:
+                hold = min(SESSION_HOLD_MAX, 2.0 ** self.session_holds)
+                self.session_holds += 1
+                self.session_hold_until = now + hold
+                log(f"{why}; no new session for {hold:.0f}s")
+                return
+            if len(self.start_times) < START_BURST // 2:
+                self.session_holds = 0
             self.stop_task()
+            self.start_times.append(now)
             req = Speech.SFSpeechAudioBufferRecognitionRequest.alloc().init()
             req.setShouldReportPartialResults_(True)
             if self.recognizer.supportsOnDeviceRecognition() and \
@@ -3107,7 +3214,6 @@ class Listener:
                 pass
             self.gen += 1
             gen = self.gen
-            self.request = req
             if self.turn is not None and self.transcript:
                 # A turn's session is being replaced before it gave a final (Apple
                 # ended it, or the watchdog found it missing): what it heard is on the
@@ -3119,30 +3225,112 @@ class Listener:
             self.transcript = ""
             self.last_change = now
             self.task_started = now
-            self.task = self.recognizer.recognitionTaskWithRequest_resultHandler_(
+            task = self.recognizer.recognitionTaskWithRequest_resultHandler_(
                 req, lambda result, error: self.on_result(gen, result, error))
+            self.sessions[gen] = {"task": task, "started": now, "stopped": 0.0,
+                                  "done": False, "ended": False}
+            self.task, self.task_gen = task, gen
+            # Fed by the audio tap from here on. Set last, so no buffer reaches a
+            # request whose task does not exist yet.
+            self.request = req
             self.primary_final = None
 
+    @staticmethod
+    def _task_state(task) -> int:
+        """SFSpeechRecognitionTaskState: 0 starting, 1 running, 2 finishing, 3 canceling,
+        4 completed; -1 when it cannot be read (a stand-in object in a test)."""
+        try:
+            return int(task.state())
+        except Exception:  # noqa: BLE001
+            return -1
+
+    def _session_over(self, s: dict) -> bool:
+        """Apple is done with this session: it said so (an error or a final reached
+        on_result) or the task reports itself completed."""
+        return s["done"] or self._task_state(s["task"]) == 4
+
+    def _prune_sessions(self, now: float) -> int:
+        """Forget sessions Apple is done with; return how many stopped ones are still
+        waiting on Apple. One never confirmed in SESSION_FORGET is dropped from the
+        count, with a log line, rather than holding new sessions back forever."""
+        with self.lock:
+            waiting = 0
+            for g, s in list(self.sessions.items()):
+                if not s["stopped"]:
+                    continue                 # the live one
+                if self._session_over(s):
+                    del self.sessions[g]
+                elif now - s["stopped"] > SESSION_FORGET:
+                    log(f"recognition session {g} never confirmed its end in "
+                        f"{SESSION_FORGET:.0f}s; no longer counted")
+                    del self.sessions[g]
+                else:
+                    waiting += 1
+            return waiting
+
+    def live_sessions(self) -> int:
+        """Sessions opened and neither stopped nor ended by Apple: never more than one."""
+        with self.lock:
+            return sum(1 for s in self.sessions.values()
+                       if not s["stopped"] and not self._session_over(s))
+
+    def end_audio(self) -> None:
+        """She is done talking: let the live session finish with what it heard.
+
+        Only ever on a live session, and once. endAudio() on a session Apple has
+        already ended (a final, an error, our own cancel) is what spun 1.2.4:
+        -[SFLocalSpeechRecognitionClient stopSpeech] on a closed client fails, logs,
+        fails the task, and runs again, forever, a CPU core's worth per session."""
+        with self.lock:
+            req, s = self.request, self.sessions.get(self.task_gen)
+            if req is None or s is None or s["stopped"] or s["ended"]:
+                return
+            if s["done"] or self._task_state(s["task"]) in (2, 3, 4):
+                return
+            s["ended"] = True
+            try:
+                req.endAudio()
+            except Exception:  # noqa: BLE001
+                pass
+
     def stop_task(self) -> None:
+        """Drop the live session: detach its request from the audio tap, and cancel its
+        task unless Apple has ended it already. Never endAudio() here (see end_audio):
+        that, on sessions Apple had already closed, is the 1.2.4 leak."""
         with self.lock:
             self.gen += 1                    # anything still in flight is stale now
-            if self.task is not None:
-                try:
-                    self.task.cancel()
-                except Exception:  # noqa: BLE001
-                    pass
-            if self.request is not None:
-                try:
-                    self.request.endAudio()
-                except Exception:  # noqa: BLE001
-                    pass
+            task, gen = self.task, self.task_gen
+            self.request = None              # the tap feeds nothing from here on
             self.task = None
-            self.request = None
+            s = self.sessions.get(gen)
+            if s is not None:
+                if s["stopped"]:
+                    return                   # stopped once already
+                s["stopped"] = time.time()
+                if self._session_over(s):
+                    del self.sessions[gen]   # Apple ended it: nothing to cancel
+                    return
+            if task is not None and self._task_state(task) not in (3, 4):
+                try:
+                    task.cancel()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def on_result(self, gen, result, error) -> None:
         """Called by the Speech framework on its own queue, repeatedly, as the
         transcript grows. Everything here is cheap; the work happens in watchdog."""
         try:
+            if error is not None or (result is not None and result.isFinal()):
+                # Apple is done with this session (a final, an error, or our cancel
+                # answered): it is released, and must never be ended again.
+                with self.lock:
+                    s = self.sessions.get(gen)
+                    if s is not None:
+                        s["done"] = True
+                        if s["stopped"]:
+                            del self.sessions[gen]
+                    if gen == self.task_gen and gen == self.gen:
+                        self.request = None  # the tap stops feeding a closed session
             if gen != self.gen:
                 return                       # a session we have already replaced
             if error is not None:
@@ -3421,11 +3609,7 @@ class Listener:
                     t["finish_at"] = now
                 else:
                     return
-                if self.request is not None:
-                    try:
-                        self.request.endAudio()
-                    except Exception:  # noqa: BLE001
-                        pass
+                self.end_audio()
             # Junk guard: a turn too short to hold a word is closed at once, unread.
             junk = self.junk_reason(t, early=True)
             if not junk:
@@ -3690,16 +3874,37 @@ class Listener:
                 # read only while unmuted, so a send's read-back hid a dead engine
                 # until she pressed the key to stop it (02:26:27, "jet" went out).
                 limit = min(ENGINE_STALL_MAX, ENGINE_STALL * (2 ** self.stall_rebuilds))
-                if (self.engine is not None
-                        and now - max(self.audio_at, self.engine_started_at) > limit):
-                    # A rebuild that brings nothing back (no microphone at all) waits
-                    # twice as long before the next one: never churn the engine.
-                    self.stall_rebuilds += 1
-                    self.engine_started_at = now     # don't re-fire while it rebuilds
-                    # AVAudioEngine setup elsewhere always runs on the main thread
-                    # (begin() is reached via on_main); stay consistent.
-                    on_main(lambda lim=limit: self.recover_engine(
-                        f"no audio buffers for {lim:.0f}s: engine looks dead"))
+                silent_for = now - max(self.audio_at, self.engine_started_at)
+                if self.engine_gave_up and now - self.audio_at <= ENGINE_STALL:
+                    self.engine_gave_up = False
+                    log("audio is back")
+                    self.set_status(L("listening", self.locale), "◉")
+                if (self.engine is not None and silent_for > limit
+                        and not self.recovering and not self.engine_gave_up):
+                    if self.stall_rebuilds >= ENGINE_REBUILD_MAX:
+                        # Bounded: a device that ENGINE_REBUILD_MAX rebuilds did not
+                        # bring back is left alone (a wake, a route change or a key
+                        # press still rebuilds it) instead of being churned forever.
+                        self.engine_gave_up = True
+                        log(f"audio engine: no audio after {self.stall_rebuilds} rebuilds "
+                            f"in a row; not rebuilding again until a wake, a device "
+                            f"change or a key press")
+                        self.set_status(L("mic_failed", self.locale), "⚠")
+                    else:
+                        # A rebuild that brings nothing back (no microphone at all)
+                        # waits twice as long before the next one: never churn.
+                        self.stall_rebuilds += 1
+                        self.engine_started_at = now     # don't re-fire while it rebuilds
+                        # One at a time: a rebuild still queued behind a blocked main
+                        # thread is not queued again. In 1.2.4 an engine start blocked
+                        # the main thread for 7 minutes (2026-10-07 08:27:57 ->
+                        # 08:34:50), the watchdog queued another rebuild meanwhile, and
+                        # it ran straight after (08:34:50.364 rebuilt, .376 rebuilding).
+                        self.recovering = True
+                        # AVAudioEngine setup elsewhere always runs on the main thread
+                        # (begin() is reached via on_main); stay consistent.
+                        on_main(lambda lim=limit: self.recover_engine(
+                            f"no audio buffers for {lim:.0f}s: engine looks dead"))
 
                 self.consider(final=False)   # may send, and may clear the transcript
 
@@ -3726,7 +3931,10 @@ class Listener:
                     busy = bool(self.pending_tail)
                 spent = (spoke and quiet >= STALE_AFTER and not busy)
                 idle = (now - started > TASK_MAX and not spoke)
-                if missing or spent or idle:
+                # No audio at all: a new session would hear nothing either. Sessions
+                # are not recycled on a dead engine; the rebuild opens the next one.
+                deaf = self.engine is not None and silent_for > ENGINE_STALL
+                if (missing or spent or idle) and not deaf:
                     self.start_task()
             except Exception as e:  # noqa: BLE001
                 log(f"watchdog: {e!r}")
@@ -3749,6 +3957,9 @@ class Listener:
         self.stop_task()
         try:
             if self.engine is not None:
+                if self.tap_installed:
+                    self.engine.inputNode().removeTapOnBus_(0)
+                    self.tap_installed = False
                 self.engine.stop()
         except Exception:  # noqa: BLE001
             pass

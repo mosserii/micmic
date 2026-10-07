@@ -22,6 +22,7 @@ Every name is made up.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -1876,6 +1877,84 @@ def t_send_and_say_is_one_message():
         check(f"units: _send_and_say({utt!r}) == {want}", router._send_and_say(utt) == want)
 
 
+
+def t_send_it_after_a_song():
+    """TestFlight build 6 fix, reviewed: "send it to Dana" right after a song sends the
+    song, but only when she gave no words of her own, and an open document still wins.
+    The song is a made-up Apple Music catalog row; the contacts are the fixture book."""
+    print("\nt_send_it_after_a_song")
+    am = {"id": "am:7001", "track_id": "7001", "title": "Sunset", "artist": "Made Up Band",
+          "player": "apple_music", "url": "https://music.apple.com/us/album/sunset/7100?i=7001"}
+    music_front = {"permissions": {"accessibility": True, "screen_recording": False},
+                   "frontmost": {"app": "Music", "pid": 7, "bundle_id": "com.apple.Music",
+                                 "window": "Music"},
+                   "selected": "", "focused": {"role": "", "value": "", "secure": False},
+                   "visible": {"text": "Sunset | Made Up Band", "truncated": False},
+                   "page": None, "has_image": False}
+    note = ("Shopping for Friday: tomatoes, eggs, cumin, two onions, peppers, bread "
+            "and a bottle of wine for the dinner at Dana's.")
+    notes_front = {**music_front,
+                   "frontmost": {"app": "Notes", "pid": 8, "bundle_id": "com.apple.Notes",
+                                 "window": "Shopping"},
+                   "visible": {"text": "Notes | Shopping | " + note, "truncated": False,
+                               "document": note}}
+    real_ctx = router._screen_context
+    try:
+        # 1. No words of her own, nothing open: the song's link is the message.
+        fresh()
+        router.MEM.last_played = {**am, "at": time.time()}
+        router._screen_context = lambda max_chars=6000: json.loads(json.dumps(music_front))
+        utt = "send it to dana cohen"
+        with tm.gates_on():
+            r = say(ScriptedJev({utt: msg("Dana Cohen", message_has_content=0.05)}), utt)
+        text = (router.PENDING or {}).get("text", "")
+        check("song: 'send it to dana' sends the song's link",
+              r["did"] == "sending" and pending_to() == "Dana Cohen"
+              and "music.apple.com" in text and (r.get("detail") or {}).get("from_screen") == "send_song",
+              (r["did"], r.get("say"), text))
+        router._cancel_pending()
+        # 2. Her own words after "send this/that": they are the message, never the song.
+        for utt in ("send this to dana cohen i'm running late",
+                    "send that i'm running late to dana cohen"):
+            fresh()
+            router.MEM.last_played = {**am, "at": time.time()}
+            router._screen_context = lambda max_chars=6000: json.loads(json.dumps(music_front))
+            with tm.gates_on():
+                r = say(ScriptedJev({utt: msg("Dana Cohen", message_has_content=0.95,
+                                              span="i'm running late")}), utt)
+            text = (router.PENDING or {}).get("text", "")
+            check(f"song: {utt!r} sends her words, not the song",
+                  r["did"] == "sending" and pending_to() == "Dana Cohen"
+                  and "running late" in text.lower() and "music.apple.com" not in text,
+                  (r["did"], r.get("say"), text))
+            router._cancel_pending()
+        # 3. An open note in front: "it" is the note (send_window), as before the song.
+        fresh()
+        router.MEM.last_played = {**am, "at": time.time()}
+        router._screen_context = lambda max_chars=6000: json.loads(json.dumps(notes_front))
+        utt = "send it to dana cohen"
+        with tm.gates_on():
+            r = say(ScriptedJev({utt: msg("Dana Cohen", message_has_content=0.05)}), utt)
+        text = (router.PENDING or {}).get("text", "")
+        check("song: an open note beats the song (send_window)",
+              (r.get("detail") or {}).get("from_screen") == "send_window"
+              and "music.apple.com" not in text and "tomatoes" in text,
+              (r["did"], r.get("say"), r.get("detail"), text))
+        router._cancel_pending()
+    finally:
+        router._screen_context = real_ctx
+        router.MEM.last_played = None
+        router.AWAITING = None
+    for utt, want in (("send it to dana on whatsapp", True), ("send the song to dana", True),
+                      ("share it with dana", True), ("send it please", True),
+                      ("send this to dana cohen i'm running late", True),
+                      ("send that i'm running late to dana", False),
+                      ("send this: i'm running late", False),
+                      ("תשלחי את זה לדנה", True), ("תשלחי את זה שאני מאחרת", False),
+                      ("отправь это Дане", True), ("отправь это, что я опаздываю", False)):
+        check(f"units: _SEND_IT({utt!r}) == {want}", bool(router._SEND_IT.search(utt)) == want)
+
+
 def t_lines():
     print("\nt_lines")
     for k, v in people.LINES.items():
@@ -1890,7 +1969,8 @@ def main():
               t_no_book_before_asked, t_first_read_waits_for_her_answer,
               t_unreadable_book_is_said_so, t_without_the_book, t_whatsapp_never_blind,
               t_who_is_never_asked_three_times, t_sound_alike_needs_a_read_book,
-              t_new_request_resets_the_who_count, t_send_and_say_is_one_message, t_lines):
+              t_new_request_resets_the_who_count, t_send_and_say_is_one_message,
+              t_send_it_after_a_song, t_lines):
         try:
             t()
         except Exception as e:  # noqa: BLE001  (on a checkout without the fix)
