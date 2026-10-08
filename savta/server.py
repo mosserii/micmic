@@ -535,7 +535,10 @@ class H(BaseHTTPRequestHandler):
                                            goal is the question she asked, never text
                                            the page sends
           /api/guide/next                  Done: she did this step
-          /api/guide/stop | back | why | do (press the ringed control for her)"""
+          /api/guide/stop | back | why | do (press the ringed control for her, or
+                                           fill the ringed field: types a value MicMic
+                                           knows, or asks for one)
+          /api/guide/do {"confirm": true|false}  her Yes or No to a value read back"""
         from .actions.guide import GUIDE
         body = self._drain()
         try:
@@ -559,7 +562,8 @@ class H(BaseHTTPRequestHandler):
         elif what == "why":
             res = GUIDE.explain()
         elif what == "do":
-            res = GUIDE.do_it()
+            confirm = payload.get("confirm") if isinstance(payload, dict) else None
+            res = GUIDE.do_it(confirm=confirm if isinstance(confirm, bool) else None)
         else:
             return self._send(404, b"{}")
         return self._send(200, json.dumps(res, ensure_ascii=False, default=str).encode())

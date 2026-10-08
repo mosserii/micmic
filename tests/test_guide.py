@@ -432,7 +432,7 @@ def t_stop_during_thinking_discards():
 
 def t_caps_and_failures():
     sc = FakeScreen()
-    m = FakeModel([step(f"Step {i}.", 1) for i in range(40)])
+    m = FakeModel([step(f"Step {i}.", 1) for i in range(G.MAX_STEPS + 20)])
     g = new_guide(sc, m)
     g.start("x", "english", wait=True)
     for _ in range(G.MAX_STEPS + 2):
@@ -797,7 +797,7 @@ def t_copy():
           all(set(t) == {"hebrew", "arabic", "russian", "english"} for t in G.SAY.values()))
     html = (ROOT / "savta" / "web" / "index.html").read_text()
     keys = ("guideMe", "gStep", "gDone", "gDoIt", "gStop", "gWhy", "gLooking", "gFinished",
-            "gClose", "gSecret", "gStopped")
+            "gClose", "gSecret", "gStopped", "gYes", "gNo")
     for lang in ("he_f", "en", "ar", "ru"):
         block = html.split(f"  {lang}:{{", 1)[1].split("\n  }", 1)[0] if f"  {lang}:{{" in html else ""
         missing = [k for k in keys if f"{k}:" not in block]

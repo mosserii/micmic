@@ -49,7 +49,13 @@ GUIDE_QUESTIONS = {
             "why": "She asks what this step is or why she should do it: what's this, why, what does that do. למה, מה זה. ليش، شو هاد. зачем, что это.",
             "back": "She wants the step before this one again: go back, the previous step. חזרה, תחזרי אחורה. ارجع. назад.",
             "repeat": "She wants this step said again: say that again, repeat, what did you say. תחזרי על זה. عيدي. повтори.",
-            "stop": "She wants the guiding to end: stop, enough, stop guiding, I will do it myself. די, עצרי, תפסיקי. وقّفي، خلص. хватит, стоп."}},
+            "stop": "She wants the guiding to end: stop, enough, stop guiding, I will do it myself. די, עצרי, תפסיקי. وقّفي، خلص. хватит, стоп.",
+            # Filling in a form (2026-10-08). Appended, so a replay that never saw
+            # them still defaults to "none".
+            "do_it": "She asks MicMic to do this step for her: do it for me, you do it, fill it in for me, type it for me, press it for me. תעשי את זה בשבילי, תמלאי לי. اعمليها عني، عبّيها. сделай за меня, заполни.",
+            "gives_value": "She tells what goes in the field of this step: a code, a number, a name, a date, a place, spelled out or not: my confirmation code is K7QM2P, it's Rivera, K 7 Q M 2 P, the passport number is P00428117. הקוד הוא, שם המשפחה שלי. الرقم هو. мой номер.",
+            "yes": "She says yes to the question MicMic just asked about this step: yes, right, correct, that's it, go ahead. כן, נכון. اه، صح. да, верно.",
+            "no": "She says no to the question MicMic just asked about this step, or that it is wrong: no, that's wrong, not quite. לא, זה לא נכון. لأ، غلط. нет, неверно."}},
 }
 
 # Asked only when her words may describe a song instead of naming it and a song is
@@ -565,6 +571,10 @@ def understand(j: Jev, utterance: str, contacts: list[str], recent: str = "",
     if guide:
         state["guide_in_progress"] = {"goal": guide.get("goal") or "",
                                       "current_step": guide.get("current_step") or ""}
+        if guide.get("asking"):
+            # MicMic asked her something about this step ("What's your confirmation
+            # code?", "I'll type K7QM2P. Is that right?"): her answer is about it.
+            state["guide_in_progress"]["micmic_just_asked"] = guide["asking"]
     if follow:
         state["last_thing_micmic_did"] = follow["state"]
     state["utterance"] = utterance

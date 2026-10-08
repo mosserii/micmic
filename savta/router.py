@@ -7181,6 +7181,14 @@ _GUIDE_ME = re.compile(
     r"провед[иь]т?е?\s+меня|по\s+шагам|шаг\s+за\s+шагом", re.I)
 # Above this, a "none" from the guidance question outweighs the words.
 GUIDE_NOT_GATE = 0.7
+# "Help me ..." from her first words: on a web page with a form, the guide (see the
+# do_online branch); anywhere else nothing changes.
+_HELP_ME = re.compile(
+    r"^\W*(?:(?:hey|ok(?:ay)?|so|please|um+|uh+|micmic|mic\s+mic)\W+)*"
+    r"(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?help\s+me\b|"
+    r"^\W*(?:את\s+יכולה\s+|אתה\s+יכול\s+)?(?:תעזרי|תעזור|עזרי|עזור)\s+לי|"
+    r"^\W*(?:ساعدني|ساعديني|ساعدوني)|"
+    r"^\W*(?:помоги|помогите)(?:\s+мне)?\b", re.I)
 # Asking HOW is never asking for it done. The 2026-10-07 shoot: "show me how to turn on
 # Night Shift" read as intent control, control_action darker, and the screen was
 # dimmed with "Alright". A code check on her words (the request to Jev is unchanged):
@@ -7340,7 +7348,7 @@ def _start_guide(utterance: str, u: dict, lang: str, speak: bool, finish) -> dic
                           **_guide_fix(st)})
 
 
-def _guide_command(cmd: str, lang: str, finish, conf: float) -> dict:
+def _guide_command(cmd: str, lang: str, finish, conf: float, utterance: str = "") -> dict:
     if cmd == "stop":
         st = GUIDE.stop()
     elif cmd == "next":
@@ -7349,11 +7357,58 @@ def _guide_command(cmd: str, lang: str, finish, conf: float) -> dict:
         st = GUIDE.explain()
     elif cmd == "back":
         st = GUIDE.back()
+    elif cmd == "do_it":
+        st = GUIDE.do_it(speak=False)
+    elif cmd == "gives_value":
+        st = GUIDE.give(utterance, speak=False) or GUIDE.repeat()
+    elif cmd in ("yes", "no"):
+        st = GUIDE.answer(cmd == "yes", heard=utterance, speak=False)
+    elif cmd == "noted":
+        st = GUIDE.noted()
     else:
         st = GUIDE.repeat()
+    st.pop("ok", None)
     said = st.pop("said", "") or ""
     return finish(_guide_reply(st) if cmd in ("next", "stop") else f"guide_{cmd}", said,
                   guide=st, detail={"command": cmd, "confidence": conf, **_guide_fix(st)})
+
+
+# Her words while a guide waits on a field: what MicMic asked for, or her yes or no to
+# the value it read back. Jev's guide_command decides; a short answer to "What's your
+# confirmation code?" ("K 7 Q M 2 P") that reads as no command at all is still the
+# answer, since that is what was just asked. A value is always read back before it is
+# typed, so a misheard one costs a "no", never a wrong field.
+GUIDE_ANSWER_WORDS = 8
+GUIDE_OTHER_REQUEST = 0.85
+
+
+def _guide_field_command(u: dict, utterance: str) -> str | None:
+    """The guide command for her words while a field step is up, or None."""
+    cmd = u.get("guide_command", "none")
+    sure = u.get("guide_command_confidence", 0.0) >= GUIDE_COMMAND_GATE
+    waiting = GUIDE.awaiting()
+    if waiting == "confirm":
+        if sure and cmd in ("yes", "next"):
+            return "yes"
+        if sure and cmd in ("no", "gives_value"):
+            return "no" if cmd == "no" else "gives_value"
+        return None
+    if waiting == "value":
+        if sure and cmd in ("stop", "back", "why", "repeat", "next", "do_it"):
+            return None
+        # "What time is it" while MicMic waits for a code: Jev is sure it is a request
+        # of its own and not about the step, so it is answered as one.
+        if (sure and cmd == "none" and u.get("intent") not in ("chitchat", "unclear", "again")
+                and u.get("intent_confidence", 0.0) >= GUIDE_OTHER_REQUEST):
+            return None
+        if len(utterance.split()) <= GUIDE_ANSWER_WORDS:
+            return "gives_value"
+        return None
+    if sure and cmd == "gives_value":
+        # On the field it belongs to, read back; said ahead ("my last name is Rivera"
+        # while the step is a button), kept for when the field comes up.
+        return "gives_value" if GUIDE.state().get("kind") == "type" else "noted"
+    return None
 
 
 # Open mic: below this probability that the words were said to MicMic (brain's
@@ -9055,10 +9110,18 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
     # "next", "why", "go back", "stop" are about the step on screen. Asked in the same
     # request (brain.GUIDE_QUESTIONS), so they cost nothing extra; anything else she
     # says is handled as usual and the guide carries on beside it.
+    if depth == 0 and GUIDE.active():
+        # What she says is kept for the step call: a code said now can be typed later.
+        GUIDE.heard(utterance)
+        field_cmd = _guide_field_command(u, utterance)
+        if field_cmd:
+            return _guide_command(field_cmd, lang, finish,
+                                  round(u.get("guide_command_confidence", 0.0), 2), utterance)
     if (depth == 0 and GUIDE.active() and u.get("guide_command", "none") != "none"
+            and u.get("guide_command", "none") not in ("gives_value", "yes", "no")
             and u.get("guide_command_confidence", 0.0) >= GUIDE_COMMAND_GATE):
         return _guide_command(u["guide_command"], lang, finish,
-                              round(u["guide_command_confidence"], 2))
+                              round(u["guide_command_confidence"], 2), utterance)
 
     # --- a change to what MicMic just did -----------------------------------
     # Before "I only caught part of that": "at 7 instead" is short by nature, and
@@ -11235,6 +11298,14 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         if money == "transfer":
             return finish("refused", people.line("no_transfer", lang),
                           detail={"why": "moving money", "refused": "transfer"})
+        # "Help me check in for my flight" with the airline's check-in form open in
+        # her browser (the Larkline rehearsal, 2026-10-08) started the browser agent,
+        # which went to a REAL airline in a Chrome of its own and stopped at its
+        # sign-in. Asked for help with a form she is looking at, she is shown how in
+        # her own window, step by step, and fills it in herself. Only her words "help
+        # me", no site named, and a web page with a form (two fields or more) in front.
+        if depth == 0 and not web_start and _HELP_ME.search(utterance) and GUIDE.form_in_front():
+            return _start_guide(utterance, u, lang, speak, finish)
         if web_start:
             MEM.app_query = _app_query(u, utterance, place) or MEM.app_query
         if (login_web or near_me) and not money:
