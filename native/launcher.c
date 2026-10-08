@@ -21,6 +21,7 @@
 #include <mach-o/dyld.h>
 #include <libgen.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,6 +83,19 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) wargv[i] = dec(argv[i]);
     st = PyConfig_SetArgv(&cfg, argc, wargv);
     if (PyStatus_Exception(st)) goto fail;
+
+    /* An isolated config also sets install_signal_handlers = 0, and that is the step
+     * where a normal python sets SIGPIPE to SIG_IGN. Left at the default, a write to
+     * a socket or pipe whose far end has gone kills the whole app on the spot, with
+     * no crash report: the local server answering a client that hung up (a poll that
+     * timed out), Chrome's DevTools connection, the cloud proxy. That is how 1.2.5
+     * quit by itself mid-answer (2026-10-08, "exited due to SIGPIPE"). Ignored, the
+     * write fails with EPIPE and Python raises BrokenPipeError, as under `python3
+     * listener.py`. Only SIGPIPE: the rest of install_signal_handlers would also turn
+     * SIGINT into a KeyboardInterrupt that waits for the main thread to run Python,
+     * which in a Cocoa run loop is not soon. subprocess puts SIGPIPE back to the
+     * default in every child it starts, as it does under a plain python. */
+    signal(SIGPIPE, SIG_IGN);
 
     st = Py_InitializeFromConfig(&cfg);
     if (PyStatus_Exception(st)) goto fail;

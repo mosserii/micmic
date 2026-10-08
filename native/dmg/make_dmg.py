@@ -23,6 +23,18 @@ _hdiutil = core.hdiutil
 def _private_attach(cmd, *args, **kwargs):
     if cmd == "attach":
         args = ("-mountrandom", tempfile.mkdtemp(prefix="micmic-dmg-")) + args
+    if cmd == "detach":
+        # Spotlight or a simulator shutting down can hold the scratch volume for a few
+        # seconds ("couldn't unmount ... Resource busy"), which failed three release
+        # builds in a row on 2026-10-06/07. Wait it out, then force the last try.
+        import time
+        for attempt in range(6):
+            extra = ("-force",) if attempt == 5 else ()
+            ret, output = _hdiutil(cmd, *(args + extra), **kwargs)
+            if ret == 0:
+                return ret, output
+            time.sleep(3)
+        return ret, output
     return _hdiutil(cmd, *args, **kwargs)
 
 

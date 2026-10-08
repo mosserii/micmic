@@ -89,6 +89,9 @@ router.get_contacts = lambda utterance="", wait=None, **_: ["Dana Cohen"]
 # Accessibility is never reached for real: every test that needs it brings a fake.
 apps._ax = lambda: None
 screen.context = lambda max_chars=6000: None
+# No Chrome page either: the article read (b795b39) asks Chrome for its front tab first,
+# which landed in the osascript wall above and failed the "escaped" count.
+router._chrome_page = lambda: None
 
 # ---------------------------------------------------------------- harness
 PASSED = 0
