@@ -45,7 +45,7 @@ Replies in quotes are MicMic's own words.
 |---|---|
 | **What's on my screen?** | Reads the window in front of you and tells you what it is, in a sentence or two. |
 | **Summarize this** | The email, page or document you are looking at, cut down to what matters. |
-| **Send this to Matan** | "Sending Matan what you selected. Say no and I will stop." Then it goes, on WhatsApp or Messages. |
+| **Send this to Alex** | "Sending Alex what you selected. Say no and I will stop." Then it goes, on WhatsApp or Messages. |
 | **Add this to my calendar** | Finds the date on your screen and asks first: "Shall I add Flight to Lisbon to your calendar, Friday 2 October at 07:40?" |
 | **Play this week's top 100 hits** | Finds it on YouTube and plays it. "Here you go. Top 100 Songs This Week." Undo closes it. |
 | **No, something else** | The next best one, never the same one twice. |
@@ -55,17 +55,17 @@ Replies in quotes are MicMic's own words.
 | **In the calculator, press five** | Presses real buttons in other apps through Accessibility, the way VoiceOver reads them. |
 | **What's the weather in Lisbon?** | That town, spoken back in your language. The time and the weather never touch a language model. |
 | **Find me a flight from Tel Aviv to Lisbon next Friday** | Drives a real browser to Google Flights, fills in the trip and the date, and leaves the results on your screen. It never pays for anything. |
-| **Send Dana a WhatsApp that I'm running late, then play some jazz** | Both, in order. |
+| **Send Sam a WhatsApp that I'm running late, then play some jazz** | Both, in order. |
 | **Guide me through adding an API key in Google Cloud** | Walks you through it one step at a time, with a soft green ring around what to click next. It waits for you, then moves on by itself. |
 | **Search noise-cancelling headphones on Amazon** | Name an app or a site and it happens there: Amazon, Spotify, Apple Music, Netflix, Booking, Maps. |
 | **Play Shakira in Apple Music**, then **change to Bad Bunny** | Stays in the player you are using. |
-| **Send this to Dana**, with nothing selected | A crosshair appears: drag over what you want to send. |
+| **Send this to Sam**, with nothing selected | A crosshair appears: drag over what you want to send. |
 | **What's the bitcoin price?** | From a live source, and it says which one. Scores and headlines too. |
-| **From now on, use WhatsApp for Dana** | Remembered on your Mac. "What do you know about me?" reads it back, "forget that" removes it. |
+| **From now on, use WhatsApp for Sam** | Remembered on your Mac. "What do you know about me?" reads it back, "forget that" removes it. |
 | **Play Shakira's latest World Cup song** | Searches real sources for the song you described, says which one it found, then plays it. |
 | **Play the song on my screen** | Reads the title from the window in front of you. A misheard title is matched by sound within the artist. |
 | **Remind me in five minutes**, then **make it ten** | A follow-up changes what MicMic just did, in the same place: the reminder, your event, whatever is playing. |
-| **Oh, I meant on WhatsApp** | Sends the same thing there. "To Dana, not Dina" during the countdown replaces the message, it never goes to both. |
+| **Oh, I meant on WhatsApp** | Sends the same thing there. "To Sam, not Pam" during the countdown replaces the message, it never goes to both. |
 
 <details>
 <summary><b>What it will not do</b></summary>

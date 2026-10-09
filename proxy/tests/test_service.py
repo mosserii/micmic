@@ -535,7 +535,7 @@ def test_landing_page_numbers_come_from_config(make_proxy):
     assert "Talk to your Mac." in html
     assert "100 requests to try" in html and "2,000 requests a day" in html
     assert "$8/month" in html
-    for ex in ("What's on my screen?", "Send this to Matan", "Play something happy"):
+    for ex in ("What's on my screen?", "Send this to Alex", "Play something happy"):
         assert ex in html
     for lang in ("English", "Hebrew", "Arabic", "Russian"):
         assert lang in html

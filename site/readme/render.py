@@ -45,7 +45,7 @@ try{ localStorage.setItem('micmic.lang', 'en'); }catch(_){}
 SCENES = [
     ("en", "Remind me in ten minutes to call Mom", "I will remind you in 10 minutes.", ""),
     ("en", "Play this week’s top 100 hits", "Here you go. Top 100 Songs This Week.", ""),
-    ("en", "Send this to Matan", "Sending Matan what you selected. Say no and I will stop.", None),
+    ("en", "Send this to Alex", "Sending Alex what you selected. Say no and I will stop.", None),
 ]
 
 

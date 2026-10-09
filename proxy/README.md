@@ -128,7 +128,7 @@ Jessica), for the languages whose engine list in the app's `micmic.config.json` 
 with `eleven_turbo` (Hebrew, Arabic and Russian at launch). The app asks only with the
 cleaned line, an audio tag chosen by its own code (`warmly`, `calmly`, `softly`, `excited`;
 anything else is refused), an optional `lead` (words read before the tag, so a friend's
-message is voiced as "Dana: [excited] I got the job!!!") and whether the line may be cached.
+message is voiced as "Alex: [excited] I got the job!!!") and whether the line may be cached.
 
 - **Streaming.** The audio is relayed chunk by chunk over a kept-alive connection to
   ElevenLabs, so the app hears the first bytes about one network hop after ElevenLabs
