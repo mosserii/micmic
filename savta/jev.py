@@ -215,6 +215,10 @@ class Jev:
 
     def __init__(self, timeout: float = 12.0):
         self.mode = mode()
+        # "guide:<id>" while her turns belong to a step-by-step guide: through the
+        # proxy, the guide costs one request rather than one per turn (the proxy's
+        # X-MicMic-Session, proxy/tests/test_guide_session.py). Set by the router.
+        self.session = ""
         if self.mode == "own_key":
             self.key = _key()
             self._https, self._host, self._port, self._path = True, self.HOST, 443, self.PATH
@@ -317,6 +321,8 @@ class Jev:
         payload = json.dumps({"state": state, "model": MODEL, "questions": questions})
         headers = {"Authorization": f"Bearer {self._auth}", "Content-Type": "application/json",
                    "Connection": "keep-alive"}
+        if self.mode == "proxy" and getattr(self, "session", ""):
+            headers["X-MicMic-Session"] = self.session
         # Through the proxy, 503 is "Jev is busy, try again" and 429 is reserved for the
         # daily allowance, which retrying cannot fix. 502 is the proxy's "upstream_error"
         # (Jev answered 5xx, garbage, or could not be reached), always refunded, so a retry

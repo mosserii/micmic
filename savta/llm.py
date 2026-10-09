@@ -293,6 +293,9 @@ class LLM:
         self.busy_ms = 0.0          # wall time inside _post, failures included
         self.last_error: str | None = None
         self.last_tag: str | None = None
+        # "guide:<id>" on the guide's own client (actions/guide.py): through the proxy
+        # its step calls are one guide, not one request each.
+        self.session = ""
         # Set when the proxy says today's Gemini allowance is used up, so the router can
         # say when it comes back instead of a generic failure. Cleared on success.
         self.quota_exceeded: _jev.QuotaExceeded | None = None
@@ -356,9 +359,12 @@ class LLM:
         timeout = self.timeout if timeout is None else timeout
         if self._proxy is not None:
             https, host, port, base, token = self._proxy
+            auth = {"Authorization": f"Bearer {token}"}
+            if self.session:
+                auth["X-MicMic-Session"] = self.session
             return self._post_kept(payload, https, host, port,
                                    f"{base}/v1/gemini/{model}:generateContent",
-                                   {"Authorization": f"Bearer {token}"}, timeout, token)
+                                   auth, timeout, token)
         if not self.key:
             self.last_error = "no GEMINI_API_KEY"
             return None

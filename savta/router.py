@@ -7849,12 +7849,19 @@ def handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         # "The same to Gal", "to Gal too": this turn may send what is counting down to
         # another person as well (see _arm_send). Every other turn replaces it.
         _BOTH.on = fu.asks_for_both(utterance)
+    # While a guide runs, her turns are part of it: the proxy meters the guide once
+    # (X-MicMic-Session; proxy/tests/test_guide_session.py), not every "do it" and "yes".
+    tagged = depth == 0 and hasattr(j, "session") and GUIDE.session_tag()
+    if tagged:
+        j.session = tagged
     try:
         out = _handle(j, utterance, recent, speak, depth, inherited_risk, client,
                       activation, reason, speculative, asr_conf)
     finally:
         if depth == 0:
             _BOTH.on = False
+        if tagged:
+            j.session = ""
     if held is not None:
         ask = _resolve_held(held)
         if ask:
@@ -11298,14 +11305,18 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         if money == "transfer":
             return finish("refused", people.line("no_transfer", lang),
                           detail={"why": "moving money", "refused": "transfer"})
-        # "Help me check in for my flight" with the airline's check-in form open in
-        # her browser (the Larkline rehearsal, 2026-10-08) started the browser agent,
-        # which went to a REAL airline in a Chrome of its own and stopped at its
-        # sign-in. Asked for help with a form she is looking at, she is shown how in
-        # her own window, step by step, and fills it in herself. Only her words "help
-        # me", no site named, and a web page with a form (two fields or more) in front.
-        if depth == 0 and not web_start and _HELP_ME.search(utterance) and GUIDE.form_in_front():
-            return _start_guide(utterance, u, lang, speak, finish)
+        # "Help me check in for my flight" with the airline's site open in her browser
+        # (the Larkline rehearsal, 2026-10-08) started the browser agent, which went to
+        # a REAL airline in a Chrome of its own and stopped at its sign-in. Asked for
+        # help while a web page is in front of her, she is shown how in her own window,
+        # step by step. Only her words "help me" and no site named. The check is the
+        # browser in front, never a form read off the page: the installed 1.2.5 asked
+        # for that, read nothing, and went to the browser agent (2026-10-09 16:57).
+        front_page = None
+        if depth == 0 and not web_start and _HELP_ME.search(utterance):
+            front_page = GUIDE.page_in_front()
+            if front_page["page"]:
+                return _start_guide(utterance, u, lang, speak, finish)
         if web_start:
             MEM.app_query = _app_query(u, utterance, place) or MEM.app_query
         if (login_web or near_me) and not money:
@@ -11357,7 +11368,7 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                           detail={"task": task, "money": "buy"})
         det_w = _launch_web(j, task, web_start, lang, speak, utterance, client, activation)
         return finish("web_working", WEB_WORKING_SAY.get(lang) or WEB_WORKING_SAY["english"],
-                      detail=det_w)
+                      detail={**det_w, **({"front_page": front_page} if front_page else {})})
 
     # --- live radio and news ----------------------------------------------
     if intent == "radio":

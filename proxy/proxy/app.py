@@ -71,6 +71,16 @@ from .store import PRO_STATUSES, Store, hash_token, pro_source
 
 log = logging.getLogger("micmic.proxy")
 
+# X-MicMic-Session: guide:<id>, sent by the Mac's guide mode (savta/actions/guide.py).
+GUIDE_SESSION = re.compile(r"guide:[0-9a-f]{8,32}")
+
+
+def _guide_session(value) -> str:
+    """The guide session a call belongs to, or "" (anything else is ignored)."""
+    v = str(value or "").strip()
+    return v if GUIDE_SESSION.fullmatch(v) else ""
+
+
 GEMINI_ROUTE = re.compile(r"^/v1/gemini/([A-Za-z0-9._-]{1,64}):generateContent$")
 # Largest body we will read just to throw away before answering an error.
 DRAIN_MAX = 16 * 1024 * 1024
@@ -853,25 +863,42 @@ class Handler(BaseHTTPRequestHandler):
                        "Content-Type": "application/json", "Connection": "keep-alive"}
             pool, up_path = self.server.gemini_pool, f"/{model}:generateContent"
 
-        day = _bucket(cfg, plan, self.server.clock())
+        now = self.server.clock()
+        day = _bucket(cfg, plan, now)
         limit = cfg.daily_limit(plan, kind)
         per_unit = cfg.jev_bytes_per_unit if kind == "jev" else cfg.gemini_bytes_per_unit
         units = max(1, math.ceil(len(payload) / per_unit)) if per_unit > 0 else 1
-        granted, _ = store.consume(h, kind, day, limit, units)
-        if not granted:
-            self._limit_response(limit, total=_total(cfg, plan))
-            return 429, h
+        # A step-by-step guide costs its first call (tests/test_guide_session.py): a
+        # live session's later calls are covered by its own allowance instead.
+        sid = _guide_session(self.headers.get("X-MicMic-Session"))
+        now_s = int(now.timestamp())
+        guide = (store.guide_cover(h, sid, kind, now_s, cfg.guide_ttl,
+                                   cfg.guide_free_jev if kind == "jev" else cfg.guide_free_gemini)
+                 if sid else "")
+        covered = guide == "covered"
+
+        def refund():
+            if covered:
+                store.guide_uncover(h, sid, kind)
+            else:
+                store.refund(h, kind, day, units)
+
+        if not covered:
+            granted, _ = store.consume(h, kind, day, limit, units)
+            if not granted:
+                self._limit_response(limit, total=_total(cfg, plan))
+                return 429, h
 
         try:
             up_status, up_body = pool.post(up_path, payload, headers)
         except UpstreamTimeout:
             log.warning("upstream %s timeout", kind)
             if cfg.refund_on_timeout:
-                store.refund(h, kind, day, units)
+                refund()
             self._json(504, {"error": "upstream_timeout"})
             return 504, h
         except Exception as e:  # noqa: BLE001
-            store.refund(h, kind, day, units)
+            refund()
             log.warning("upstream %s unreachable: %s", kind, type(e).__name__)
             self._json(502, {"error": "upstream_error"})
             return 502, h
@@ -882,14 +909,18 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, UnicodeDecodeError, RecursionError):
                 # A 200 that is not JSON (a CDN error page) is not an answer. Relayed,
                 # the client could not parse it and would retry, paying each time.
-                store.refund(h, kind, day, units)
+                refund()
                 log.warning("upstream %s 200 with a body that is not JSON", kind)
                 self._json(502, {"error": "upstream_error"})
                 return 502, h
+            if guide == "none":
+                # Its first call was metered and answered: the guide is open.
+                store.guide_open(h, sid, day, now_s, cfg.free_guide_sessions if plan != "pro"
+                                 else cfg.pro_guide_sessions)
             self._send(200, up_body)
             return 200, h
 
-        store.refund(h, kind, day, units)
+        refund()
         log.warning("upstream %s status %d", kind, up_status)
         if up_status in (429, 503, 529):
             # Upstream is busy, not broken. A distinct code lets the client back off and

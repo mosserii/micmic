@@ -603,7 +603,7 @@ def t_router_field_turns():
     check("stop still stops", r["did"] == "guide_stopped" and not router.GUIDE.active(), r["did"])
 
 
-def t_router_help_me_on_a_form():
+def t_router_help_me_on_a_page():
     from savta import router
     set_profile("Test")
     launched = []
@@ -616,14 +616,50 @@ def t_router_help_me_on_a_form():
         j = FakeJev()
         j.over = {"intent": ("do_online", 0.9), "is_complete": 0.95, "language": ("english", 0.99)}
         r = router.handle(j, "help me check in for my flight to Lisbon", speak=False)
-        check("'help me check in' with the check-in form open is a guide, in her own window",
+        check("'help me check in' with the check-in page open is a guide, in her own window",
               r["did"] == "guide_step" and r["say"] == CONF_LINE and not launched, (r["did"], launched))
         check("still one Jev request", j.calls == 1, j.calls)
         router.GUIDE.stop()
-        sc.page = "buttons"            # no form in front
+
+        # The installed 1.2.5, 2026-10-09 16:57:19 (trace): "Help me check in for my
+        # flight to Lisbon." with Chrome in front on the Larkline home page went to the
+        # browser agent (jev_n 3: understand, the task span, the start site), because
+        # the old check needed a form read off the page and read none. Here the page
+        # cannot be read at all (as without Accessibility): it is still a guide.
+        class TracePage(FormScreen):
+            def page_url(self, front):
+                return "http://127.0.0.1:8851/"
+
+            def snapshot(self, front):
+                return {"error": "no_access", "controls": []}
+        router.GUIDE.screen, router.GUIDE.model = TracePage(), FakeModel([field(CONF_LINE, 1)])
+        j = FakeJev()
+        j.over = {"intent": ("do_online", 1.0), "is_complete": 0.95, "language": ("english", 0.99)}
+        r = router.handle(j, "Help me check in for my flight to Lisbon.", speak=False)
+        check("the exact trace case: a web page in front, nothing read off it, is a guide, never "
+              "the browser agent", str(r["did"]).startswith("guide") and not launched and j.calls == 1,
+              (r["did"], launched, j.calls))
+        check("and with nothing readable the guide says how to let MicMic see the screen",
+              "Accessibility" in r["say"], r["say"])
+        router.GUIDE.stop()
+
+        router.GUIDE.screen, router.GUIDE.model = sc, FakeModel([field(CONF_LINE, 1)])
+        sc.page = "buttons"            # a page with no form: still her page
         r = router.handle(j, "help me check in for my flight to Lisbon", speak=False)
-        check("with no form in front, the web task goes on as before",
-              r["did"] == "web_working" and launched, (r["did"], launched))
+        check("any web page in front is a guide, form or not", r["did"] == "guide_step" and not launched,
+              (r["did"], launched))
+        router.GUIDE.stop()
+
+        class NewTab(FormScreen):
+            def page_url(self, front):
+                return "chrome://newtab/"
+        router.GUIDE.screen = NewTab()
+        r = router.handle(j, "help me check in for my flight to Lisbon", speak=False)
+        check("a new tab is not a page: the web task goes on as before, and the trace says why",
+              r["did"] == "web_working" and launched
+              and (r.get("detail") or {}).get("front_page", {}).get("why") == "blank page",
+              (r["did"], r.get("detail")))
+        router.GUIDE.screen = sc
         sc.page = "checkin"
         n = len(launched)
         r = router.handle(j, "check me in for my flight to Lisbon", speak=False)
@@ -631,12 +667,102 @@ def t_router_help_me_on_a_form():
               r["did"] == "web_working" and len(launched) == n + 1, r["did"])
         sc.browser = False
         r = router.handle(j, "help me check in for my flight", speak=False)
-        check("and a form outside a web browser is not taken for one", r["did"] == "web_working", r["did"])
+        check("and with no browser in front (Notes) it is the browser's too, with the reason kept",
+              r["did"] == "web_working"
+              and (r.get("detail") or {}).get("front_page", {}).get("why") == "not a browser",
+              (r["did"], r.get("detail")))
     finally:
         router._launch_web = saved
         router.GUIDE.stop()
     check("a test process never reads the real screen for it",
-          G.Guide().form_in_front() is False)
+          G.Guide().page_in_front()["why"] == "test")
+    check("browsers are known by name or bundle id",
+          G._is_browser("Google Chrome") and G._is_browser("Google Chrome for Testing")
+          and G._is_browser("", "com.google.Chrome") and G._is_browser("Safari")
+          and not G._is_browser("Notes", "com.apple.Notes"))
+
+
+def t_guide_is_one_request():
+    """A guide's calls carry X-MicMic-Session: guide:<id>, so the proxy meters the guide
+    once (proxy/tests/test_guide_session.py); calls outside a guide carry nothing."""
+    import http.server
+    import json as _json
+    import threading
+    from savta import router, jev as J
+    from savta.llm import LLM
+    sc = FormScreen()
+    m = FakeModel([field(CONF_LINE, 1)])
+    g = new_guide(sc, m)
+    g.start("check in", "english", wait=True)
+    sid = g.state()["id"]
+    check("the step call names its guide session",
+          m.requests[0].get("session") == f"guide:{sid}"
+          and re.fullmatch(r"guide:[0-9a-f]{8,32}", m.requests[0]["session"]), m.requests[0].get("session"))
+    check("and the guide says it while it runs, not after",
+          g.session_tag() == f"guide:{sid}" and (g.stop() or True) and g.session_tag() == "")
+
+    # The headers really go out, through the proxy, on Gemini and on Jev.
+    seen = []
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            seen.append((self.path, self.headers.get("X-MicMic-Session")))
+            out = (b'{"candidates":[{"content":{"parts":[{"text":"{}"}]}}]}' if "gemini" in self.path
+                   else _json.dumps({"answers": {}, "usage": {}}).encode())
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    try:
+        llm = LLM()
+        llm._proxy = (False, "127.0.0.1", port, "", "offline-test")
+        llm.session = "guide:0a1b2c3d4e"
+        llm._post_once({"contents": []})
+        llm.session = ""
+        llm._post_once({"contents": []})
+        j = J.Jev()
+        j._https, j._host, j._port, j._path = False, "127.0.0.1", port, "/v1/jev"
+        j.session = "guide:0a1b2c3d4e"
+        j.ask({"utterance": "yes"}, {"x": {"type": "noul"}})
+        j.session = ""
+        j.ask({"utterance": "what time is it"}, {"x": {"type": "noul"}})
+    finally:
+        srv.shutdown()
+    check("Gemini through the proxy carries the guide's session, and only then",
+          [h for p, h in seen if "gemini" in p] == ["guide:0a1b2c3d4e", None], seen)
+    check("Jev through the proxy too", [h for p, h in seen if "jev" in p] == ["guide:0a1b2c3d4e", None], seen)
+
+    # The router tags her turns while a guide runs, and only for that turn.
+    set_profile("Test")
+    router.GUIDE.screen = FormScreen()
+    router.GUIDE.model = FakeModel([field(CONF_LINE, 1, ask="What's your confirmation code?")])
+    fj = FakeJev()
+    fj.session = ""
+    sessions = []
+    real_ask = fj.ask
+    fj.ask = lambda state, qs: (sessions.append(fj.session), real_ask(state, qs))[1]
+    base = {"intent": ("do_online", 0.9), "is_complete": 0.95, "language": ("english", 0.99)}
+    fj.over = {**base, "guidance": ("walk_me_through", 0.9)}
+    router.handle(fj, "guide me to check in", speak=False)
+    tag = router.GUIDE.session_tag()
+    fj.over = {**base, "guide_command": ("do_it", 0.9)}
+    router.handle(fj, "type it for me", speak=False)
+    router.GUIDE.stop()
+    fj.over = dict(base)
+    router.handle(fj, "help me check in for my flight", speak=False)
+    check("the turn that starts a guide is metered as usual, her turns inside it carry the "
+          "guide, and nothing after it does",
+          sessions[0] == "" and sessions[1] == tag and tag and sessions[-1] == "" and fj.session == "",
+          (sessions, tag))
+    router.GUIDE.stop()
 
 
 def t_page_card_buttons():
@@ -657,7 +783,8 @@ def main():
              t_do_types_profile_value, t_do_reads_back_a_value_she_said, t_never_invents_a_value,
              t_do_asks_then_types_what_she_says, t_do_refuses_secret_fields,
              t_confirmation_gate_intact, t_spoken_values, t_four_languages,
-             t_router_field_turns, t_router_help_me_on_a_form, t_page_card_buttons]
+             t_router_field_turns, t_router_help_me_on_a_page, t_guide_is_one_request,
+             t_page_card_buttons]
     for t in tests:
         print(f"\n-- {t.__name__}")
         try:

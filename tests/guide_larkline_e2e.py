@@ -144,7 +144,11 @@ class LarklineModel:
         if "boarding-pass" in route:
             return {"done": True, "finish": "That's done: you're checked in, and your boarding pass is on screen.",
                     "say": "", "target": None, "kind": "click", "goal": "Check in for the Lisbon flight"}
-        plan = PLAN["#/check-in"] if route in ("#/", "#/check-in") else PLAN.get(route)
+        if route in ("#", "#/", ""):           # the home page: open the Check in tab first
+            plan = [("tab", "Check in", 0, "click", "Click the Check in tab, above the search form.",
+                     "", "", "")] + PLAN["#/check-in"]
+        else:
+            plan = PLAN["#/check-in"] if route == "#/check-in" else PLAN.get(route)
         if not plan:
             return {"done": False, "say": "Wait a moment for the page to load.", "target": None,
                     "kind": "wait", "goal": "Check in for the Lisbon flight"}
@@ -228,9 +232,13 @@ DATES = {"exp": ("03", "14", "2031"), "dob": ("07", "22", "1990")}
 class Person:
     """Does each step the guide gives, the way she would, and notes what happened."""
 
-    def __init__(self, guide, screen, log, router_say=None):
+    def __init__(self, guide, screen, log, router_say=None, mode="mixed"):
         self.g, self.sc, self.log = guide, screen, log
         self.router_say = router_say          # her words through the router, when set
+        # "mixed": the default run (MicMic types her code and last name, she does the
+        # rest); "click": she does every step herself; "do": she asks MicMic by voice
+        # for every step it may do ("type it for me", "do it for me", "next").
+        self.mode = mode
         self.dates_seen = {"Month": 0, "Day": 0, "Year": 0}
         self.pressed_final = False
 
@@ -242,10 +250,31 @@ class Person:
         time.sleep(PERSON_PAUSE)
         if kind in ("look", "wait") or ctl is None:
             self.sc.user_scroll(450)
+            if self.mode == "do" and self.router_say:
+                self.note("she scrolls and says next")
+                self.router_say("next")
+                return
             self.note("she scrolls and says done")
             self.g.next_step()
             return
+        if self.mode == "do" and self.router_say and st.get("can_do"):
+            if kind == "type":
+                self.router_say("type it for me")
+                if self.g.awaiting() == "value":
+                    self.router_say(self.value_for(label, spoken=True))
+                if self.g.awaiting() == "confirm":
+                    self.router_say("yes")
+                return self.note(f"she asked MicMic to type {label!r}")
+            self.router_say("do it for me")
+            if re.search(r"check in now|pay", label, re.I):
+                self.pressed_final = True
+            return self.note(f"she asked MicMic to press {label!r}")
         if kind in ("type", "secret"):
+            if self.mode == "click":
+                value = self.value_for(label)
+                self.sc.user_type(snap, tid, value, delay_ms=25)
+                self.sc.user_tab()
+                return self.note(f"she types {value!r} and tabs out")
             return self.fill(st, snap, tid, label)
         if kind == "choose":
             self.sc.user_select(snap, tid, "United States")
@@ -262,15 +291,28 @@ class Person:
         if ctl["role"] in ("checkbox", "option"):
             self.sc.user_check(snap, tid)
             return self.note(f"she ticks {label[:40]!r}" + ("" if not st.get("can_do") else " (Do it for me was offered)"))
-        if st.get("can_do"):
+        if st.get("can_do") and self.mode != "click":
             r = self.g.do_it(speak=False)
             return self.note(f"Do it for me pressed {label!r}: ok={r.get('ok')}")
+        if st.get("can_do"):
+            self.sc.press(snap, tid)
+            return self.note(f"she presses {label!r} herself")
         r = self.g.do_it(speak=False)
         self.note(f"Do it for me refused {label!r}: {r.get('said')!r}")
         if re.search(r"check in now|pay", label, re.I):
             self.pressed_final = True
         self.sc.press(snap, tid)
         self.note(f"she presses {label!r} herself")
+
+    def value_for(self, label, spoken=False):
+        low = label.lower()
+        if low in ("month", "day", "year"):
+            which = "exp" if self.dates_seen[label] == 0 else "dob"
+            self.dates_seen[label] += 1
+            return DATES[which][("month", "day", "year").index(low)]
+        if "confirmation" in low:
+            return "K 7 Q M 2 P" if spoken else "K7QM2P"
+        return next((v for rx, v in VALUES if re.search(rx, low)), "x")
 
     def fill(self, st, snap, tid, label):
         low = label.lower()
@@ -319,6 +361,39 @@ class Person:
         self.log({"ev": "person", "did": text})
 
 
+# ---------------------------------------------------------------- a scripted Jev
+class PatternJev:
+    """Stands in for Jev with --fake-jev: answers what the router asks from her words
+    alone, and counts every request, as the proxy would meter it. No network."""
+
+    def __init__(self, calls):
+        from test_guide import FakeJev
+        self.fake, self.counts = FakeJev(), calls
+        self.input_tokens, self.busy_ms, self.cost_usd, self.calls = 0, 0.0, 0.0, 0
+        self.session = ""            # set by the router while a guide runs
+
+    def ask(self, state, qs):
+        self.counts["jev"] += 1
+        self.calls += 1
+        self.counts.setdefault("jev_sessions", []).append(getattr(self, "session", ""))
+        self.counts.setdefault("seq", []).append(("jev", getattr(self, "session", "")))
+        u = str(state.get("utterance") or "").strip().lower().rstrip(".")
+        over = {"intent": ("do_online", 0.95), "is_complete": 0.95, "language": ("english", 0.99)}
+        if "guide_command" in qs:
+            cmd = ("do_it" if "for me" in u else "yes" if u in ("yes", "right", "correct")
+                   else "next" if u in ("next", "done") else
+                   "gives_value" if re.search(r"\bmy\b.*\bis\b", u) else "none")
+            over["guide_command"] = (cmd, 0.95)
+            over["intent"] = ("chitchat", 0.5)
+        self.fake.over = over
+        return self.fake.ask(state, qs)
+
+    def __getattr__(self, name):
+        if name == "session":
+            raise AttributeError(name)
+        return getattr(self.fake, name)
+
+
 # ---------------------------------------------------------------- the run
 def prewalk(sc) -> None:
     """The steps before the documents page, done by hand with no guide and no model."""
@@ -355,6 +430,9 @@ def main():
     ap.add_argument("--goal", default="help me check in for my flight to Lisbon")
     ap.add_argument("--out", default=str(Path(tempfile.gettempdir()) / "larkline-e2e.jsonl"))
     ap.add_argument("--max-seconds", type=float, default=420.0)
+    ap.add_argument("--person", choices=("mixed", "click", "do"), default="mixed")
+    ap.add_argument("--fake-jev", action="store_true",
+                    help="with --router: a scripted Jev (no network) that reads her words")
     ap.add_argument("--no-plan", action="store_true",
                     help="no planned fields: one model call per step, as before 2026-10-08")
     ap.add_argument("--prewalk", action="store_true",
@@ -417,6 +495,8 @@ def main():
 
         def scripted_model(req):
             calls["gemini"] += 1
+            calls.setdefault("gemini_sessions", []).append(req.get("session", ""))
+            calls.setdefault("seq", []).append(("gemini", req.get("session", "")))
             log({"ev": "request", "n": calls["gemini"], "prompt": req["prompt"]})
             return scripted(req)
         g.model = scripted_model
@@ -435,15 +515,18 @@ def main():
             log({"ev": "FAIL", "why": "the browser agent was started", "task": str(aa[1:2])})
             raise SystemExit("the browser agent was started: routing chose the web task")
         router._launch_web = no_web
-        real_ask = J.Jev._ask
+        if a.fake_jev:
+            j = PatternJev(calls)
+        else:
+            real_ask = J.Jev._ask
 
-        def capped_ask(self, *aa, **kk):
-            if calls["jev"] >= a.jev:
-                raise SystemExit(f"Jev budget of {a.jev} used up")
-            calls["jev"] += 1
-            return real_ask(self, *aa, **kk)
-        J.Jev._ask = capped_ask
-        j = J.Jev()
+            def capped_ask(self, *aa, **kk):
+                if calls["jev"] >= a.jev:
+                    raise SystemExit(f"Jev budget of {a.jev} used up")
+                calls["jev"] += 1
+                return real_ask(self, *aa, **kk)
+            J.Jev._ask = capped_ask
+            j = J.Jev()
 
         def router_say(text):
             t = time.time()
@@ -452,7 +535,7 @@ def main():
                  "ms": round((time.time() - t) * 1000), "jev_calls": calls["jev"]})
             return r
 
-    person = Person(g, sc, log, router_say)
+    person = Person(g, sc, log, router_say, a.person)
     g.tick, g.settle = 0.3, 0.9
     if a.router:
         r = router_say(a.goal)
@@ -514,6 +597,21 @@ def main():
         fails.append(f"the boarding pass was not reached (url {url})")
     if not person.pressed_final and not a.gemini and not a.router:
         fails.append("the finishing button was never reached")
+    if calls.get("gemini_sessions") is not None:
+        # What the proxy meters, before and after guide sessions (proxy/app.py _forward):
+        # a guide's first tagged call is metered, its other tagged calls are covered up
+        # to GUIDE_FREE_* (60 of each); untagged calls are always metered.
+        js, gs = calls.get("jev_sessions", []), calls["gemini_sessions"]
+        first = {}
+        for kind, tag in calls.get("seq", []):        # in the order the calls went out
+            if tag:
+                first.setdefault(tag, kind)
+        jev_after = sum(1 for t in js if not t) + sum(1 for k in first.values() if k == "jev")
+        gem_after = sum(1 for t in gs if not t) + sum(1 for k in first.values() if k == "gemini")
+        print(f"metered before: jev {len(js)} (= {-(-len(js) // 3)} requests), gemini {len(gs)}")
+        print(f"metered with guide sessions: jev {jev_after} (= {-(-jev_after // 3)} requests), "
+              f"gemini {gem_after}; tagged jev {sum(1 for t in js if t)}, tagged gemini "
+              f"{sum(1 for t in gs if t)}, sessions {len(first)}")
     waits = sorted(r["wait_s"] for r in steps[1:]) or [0]
     print(f"wait between steps: p50 {waits[len(waits) // 2]} s, max {waits[-1]} s")
     for f in fails:

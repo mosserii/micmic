@@ -58,6 +58,15 @@ CREATE TABLE IF NOT EXISTS usage (
     n          INTEGER NOT NULL,
     PRIMARY KEY (token_hash, day, kind)
 );
+CREATE TABLE IF NOT EXISTS guide_sessions (
+    token_hash TEXT NOT NULL,
+    sid        TEXT NOT NULL,
+    bucket     TEXT NOT NULL,
+    started    INTEGER NOT NULL,
+    jev        INTEGER NOT NULL DEFAULT 0,
+    gemini     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (token_hash, sid)
+);
 CREATE TABLE IF NOT EXISTS signups (
     addr_hash TEXT NOT NULL,
     day       TEXT NOT NULL,
@@ -446,6 +455,69 @@ class Store:
         self._conn().execute(
             "UPDATE usage SET n = MAX(0, n - ?) WHERE token_hash = ? AND day = ? AND kind = ?",
             (units, token_hash, day, kind))
+
+    # ------------------------------------------------------------- guides
+    # One step-by-step guide costs one call (see app._forward and
+    # tests/test_guide_session.py). Only the session id the client made up, the time it
+    # started and two counters are kept: nothing about what was said or shown.
+
+    def guide_cover(self, token_hash: str, sid: str, kind: str, now: int, ttl: int,
+                    allowance: int) -> str:
+        """"covered" (counted against the guide's allowance), "over" (a live guide
+        past its allowance) or "none" (no live guide by that id)."""
+        col = "jev" if kind == "jev" else "gemini"
+        c = self._conn()
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            row = c.execute(f"SELECT started, {col} FROM guide_sessions WHERE token_hash = ? "
+                            "AND sid = ?", (token_hash, sid)).fetchone()
+            if row is None or now - row[0] >= ttl:
+                c.execute("COMMIT")
+                return "none"
+            if row[1] >= allowance:
+                c.execute("COMMIT")
+                return "over"
+            c.execute(f"UPDATE guide_sessions SET {col} = {col} + 1 WHERE token_hash = ? "
+                      "AND sid = ?", (token_hash, sid))
+            c.execute("COMMIT")
+            return "covered"
+        except BaseException:
+            try:
+                c.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+
+    def guide_open(self, token_hash: str, sid: str, bucket: str, now: int,
+                   max_sessions: int) -> bool:
+        """Start (or restart, once its time is up) a guide after its first metered call
+        was answered. False when this bucket has covered max_sessions guides already."""
+        c = self._conn()
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            n = c.execute("SELECT COUNT(*) FROM guide_sessions WHERE token_hash = ? AND "
+                          "bucket = ? AND sid != ?", (token_hash, bucket, sid)).fetchone()[0]
+            if n >= max_sessions:
+                c.execute("COMMIT")
+                return False
+            c.execute("INSERT INTO guide_sessions (token_hash, sid, bucket, started) "
+                      "VALUES (?, ?, ?, ?) ON CONFLICT (token_hash, sid) DO UPDATE SET "
+                      "bucket = excluded.bucket, started = excluded.started, jev = 0, gemini = 0",
+                      (token_hash, sid, bucket, now))
+            c.execute("COMMIT")
+            return True
+        except BaseException:
+            try:
+                c.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+
+    def guide_uncover(self, token_hash: str, sid: str, kind: str) -> None:
+        """Give a covered call back when the upstream refused it."""
+        col = "jev" if kind == "jev" else "gemini"
+        self._conn().execute(f"UPDATE guide_sessions SET {col} = MAX(0, {col} - 1) "
+                             "WHERE token_hash = ? AND sid = ?", (token_hash, sid))
 
     def used(self, token_hash: str, kind: str, day: str) -> int:
         row = self._conn().execute(
@@ -882,6 +954,7 @@ class Store:
             c.execute("DELETE FROM device_links WHERE child_device_id = ? OR parent_device_id = ?",
                       (dev, dev))
             c.execute("DELETE FROM usage WHERE token_hash = ?", (token_hash,))
+            c.execute("DELETE FROM guide_sessions WHERE token_hash = ?", (token_hash,))
             c.execute("DELETE FROM diagnostics WHERE device_id = ?", (dev,))
             c.execute("DELETE FROM tokens WHERE token_hash = ?", (token_hash,))
             c.execute("INSERT INTO deletions (day, n) VALUES (?, 1) "

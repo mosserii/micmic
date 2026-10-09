@@ -555,6 +555,29 @@ class LiveScreen:
             return True, "ok"
         return False, f"AX {err}" if err else "not taken"
 
+    def page_url(self, front: dict) -> str:
+        """The address of the page in the front browser window, or "": a short search
+        for its web area, far cheaper than snapshot(). Needs Accessibility."""
+        ax, root = screen._app_root(front.get("pid") or 0)
+        if ax is None or root is None or not ax["trusted"]():
+            return ""
+        window = apps.find_window(ax, root)
+        if window is None:
+            return ""
+        started, seen, todo = time.time(), 0, [window]
+        while todo and seen < 800 and time.time() - started < 0.6:
+            el = todo.pop(0)
+            seen += 1
+            vals = _many(el, ["AXRole", "AXChildren"])
+            if not vals:
+                continue
+            if str(vals[0] or "") == "AXWebArea":
+                url = apps._attr(ax, el, "AXURL")
+                return screen._clean(str(url.absoluteString()) if hasattr(url, "absoluteString")
+                                     else str(url or ""))
+            todo.extend(list(vals[1] or []))
+        return ""
+
     def find(self, front: dict, role: str, label: str):
         """A control with this role and label in a fresh read, for going back a step
         without asking the model again. Returns (snapshot, id) or (None, None)."""
@@ -584,6 +607,20 @@ def _child_text(el, depth: int = 0) -> str:
         if t:
             return t
     return ""
+
+
+_BROWSER_IDS = ("com.google.chrome", "org.chromium.", "com.apple.safari", "com.microsoft.edge",
+                "com.brave.browser", "company.thebrowser.", "com.operasoftware.", "com.vivaldi.",
+                "org.mozilla.firefox")
+# Not a page she is on: a new tab, a blank page, the browser's own pages.
+_NOT_A_PAGE = re.compile(r"^(?:about:|chrome:|chrome-search:|edge:|brave:|favorites:|"
+                         r"safari-resource:)|newtab", re.I)
+
+
+def _is_browser(app: str, bundle: str = "") -> bool:
+    a, b = (app or "").strip().lower(), (bundle or "").strip().lower()
+    return a in screen.BROWSER_NAMES or "chrom" in a or "firefox" in a \
+        or any(b.startswith(x) for x in _BROWSER_IDS)
 
 
 def _is_micmic(app: str, bundle: str) -> bool:
@@ -804,23 +841,34 @@ class Guide:
                 return ""
             return s.get("awaiting") or ""
 
-    def form_in_front(self) -> bool:
-        """A web page with a form on it is in front of her: two fields or more to fill
-        in (a search box alone is not a form). One read of the window, no model. A
-        test process never reads the real screen."""
+    def page_in_front(self) -> dict:
+        """Is a web page in front of her? {"page": bool, "why": str, "app": str}.
+        For "help me <task>" (router): a browser in front with a page in it means the
+        guide, in her own window. Decided from the app in front (no Accessibility
+        needed) and, when it can be read, the page's address: a new tab or a blank page
+        is not a page. The installed 1.2.5 (2026-10-09) required a form read off the
+        page through Accessibility, read nothing, and sent the task to the browser
+        agent. A test process never reads the real screen."""
         import os
         if isinstance(self.screen, LiveScreen) and os.environ.get("MICMIC_STATE_DIR"):
-            return False
+            return {"page": False, "why": "test", "app": ""}
         try:
             front = self.screen.front()
-            snap = self.screen.snapshot(front) if front else None
+        except Exception as e:  # noqa: BLE001
+            return {"page": False, "why": f"front failed: {type(e).__name__}", "app": ""}
+        if not front:
+            return {"page": False, "why": "no window", "app": ""}
+        app = str(front.get("app") or "")
+        if not _is_browser(app, front.get("bundle_id", "")):
+            return {"page": False, "why": "not a browser", "app": app}
+        try:
+            reader = getattr(self.screen, "page_url", None)
+            url = reader(front) if reader else (self.screen.snapshot(front).get("url") or "")
         except Exception:  # noqa: BLE001
-            return False
-        if not snap or snap.get("error") or not snap.get("browser") or not snap.get("url"):
-            return False
-        fields = [c for c in snap.get("controls") or []
-                  if (c.get("typed") and c.get("role") != "search field") or c.get("pick")]
-        return len(fields) >= 2
+            url = ""
+        if url and _NOT_A_PAGE.search(url):
+            return {"page": False, "why": "blank page", "app": app}
+        return {"page": True, "why": "web page" if url else "browser, address unread", "app": app}
 
     def heard(self, utterance: str) -> None:
         """Something she said to MicMic while this guide runs: the step call sees it,
@@ -1355,7 +1403,7 @@ class Guide:
         # A password or card field has the keyboard: the list of controls only.
         image = None if snap.get("secure_focus") else self._shot(front)
         req = {"goal": goal, "lang": lang, "gender": gender, "history": history,
-               "reason": reason, "image": image, "said": said,
+               "reason": reason, "image": image, "said": said, "session": f"guide:{sid}",
                "prompt": build_request(goal, lang, history, snap, reason, said),
                "ids": [c["id"] for c in snap.get("controls") or []]}
         with self._lock:
@@ -1539,7 +1587,14 @@ class Guide:
     def _gemini(self, req: dict) -> dict | None:
         if self.llm is None:
             self.llm = self._client()
+        self.llm.session = req.get("session") or ""
         return gemini_step(self.llm, req)
+
+    def session_tag(self) -> str:
+        """"guide:<id>" while a guide runs (the proxy meters a guide once), else ""."""
+        with self._lock:
+            s = self._s
+            return f"guide:{s['id']}" if s and s["status"] not in ENDED else ""
 
     def _client(self):
         """The guide's own Gemini client: the one it has while the credentials are

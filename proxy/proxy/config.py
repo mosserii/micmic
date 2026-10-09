@@ -206,6 +206,15 @@ class Config:
     # A spoken request is roughly this many Jev calls. Used only to turn the call caps
     # into the "requests a day" the landing page advertises.
     jev_calls_per_request: int = 3
+    # A step-by-step guide (client header X-MicMic-Session: guide:<id>) costs its first
+    # call; the rest of it is covered up to these many calls of each kind, for
+    # guide_ttl seconds, for at most so many guides per bucket (lifetime on free, a day
+    # on Pro). Past any of them, calls are metered as usual. tests/test_guide_session.py
+    guide_ttl: int = 1800
+    guide_free_jev: int = 60
+    guide_free_gemini: int = 60
+    free_guide_sessions: int = 20
+    pro_guide_sessions: int = 100
     # "total": the free caps are requests to try, once, never refilled (the owner's
     # decision, 2026-09-25). "day": the old daily allowance.
     free_scope: str = "total"
@@ -373,6 +382,11 @@ class Config:
             request_timeout=_float("REQUEST_TIMEOUT_SECONDS", None),
             max_connections=_int("MAX_CONNECTIONS", 256),
             jev_calls_per_request=_int("JEV_CALLS_PER_REQUEST", 3),
+            guide_ttl=_int("GUIDE_TTL_S", 1800),
+            guide_free_jev=_int("GUIDE_FREE_JEV_CALLS", 60),
+            guide_free_gemini=_int("GUIDE_FREE_GEMINI_CALLS", 60),
+            free_guide_sessions=_int("FREE_GUIDE_SESSIONS", 20),
+            pro_guide_sessions=_int("PRO_GUIDE_SESSIONS", 100),
             free_scope=("day" if os.environ.get("FREE_LIMIT_SCOPE", "").strip().lower() == "day"
                         else "total"),
             jev_bytes_per_unit=_int("JEV_BYTES_PER_UNIT", 0),
