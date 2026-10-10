@@ -229,13 +229,64 @@ def _ok_marker() -> Path:
     return state("contacts_ok")
 
 
-def read_before(source: str = "") -> bool:
-    """Has a read of her contacts (from `source`, when given) worked on this Mac?"""
+# macOS asks "access data from other apps" again for each new build of the app (the
+# launch-pack on the owner's Mac, macOS 15.6.1), so a read is remembered WITH the
+# build that made it: a new build has read nothing yet. Until it has, nothing in the
+# background looks inside WhatsApp's container (the launch warm-up, the briefing, the
+# chat names all ask read_before), and her next turn about a person shows MicMic's
+# line again first. A source checkout has no build identity: the old rule holds.
+_IDENT: dict = {}
+
+
+def code_identity() -> str:
+    """This build: "<version>/<hash of the app's own executable>", or "" outside an
+    installed app. MICMIC_CODE_IDENTITY stands in for it in tests."""
+    fake = os.environ.get("MICMIC_CODE_IDENTITY")
+    if fake is not None:
+        return fake
+    if "id" not in _IDENT:
+        ident = ""
+        try:
+            from ..install_place import bundle_path
+            from ..account import APP_VERSION
+            b = bundle_path()
+            exe = Path(b) / "Contents" / "MacOS" / "MicMic" if b else None
+            if exe is not None and exe.is_file():
+                import hashlib
+                ident = f"{APP_VERSION}/{hashlib.sha256(exe.read_bytes()).hexdigest()[:16]}"
+        except Exception:  # noqa: BLE001
+            ident = ""
+        _IDENT["id"] = ident
+    return _IDENT["id"]
+
+
+def _marker() -> tuple[str, str | None]:
+    """(source, identity) of the remembered read; identity None for a marker written
+    before builds were told apart (a bare source), ("", None) for none."""
+    import json as _json
     try:
-        got = _ok_marker().read_text().strip()
+        raw = _ok_marker().read_text().strip()
     except OSError:
-        got = _legacy_ok()
-    return bool(got) and (not source or got in (source, "legacy"))
+        return _legacy_ok(), None
+    try:
+        d = _json.loads(raw)
+        if isinstance(d, dict):
+            return str(d.get("source") or ""), d.get("identity")
+    except ValueError:
+        pass
+    return raw, None
+
+
+def read_before(source: str = "") -> bool:
+    """Has a read of her contacts (from `source`, when given) worked on this Mac, by
+    this very build?"""
+    got, ident = _marker()
+    if not got:
+        return False
+    cur = code_identity()
+    if cur and ident != cur:
+        return False
+    return not source or got in (source, "legacy")
 
 
 def _legacy_ok() -> str:
@@ -249,7 +300,7 @@ def _legacy_ok() -> str:
         return ""
     if not st.get("onboarded") or st.get("contacts_gate"):
         return ""
-    _note_read_ok("legacy")
+    _note_read_ok("legacy", identity="")     # its answers were for another build
     return "legacy"
 
 
@@ -308,9 +359,11 @@ def permit(seconds: float = PERMIT_FOR) -> None:
     _permit_until[0] = time.time() + seconds
 
 
-def _note_read_ok(source: str) -> None:
+def _note_read_ok(source: str, identity: str | None = None) -> None:
+    import json as _json
     try:
-        _ok_marker().write_text(source)
+        _ok_marker().write_text(_json.dumps({
+            "source": source, "identity": code_identity() if identity is None else identity}))
     except OSError:
         pass
 

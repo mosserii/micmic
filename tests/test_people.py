@@ -1332,6 +1332,94 @@ def t_no_book_before_asked():
               router._about_a_person(utt) == want, router._about_a_person(utt))
 
 
+def t_new_build_explains_again():
+    """The launch-pack on the owner's Mac (macOS 15.6.1): every new build raised macOS's
+    "MicMic would like to access data from other apps" with no MicMic line first, since
+    the line only came before the very first read on this Mac (a bare contacts_ok), and
+    a launch warm-up or the briefing then read WhatsApp's container under the new
+    build. Now the read is remembered with the build that made it; a new build reads
+    nothing in the background, and her next turn about a person gets the line once."""
+    print("\nt_new_build_explains_again")
+    said: list[str] = []
+    prev = os.environ.get("MICMIC_CODE_IDENTITY")
+    real_due = router.due_briefing
+    router.due_briefing = tm.REAL_DUE_BRIEFING
+    utt = "send a whatsapp to tamar saying i think about you"
+    script = msg("Tamar Cohen", channel="whatsapp", span="i think about you")
+    try:
+        with real_book(explain=lambda: said.append("line") or True) as seen:
+            book._read_whatsapp = lambda: (book._STATUS.update(whatsapp="ok"),
+                                           [dict(TAMAR)] + [dict(r) for r in BOOK])[1]
+            # 1.2.5, read and explained before.
+            os.environ["MICMIC_CODE_IDENTITY"] = "1.2.5/aaaa1111"
+            book._note_read_ok("whatsapp")
+            check("a read made by this very build is remembered", book.read_before("whatsapp"))
+            fresh()
+            with tm.gates_on():
+                say(ScriptedJev({utt: script}), utt)
+            check("the same build: no line before her turn about a person", said == [], said)
+            router._cancel_pending()
+
+            # The update: a new build, MicMic just started.
+            os.environ["MICMIC_CODE_IDENTITY"] = "1.2.6/bbbb2222"
+            book._first_ok[0] = None
+            book._CACHE.update(at=0.0, rows=[]); book._LAST_FAIL[0] = 0.0; book._ATTEMPTED[0] = 0.0
+            check("a new build has not read her book yet", not book.read_before("whatsapp")
+                  and not book.read_before() and not book.may_touch())
+            n = len(seen)
+            # The launch warm-up (server.py) and the morning briefing on a music turn.
+            if book.read_before("whatsapp"):
+                book.recent_chats()
+            fresh()
+            p = prof.load()
+            p.pop("last_briefed", None)
+            prof.save(p)
+            with tm.gates_on():
+                say(ScriptedJev({"play some adele": dict(intent="music")}), "play some adele")
+            time.sleep(0.2)
+            check("after the update, nothing in the background looks inside WhatsApp's folder",
+                  seen[n:] == [] and said == [], (seen[n:], said))
+            fresh()
+            with tm.gates_on():
+                r = say(ScriptedJev({utt: script}), utt)
+            check("her first turn about a person on the new build: MicMic's line once, then the read",
+                  said == ["line"] and r["did"] == "sending" and book.read_before("whatsapp"),
+                  (said, r["did"]))
+            router._cancel_pending()
+            book._first_ok[0] = None            # MicMic restarted, same build
+            fresh()
+            with tm.gates_on():
+                say(ScriptedJev({utt: script}), utt)
+            check("the same build again (a restart): the line is not shown a second time",
+                  said == ["line"], said)
+            router._cancel_pending()
+
+            # A marker from before this change (bare text) in an installed app: once.
+            book._ok_marker().write_text("whatsapp")
+            book._first_ok[0] = None
+            check("an old bare marker counts as another build", not book.read_before("whatsapp"))
+            # ...and "Not now" is still respected: nothing read, not asked again at once.
+            said.clear()
+            book.set_explainer(lambda: said.append("line") or False)
+            n = len(seen)
+            for _ in range(2):
+                fresh()
+                with tm.gates_on():
+                    say(ScriptedJev({utt: script}), utt)
+                router._cancel_pending()
+            check("'Not now': nothing read, and the line not shown again right away",
+                  said == ["line"] and seen[n:] == [] and not book.read_before(), (said, seen[n:]))
+            # A source checkout (no build identity): a bare marker still counts, as before.
+            os.environ["MICMIC_CODE_IDENTITY"] = ""
+            check("a source checkout keeps the old rule", book.read_before("whatsapp"))
+    finally:
+        router.due_briefing = real_due
+        if prev is None:
+            os.environ.pop("MICMIC_CODE_IDENTITY", None)
+        else:
+            os.environ["MICMIC_CODE_IDENTITY"] = prev
+
+
 def _tamar_turn(channel="whatsapp", content=0.9, span="i think about you", **kw) -> dict:
     return dict(intent="message", contact="nobody", contact_is_named=0.95,
                 message_has_content=content, channel=channel, span=span, **kw)
@@ -1966,7 +2054,7 @@ def t_lines():
 def main():
     for t in (t_name_not_in_book, t_sound_alike_offered, t_new_request_mid_question, t_two_davids, t_no_number, t_text_keeps_whatsapp,
               t_emergency, t_emergency_countdown, t_book_asks_first, t_distress_with_a_task, t_location_trouble, t_secrets, t_calls_off, t_money,
-              t_no_book_before_asked, t_first_read_waits_for_her_answer,
+              t_no_book_before_asked, t_first_read_waits_for_her_answer, t_new_build_explains_again,
               t_unreadable_book_is_said_so, t_without_the_book, t_whatsapp_never_blind,
               t_who_is_never_asked_three_times, t_sound_alike_needs_a_read_book,
               t_new_request_resets_the_who_count, t_send_and_say_is_one_message,

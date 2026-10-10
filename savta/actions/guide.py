@@ -932,14 +932,8 @@ def gemini_step(llm, req: dict) -> dict | None:
 
 
 def parse_step(raw: str) -> dict | None:
-    m = re.search(r"\{.*\}", raw or "", re.S)
-    if not m:
-        return None
-    try:
-        d = json.loads(m.group(0))
-    except ValueError:
-        return None
-    return d if isinstance(d, dict) else None
+    from ..llm import model_json
+    return model_json(raw)
 
 
 # ---------------------------------------------------------------- the session

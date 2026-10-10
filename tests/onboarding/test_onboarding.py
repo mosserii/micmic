@@ -322,7 +322,14 @@ def test_contacts_upgrade_from_an_older_setup():
     try:
         mac({"onboarded": True})
         check("an older setup counts as read before", book.read_before() and book.read_before("macos"))
-        check("and it is remembered", book._ok_marker().read_text().strip() == "legacy")
+        check("and it is remembered", book._marker()[0] == "legacy")
+        # In an installed app the old answers were given to another build: once more.
+        os.environ["MICMIC_CODE_IDENTITY"] = "1.2.5/aaaa1111"
+        try:
+            check("in an installed app, an older setup explains once on this build",
+                  not book.read_before())
+        finally:
+            os.environ.pop("MICMIC_CODE_IDENTITY", None)
         mac({"onboarded": True, "contacts_gate": True})
         check("a setup done with this version still waits for a read of her own",
               not book.read_before())

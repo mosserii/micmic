@@ -15,6 +15,7 @@ Jev is scripted, so the whole flow runs through router.handle() for $0.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tempfile
 import time
@@ -1220,10 +1221,55 @@ def t_described_song():
                 ('{"title": "Waka Waka", "artist": "Shakira", "sentence": "It is her big hit."}',
                  {"title": "Waka Waka", "artist": "Shakira", "sentence": ""}),
                 ('{"title": ""}', None), ("I am not sure.", None),
-                ('{"title": "' + "x" * 200 + '", "artist": "y"}', None)]:
+                ('{"title": "' + "x" * 200 + '", "artist": "y"}', None),
+                # Bench run v1-1.2.5-9c5a86c (2026-10-11), hard-media-hard-012, word for
+                # word: the Hebrew sentence left unquoted, so the reply is not JSON. The
+                # title and artist are still there and are used; nothing is made up.
+                ('{"title": "Waka Waka", "artist": "Shakira", "sentence":דבר שיר המונדיאל '
+                 'האחרון של שאקירה הוא ואקה ואקה.}',
+                 {"title": "Waka Waka", "artist": "Shakira", "sentence": ""}),
+                ('{"title": Waka Waka, "artist": "Shakira"}',
+                 {"title": "Waka Waka", "artist": "Shakira", "sentence": ""}),
+                ('{"artist": "Shakira", "sentence":דבר}', None)]:
             l.text = lambda *a, _o=out, **k: _o
             check(f"identify_song parses {out[:40]!r}", l.identify_song("q") == want,
                   l.identify_song("q"))
+
+        # The shared reader itself, as every caller uses it (guide steps, screen events).
+        from savta.llm import model_json
+        for raw, want in [
+                ('{"done": false, "say": Нажмите Продолжить внизу, "target": 3, "kind": "click"}',
+                 {"done": False, "say": "Нажмите Продолжить внизу", "target": 3, "kind": "click"}),
+                ('{"say": "اختار البلد", "field": البلد اللي أصدر الجواز}',
+                 {"say": "اختار البلد", "field": "البلد اللي أصدر الجواز"}),
+                ('{"say": "Type it.", "target": 2, "then": [{"say": "Next.", "target": 3}], '
+                 '"field": your code, here}',
+                 {"say": "Type it.", "target": 2, "then": [{"say": "Next.", "target": 3}],
+                  "field": "your code, here"}),
+                ("no JSON at all", None), ("{}", {}), ("{ broken", None)]:
+            got = model_json(raw)
+            check(f"model_json reads {raw[:36]!r}", got == want, got)
+        check("model_json returns only the keys asked for, never others",
+              model_json('{"title": X, "extra": "y"}', ("title", "artist")) == {"title": "X"})
+
+        # The same malformed reply, through the router, in Hebrew: the song is played.
+        fresh()
+        l2 = LLM()
+        l2.text = lambda *a, **k: ('{"title": "Waka Waka", "artist": "Shakira", "sentence":'
+                                   'דבר שיר המונדיאל האחרון של שאקירה הוא ואקה ואקה.}')
+        saved_llm = router.LLM_CLIENT
+        router.LLM_CLIENT = l2
+        try:
+            router.yt.search = lambda q, n=18: [{"id": "ww1", "title": "Shakira - Waka Waka "
+                                                 "(This Time for Africa)", "channel": "shakiraVEVO",
+                                                 "length": "3:31", "views": "4B views"}]
+            r, _ = turn("תנגני את השיר של שקירה האחרון מהמונדיאל", lang="hebrew",
+                        extra={"describes_song": 0.94})
+            check("hard-media-hard-012: a reply that is not quite JSON still plays the song, in Hebrew",
+                  r["did"] == "playing" and re.search(r"[\u0590-\u05ff]", r.get("say") or ""),
+                  (r["did"], r.get("say"), (r.get("detail") or {}).get("why")))
+        finally:
+            router.LLM_CLIENT = saved_llm
 
         # Ordinary requests are sent exactly as before.
         fresh()

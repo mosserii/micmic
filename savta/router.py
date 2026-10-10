@@ -3447,13 +3447,8 @@ def _event_from_screen(ctx: dict, lang: str) -> dict | None:
         '{"none": true}.\n\n' + _screen_text(ctx))
     raw = _screen_llm(prompt, "You extract calendar events from screen text. JSON only.",
                       max_tokens=200)
-    m = _re.search(r"\{.*\}", raw or "", _re.S)
-    if not m:
-        return None
-    try:
-        ev = json.loads(m.group(0))
-    except ValueError:
-        return None
+    from .llm import model_json
+    ev = model_json(raw, ("title", "date", "start", "end", "location", "none"))
     if not isinstance(ev, dict) or ev.get("none"):
         return None
     title = str(ev.get("title") or "").strip()[:120]

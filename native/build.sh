@@ -55,12 +55,20 @@ notarize() {
     # It locks after sleep; it was made with an empty password, so unlocking is safe here.
     security unlock-keychain -p "" "$MICMIC_NOTARY_KEYCHAIN" 2>/dev/null || true
   fi
-  out=$(xcrun notarytool submit "$1" --keychain-profile "$KEYCHAIN_PROFILE" ${kc[@]+"${kc[@]}"} --wait 2>&1) || rc=$?
+  # MICMIC_NOTARY_API_KEY (a .p8 file) + MICMIC_NOTARY_KEY_ID + MICMIC_NOTARY_ISSUER: an
+  # App Store Connect API key instead of the keychain profile, which vanished a third
+  # time (2026-10-11). Nothing is stored; the key file stays where it is.
+  local auth=(--keychain-profile "$KEYCHAIN_PROFILE" ${kc[@]+"${kc[@]}"})
+  if [ -n "${MICMIC_NOTARY_API_KEY:-}" ]; then
+    auth=(--key "$MICMIC_NOTARY_API_KEY" --key-id "${MICMIC_NOTARY_KEY_ID:?}" --issuer "${MICMIC_NOTARY_ISSUER:?}")
+  fi
+  out=$(xcrun notarytool submit "$1" "${auth[@]}" --wait 2>&1) || rc=$?
   echo "$out" | sed 's/^/    /'
   if [ "$rc" -ne 0 ] || ! echo "$out" | grep -q "status: Accepted"; then
     echo "  (notarytool exit $rc)"
     echo "  FAILED: Apple did not accept $(basename "$1")."
-    echo "  If the profile is missing: xcrun notarytool store-credentials $KEYCHAIN_PROFILE"
+    echo "  If the profile is missing: xcrun notarytool store-credentials $KEYCHAIN_PROFILE,"
+    echo "  or pass an API key: MICMIC_NOTARY_API_KEY, MICMIC_NOTARY_KEY_ID, MICMIC_NOTARY_ISSUER"
     exit 1
   fi
 }

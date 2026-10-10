@@ -282,6 +282,60 @@ def _route() -> tuple[str | None, tuple[str, str] | None]:
     return None, _jev.proxy_credentials()
 
 
+
+def model_json(text, keys=()) -> dict | None:
+    """The JSON object in a model's reply, or None. Shared by every place that asks
+    Gemini for one (the song it names, the guide's next step, an event on screen).
+
+    A reply that is valid JSON is read as such. One that is not quite (bench run
+    v1-1.2.5-9c5a86c, 2026-10-11: {"title": "Waka Waka", "artist": "Shakira",
+    "sentence":דבר שיר...} with the Hebrew sentence left unquoted) is read key by key:
+    a quoted string, a number, true/false/null, a list or object, or bare text up to
+    the next "key": or the closing brace. Only keys that are in the reply come back
+    (`keys` narrows them); nothing is filled in that the model did not write."""
+    s = str(text or "")
+    start = s.find("{")
+    if start < 0:
+        return None
+    m = re.search(r"\{.*\}", s, re.S)
+    if m:
+        try:
+            d = json.loads(m.group(0))
+            return d if isinstance(d, dict) else None
+        except (ValueError, RecursionError):
+            pass
+    body = s[start:]
+    names = list(keys) or list(dict.fromkeys(re.findall(r'"([A-Za-z_]\w*)"\s*:', body)))
+    out: dict = {}
+    for k in names:
+        km = re.search(r'"%s"\s*:\s*' % re.escape(k), body)
+        if not km:
+            continue
+        rest = body[km.end():]
+        if rest.startswith('"'):
+            sm = re.match(r'"((?:[^"\\]|\\.)*)"', rest, re.S)
+            if sm:
+                try:
+                    out[k] = json.loads('"' + sm.group(1) + '"')
+                except ValueError:
+                    out[k] = sm.group(1)
+            continue
+        if rest[:1] in "[{":
+            try:
+                out[k] = json.JSONDecoder().raw_decode(rest)[0]
+            except (ValueError, RecursionError):
+                pass
+            continue
+        lit = re.match(r"(true|false|null|-?\d+(?:\.\d+)?)\s*(?=[,}]|$)", rest)
+        if lit:
+            out[k] = json.loads(lit.group(1))
+            continue
+        um = re.match(r'(.*?)\s*(?:,\s*"[A-Za-z_]\w*"\s*:|\}\s*(?:```)?\s*$|$)', rest, re.S)
+        val = um.group(1).strip() if um else ""
+        if val and "\n" not in val.strip():
+            out[k] = val
+    return out or None
+
 class LLM:
     def __init__(self, model: str = MODEL, timeout: float = 20.0):
         self.key, proxy = _route()
@@ -718,10 +772,8 @@ class LLM:
                         timeout=SPOKEN_TIMEOUT)
         if not out:
             return None
-        m = re.search(r"\{.*\}", out, re.S)
-        try:
-            d = json.loads(m.group(0)) if m else {}
-        except ValueError:
+        d = model_json(out, ("title", "artist", "sentence"))
+        if d is None:
             self.last_error = "identify_song: not JSON"
             return None
         title = str(d.get("title") or "").strip()
