@@ -2350,8 +2350,9 @@ def t_clock(j):
               _t.strftime("%H:%M") in say or _t.strftime("%-I:%M") in say, say)
         check(f"{utt!r} never claims to have no clock",
               "no clock" not in say.lower() and "do not have" not in say.lower(), say)
+    # As whole numbers: "the 11th" holds "1th", and failed this on every 11th (2026-10-11).
     check("English says 21st, not 21th",
-          not any(f"{d}th" in router._clock_line("english")
+          not any(re.search(rf"(?<!\d){d}th\b", router._clock_line("english"))
                   for d in (1, 2, 3, 21, 22, 23, 31)),
           router._clock_line("english"))
     # A timer is not a clock question; it must still reach the timer.

@@ -99,7 +99,8 @@ ROLES = {
 TYPED = {"AXComboBox", "AXTextField", "AXTextArea", "AXSearchField"}
 PRESSABLE = set(ROLES) - TYPED
 _ATTRS = ["AXRole", "AXSubrole", "AXFrame", "AXTitle", "AXDescription", "AXValue",
-          "AXEnabled", "AXChildren", "AXPlaceholderValue", "AXTitleUIElement", "AXHelp"]
+          "AXEnabled", "AXChildren", "AXPlaceholderValue", "AXTitleUIElement", "AXHelp",
+          "AXRequired"]
 _PROBE = ["AXRole", "AXFrame", "AXValue", "AXSelected", "AXExpanded", "AXFocused"]
 
 # A step whose whole point is a secret or a sign-in, a payment, or deleting something
@@ -121,6 +122,11 @@ FINISHING = re.compile(
 _ID_NUMBER = re.compile(
     r"passport|national.?id|tax.?id|\bssn\b|social.?security|iban|account.?num|routing|"
     r"teudat|תעודת.?זהות|דרכון|رقم.?الهوية|جواز.?السفر|паспорт|снилс", re.I)
+
+# A field the page itself calls optional ("Known Traveler Number (optional)"): never a
+# step of its own unless she asked for it (the rehearsal stalled 33 s on one).
+_OPTIONAL = re.compile(r"\boptional\b|\bif (?:you )?(?:have|any)\b|אופציונלי|לא חובה|اختياري|"
+                       r"необязательн", re.I)
 
 # MicMic's own windows: "this" is never MicMic itself.
 _MICMIC = ("micmic",)
@@ -286,7 +292,9 @@ def _many(el, names):
 
 def _visible_part(r, win):
     """The part of r inside the window, or None when too little of it shows to point
-    at honestly (under half of it, or a sliver)."""
+    at honestly (under a quarter of it, or a sliver). Half was the rule until the
+    real-Chrome rehearsal of 2026-10-11: the box next to "Alex Rivera" sat at the
+    window's bottom edge, was left out of the list, and the step had no ring."""
     if not r or not win:
         return None
     x, y, w, h = r
@@ -297,7 +305,7 @@ def _visible_part(r, win):
     rx, by = min(x + w, wx + ww), min(y + h, wy + wh)
     if rx - lx < MIN_RING or by - ty < MIN_RING:
         return None
-    if (rx - lx) * (by - ty) < 0.5 * w * h:
+    if (rx - lx) * (by - ty) < 0.25 * w * h:
         return None
     return (lx, ty, rx - lx, by - ty)
 
@@ -451,8 +459,13 @@ class LiveScreen:
                         "group": screen.redact(group) if group and group != label else "",
                         "checked": checked,
                         "frame": vis, "secure": bool(forbidden),
-                        "typed": role in TYPED, "pick": role == "AXPopUpButton"})
+                        "typed": role in TYPED, "pick": role == "AXPopUpButton",
+                        "required": vals[11] is True or vals[11] == 1,
+                        "optional": bool(_OPTIONAL.search(f"{label} {hint}"))})
                     out["refs"][nid] = el
+                    if "_web" in out and "_anchor" not in out:
+                        # The first control on the page: when it moves, she scrolled.
+                        out["_anchor"] = el
                     # What probe() will read in the field, kept here and never sent:
                     # the watcher's starting point (see _watch).
                     if role in TYPED or role == "AXPopUpButton":
@@ -504,6 +517,10 @@ class LiveScreen:
                 p["url"] = str(url.absoluteString()) if hasattr(url, "absoluteString") else str(url)
                 p["struct"] = (p["struct"] or []) + [len(w[1] or []), str(w[2] or "")]
         ref = (snap.get("refs") or {}).get(target_id) if target_id else None
+        anchor = snap.get("_anchor")
+        if ref is None and anchor is not None:
+            fr = _rect((_many(anchor, ["AXFrame"]) or [None])[0])
+            p["anchor"] = round(fr[1]) if fr else None
         if ref is not None:
             t = _many(ref, _PROBE)
             if t is None or not t[0]:
@@ -533,10 +550,13 @@ class LiveScreen:
         return err == 0, "ok" if err == 0 else f"AX {err}"
 
     def fill(self, snap: dict, target_id, value: str) -> tuple[bool, str]:
-        """Type `value` into the ringed field the way apps.act does: the field's own
-        AXValue (Chrome sends the page its input and change events), then read back.
-        No keystrokes: with MicMic's window in front they could land anywhere. Never
-        a secret field, and never a Return, which could submit the form."""
+        """Type `value` into the ringed field. First the field's own AXValue, read back.
+        Real Chrome took none of it in the rehearsal of 2026-10-11 ("I couldn't type it
+        there"), so then: her browser in front, the keyboard in that very field (AX
+        focus, else a click on it), select what is in it, and type the value as
+        keystrokes, read back again. Keystrokes go only to that app and only into that
+        field: if either cannot be made sure of, nothing is typed. Never a secret field,
+        and never a Return, which could submit the form."""
         ref = (snap.get("refs") or {}).get(target_id)
         ctl = next((c for c in snap.get("controls") or [] if c["id"] == target_id), None)
         ax = apps._ax()
@@ -547,13 +567,38 @@ class LiveScreen:
         value = re.sub(r"[\r\n]+", " ", str(value or "")).strip()
         try:
             ax["set"](ref, "AXFocused", True)
-            err = ax["set"](ref, "AXValue", value)
-        except Exception as e:  # noqa: BLE001
-            return False, repr(e)[:100]
-        got = (_many(ref, ["AXValue"]) or [None])[0]
-        if err == 0 and isinstance(got, str) and got.strip().lower() == value.lower():
+            ax["set"](ref, "AXValue", value)
+        except Exception:  # noqa: BLE001
+            pass
+        if _holds(ref, value):
             return True, "ok"
-        return False, f"AX {err}" if err else "not taken"
+        pid = snap.get("pid") or 0
+        if not _bring_to_front(pid):
+            return False, "not in front"
+        try:
+            # Its window the key one, so the keys reach this page and not the toolbar.
+            win = (_many(ref, ["AXWindow"]) or [None])[0]
+            if win is not None:
+                ax["set"](win, "AXMain", True)
+                ax["press"](win, "AXRaise")
+            ax["set"](ref, "AXFocused", True)
+        except Exception:  # noqa: BLE001
+            pass
+        if not _has_focus(ref):
+            fr = _rect((_many(ref, ["AXFrame"]) or [None])[0])
+            if fr and _front_pid() == pid:
+                _click(fr[0] + min(fr[2] / 2, 40), fr[1] + fr[3] / 2)
+                time.sleep(0.15)
+        if not _has_focus(ref) or _front_pid() != pid:
+            return False, "no focus"
+        _keys(pid, select_all=True)
+        _keys(pid, text=value)
+        end = time.time() + 1.0
+        while time.time() < end:
+            if _holds(ref, value):
+                return True, "typed"
+            time.sleep(0.05)
+        return False, "not taken"
 
     def page_url(self, front: dict) -> str:
         """The address of the page in the front browser window, or "": a short search
@@ -586,6 +631,91 @@ class LiveScreen:
             if c["role"] == role and c["label"] == label:
                 return snap, c["id"]
         return snap, None
+
+
+def _holds(ref, value: str) -> bool:
+    """The field reads back as `value` (case, spaces and dashes aside: a page may
+    format what it was given)."""
+    got = (_many(ref, ["AXValue"]) or [None])[0]
+    if not isinstance(got, str):
+        return False
+    norm = lambda t: re.sub(r"[\s\-]+", "", t).lower()  # noqa: E731
+    return norm(got) == norm(value)
+
+
+def _has_focus(ref) -> bool:
+    return bool((_many(ref, ["AXFocused"]) or [None])[0])
+
+
+def _front_pid() -> int:
+    try:
+        return int(screen.frontmost().get("pid") or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _bring_to_front(pid: int) -> bool:
+    """Her browser in front, so keystrokes reach it: it usually is already (she is
+    talking, not clicking); after a press on MicMic's own card it is asked to come
+    back, and checked."""
+    if not pid:
+        return False
+    if _front_pid() == pid:
+        return True
+    try:
+        from AppKit import NSApplicationActivateIgnoringOtherApps, NSRunningApplication
+        app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+        if app is not None:
+            app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+    except Exception:  # noqa: BLE001
+        return False
+    end = time.time() + 1.0
+    while time.time() < end:
+        if _front_pid() == pid:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _click(x: float, y: float) -> None:
+    """One left click at a screen point (the field's own frame), to put the keyboard in it."""
+    import Quartz
+    move = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, (x, y),
+                                          Quartz.kCGMouseButtonLeft)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, move)
+    time.sleep(0.05)
+    for kind in (Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp):
+        ev = Quartz.CGEventCreateMouseEvent(None, kind, (x, y), Quartz.kCGMouseButtonLeft)
+        # A click count of one: without it a page can take the press for no click at all.
+        Quartz.CGEventSetIntegerValueField(ev, Quartz.kCGMouseEventClickState, 1)
+        Quartz.CGEventSetFlags(ev, 0)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+        time.sleep(0.04)
+
+
+def _keys(pid: int, text: str = "", select_all: bool = False) -> None:
+    """Keystrokes to `pid` only: Cmd-A, or `text` one character at a time as Unicode
+    (any keyboard layout, any language). No modifier she may be holding is carried
+    over, and there is no Return: a newline in a value was turned into a space."""
+    import Quartz
+    src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStatePrivate)
+
+    def post(down: bool, char: str = "", flags: int = 0) -> None:
+        ev = Quartz.CGEventCreateKeyboardEvent(src, 0, down)   # key code 0, the string decides
+        if char:
+            Quartz.CGEventKeyboardSetUnicodeString(ev, len(char), char)
+        Quartz.CGEventSetFlags(ev, flags)
+        Quartz.CGEventPostToPid(pid, ev)
+    if select_all:
+        post(True, "", Quartz.kCGEventFlagMaskCommand)
+        post(False, "", Quartz.kCGEventFlagMaskCommand)
+        time.sleep(0.05)
+    for ch in text:
+        if ch in "\r\n":
+            continue
+        post(True, ch)
+        post(False, ch)
+        time.sleep(0.008)
 
 
 def _rect_from(v):
@@ -711,6 +841,13 @@ SYSTEM = (
     "Stop before any button or link. Otherwise [].\n"
     "- A field whose list entry says it already holds a value is filled: go on to the "
     "next one unless what it holds is wrong.\n"
+    "- Never point at a button that continues, submits or finishes while something on "
+    "the page that it needs is still empty or unticked (a required field, the box that "
+    "chooses who to check in, an answer to a question): that comes first. If it is "
+    "below the visible part, say to scroll down to it.\n"
+    "- Skip fields marked [optional] and fields already filled, unless the goal or what "
+    "they said asks for them. When everything required is filled, the next step is the "
+    "page's main button (Continue, Next, Save).\n"
     "- why: one short sentence in {language} on why this step matters.\n"
     "- goal: the goal restated in two to six words in {language}.\n"
     "- done: true only when the screen shows the goal is achieved; then finish is one "
@@ -752,6 +889,10 @@ def build_request(goal: str, lang: str, history: list[str], snap: dict,
                 " (empty)" if c.get("typed") else ""))
         if c.get("checked") is not None:
             extra += " [ticked]" if c["checked"] else " [not ticked]"
+        if c.get("required"):
+            extra += " [required]"
+        elif c.get("optional"):
+            extra += " [optional]"
         if c.get("hint"):
             extra += f' hint "{c["hint"]}"'
         if c.get("group"):
@@ -850,7 +991,8 @@ class Guide:
         page through Accessibility, read nothing, and sent the task to the browser
         agent. A test process never reads the real screen."""
         import os
-        if isinstance(self.screen, LiveScreen) and os.environ.get("MICMIC_STATE_DIR"):
+        if isinstance(self.screen, LiveScreen) and os.environ.get("MICMIC_STATE_DIR") \
+                and os.environ.get("MICMIC_GUIDE_REAL_SCREEN") != "1":
             return {"page": False, "why": "test", "app": ""}
         try:
             front = self.screen.front()
@@ -1291,6 +1433,24 @@ class Guide:
             # The ring follows the control: a scroll or a resized window moves it.
             self._follow(sid, snap, target, p)
             now = time.time()
+            # MicMic asked her something ("What's your code?", "I'll type K7QM2P. Is
+            # that right?"): until she answers, only a new page moves the guide on. The
+            # rehearsal of 2026-10-11: the step was worked out again under the question,
+            # the read-back was dropped, and her "yes" went to the browser agent.
+            with self._lock:
+                s = self._alive(sid)
+                asking = bool(s and s.get("awaiting"))
+            if asking:
+                if (p.get("pid"), p.get("title"), p.get("url")) != \
+                        (base.get("pid"), base.get("title"), base.get("url")):
+                    if changed_at is None:
+                        changed_at = now
+                    elif now - changed_at >= self.settle:
+                        return "change"
+                else:
+                    changed_at = None
+                last = p
+                continue
             if kind in FIELD_KINDS and target and base.get("alive"):
                 if _page_moved(base, p):
                     # A new page while on a field: settled like any other change.
@@ -1414,6 +1574,26 @@ class Guide:
             res = (self.model or self._gemini)(req)
         except Exception:  # noqa: BLE001
             res = None
+        # An optional field she never asked about (the rehearsal of 2026-10-11 stalled
+        # 33 s on "Type your Known Traveler Number" on a page that was already filled
+        # in): asked once more, told to skip it.
+        skip = _optional_target(res, snap, said)
+        if skip:
+            req = {**req, "reason": f"{reason}; skip the optional field \"{skip}\", she "
+                                    f"did not ask for it",
+                   "prompt": build_request(goal, lang, history, snap,
+                                           f"{reason}; skip the optional field \"{skip}\", "
+                                           f"she did not ask for it", said)}
+            with self._lock:
+                s = self._alive(sid)
+                if s is not None:
+                    s["calls"] = s.get("calls", 0) + 1
+            try:
+                res = (self.model or self._gemini)(req)
+            except Exception:  # noqa: BLE001
+                res = None
+            if _optional_target(res, snap, said):
+                res = None if not isinstance(res, dict) else {**res, "target": None, "kind": "look"}
         with self._lock:
             s = self._alive(sid)
             if s is None:
@@ -1478,6 +1658,11 @@ class Guide:
             if ctl is None:
                 tid = None                   # not one of the ids it was given: no ring
             kind = _kind_for(ctl, res.get("kind"))
+            if ctl is None and kind in ("click", "type", "choose"):
+                # "Click the checkbox for Alex Rivera" with the box below the window (the
+                # rehearsal of 2026-10-11): nothing to ring yet, so it is a look step,
+                # and her scrolling to it brings the next step with its ring.
+                kind = "look"
             field = _field_info(res, kind, s.get("said") or []) if kind in FIELD_KINDS else {}
             same = (say == s.get("say") and tid == s.get("target"))
             # The rehearsal's stall: she clicked the field, the page "changed", and
@@ -1785,6 +1970,8 @@ def _plan(then, snap: dict, current, said: list[str]) -> list:
         if not (ctl.get("typed") or ctl.get("pick")
                 or ctl.get("role") in ("checkbox", "option", "switch")):
             break
+        if ctl.get("optional") and not ctl.get("required") and not _asked_for(ctl["label"], said):
+            continue                          # never planned: she did not ask for it
         seen.add(tid)
         out.append({"say": say, "target": tid, "role": ctl["role"], "label": ctl["label"],
                     "kind": _kind_for(ctl, item.get("kind")),
@@ -1792,6 +1979,29 @@ def _plan(then, snap: dict, current, said: list[str]) -> list:
                     "value": item.get("value") or "", "profile": item.get("profile") or "",
                     "why": "", "goal": ""})
     return out
+
+
+def _asked_for(label: str, said: list[str]) -> bool:
+    """Her words name this field ("my known traveler number is ..."), by any word of
+    its label longer than three letters."""
+    words = [w for w in re.findall(r"\w{4,}", re.sub(r"\(.*?\)", " ", label or "").lower())
+             if w not in ("optional", "number", "field", "your")]
+    text = " ".join(said).lower()
+    return bool(words) and any(w in text for w in words)
+
+
+def _optional_target(res, snap: dict, said: list[str]) -> str:
+    """The label of the field the step points at when it is empty, optional, and she
+    never asked for it; else ""."""
+    if not isinstance(res, dict) or res.get("done"):
+        return ""
+    tid = _as_id(res.get("target"))
+    ctl = next((c for c in snap.get("controls") or [] if c["id"] == tid), None)
+    if ctl is None or not ctl.get("optional") or ctl.get("required"):
+        return ""
+    if (ctl.get("typed") and (ctl.get("value") or ctl.get("filled"))) or ctl.get("checked"):
+        return ""
+    return "" if _asked_for(ctl.get("label", ""), said) else ctl.get("label", "")
 
 
 def _match(snap: dict, item: dict) -> dict | None:
@@ -1838,6 +2048,10 @@ def _changed(base: dict, p: dict, kind: str) -> bool:
         return True
     if p.get("group") != base.get("group"):
         return True
+    # "Scroll down to Who's checking in": she scrolled (the page's first control moved).
+    if kind == "look" and base.get("anchor") is not None and p.get("anchor") is not None \
+            and abs(p["anchor"] - base["anchor"]) > 40:
+        return True
     if base.get("focus_key") is not None and p.get("focus_key") is not None \
             and p["focus_key"] != base["focus_key"]:
         return True
@@ -1862,7 +2076,7 @@ def _option_group(snap: dict, target) -> list:
 def _same(a: dict | None, b: dict) -> bool:
     if a is None:
         return False
-    keys = ("pid", "title", "url", "struct", "alive", "state", "group", "focus_key")
+    keys = ("pid", "title", "url", "struct", "alive", "state", "group", "focus_key", "anchor")
     return all(a.get(k) == b.get(k) for k in keys)
 
 

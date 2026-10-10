@@ -7363,6 +7363,8 @@ def _guide_command(cmd: str, lang: str, finish, conf: float, utterance: str = ""
         st = GUIDE.give(utterance, speak=False) or GUIDE.repeat()
     elif cmd in ("yes", "no"):
         st = GUIDE.answer(cmd == "yes", heard=utterance, speak=False)
+        if not st.get("said") and not st.get("ok") and GUIDE.awaiting() != "confirm":
+            st = GUIDE.repeat()            # nothing waited for her yes: the step again
     elif cmd == "noted":
         st = GUIDE.noted()
     else:
@@ -7382,11 +7384,43 @@ GUIDE_ANSWER_WORDS = 8
 GUIDE_OTHER_REQUEST = 0.85
 
 
+# A bare yes or no ("yes", "ok", "no thanks", "כן", "нет"): an answer to something, never
+# a request of its own. The rehearsal of 2026-10-11: MicMic read back the code and
+# asked "Is that right?", her "yes" read as do_online, and the browser agent was
+# started with the task "yes". While a guide runs it is the guide's; anywhere else it
+# never starts the browser agent.
+_BARE_YES = re.compile(
+    r"^\W*(?:yes|yeah|yep|yup|ok(?:ay)?|sure|right|correct|that'?s right|exactly|go ahead|"
+    r"כן|נכון|בסדר|יאללה|نعم|أيوه|ايوه|اه|صح|تمام|да|верно|хорошо|ладно|ок)"
+    r"(?:\W+(?:please|thanks|thank you|בבקשה|تفضل|пожалуйста))?\W*$", re.I)
+_BARE_NO = re.compile(
+    r"^\W*(?:no+|nope|nah|no thanks|not right|wrong|לא|لا|لأ|нет|неверно)"
+    r"(?:\W+(?:thanks|thank you|תודה|شكرا|спасибо))?\W*$", re.I)
+
+
+def _bare_answer(utterance: str) -> str:
+    """"yes", "no" or "" for her words alone."""
+    if _BARE_YES.match(utterance or ""):
+        return "yes"
+    if _BARE_NO.match(utterance or ""):
+        return "no"
+    return ""
+
+
 def _guide_field_command(u: dict, utterance: str) -> str | None:
     """The guide command for her words while a field step is up, or None."""
     cmd = u.get("guide_command", "none")
     sure = u.get("guide_command_confidence", 0.0) >= GUIDE_COMMAND_GATE
     waiting = GUIDE.awaiting()
+    bare = _bare_answer(utterance)
+    if bare and waiting == "confirm":
+        return bare                    # her answer to the read-back, whatever Jev made of it
+    if bare and waiting == "value":
+        return "repeat"                # "no" to "What's your code?": nothing is typed
+    if bare and not waiting:
+        # Nothing was asked: "yes" goes on with the step ("next" when Jev says so), "no"
+        # or a yes that is not about going on says the step again. Never a new request.
+        return "next" if bare == "yes" and sure and cmd == "next" else "repeat"
     if waiting == "confirm":
         if sure and cmd in ("yes", "next"):
             return "yes"
@@ -11312,6 +11346,10 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         # step by step. Only her words "help me" and no site named. The check is the
         # browser in front, never a form read off the page: the installed 1.2.5 asked
         # for that, read nothing, and went to the browser agent (2026-10-09 16:57).
+        # A bare "yes" or "no" is an answer, never a task for the browser agent.
+        if _bare_answer(utterance):
+            return finish("asked_back", _sp(lang, "huh"), asked_back=True,
+                          detail={"why": "a bare answer is not a web task"})
         front_page = None
         if depth == 0 and not web_start and _HELP_ME.search(utterance):
             front_page = GUIDE.page_in_front()

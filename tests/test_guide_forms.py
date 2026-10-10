@@ -765,6 +765,102 @@ def t_guide_is_one_request():
     router.GUIDE.stop()
 
 
+def t_rehearsal_2026_10_11():
+    """The real-Chrome rehearsal of 2026-10-11, bug by bug (no screen, no model)."""
+    from savta import router
+    set_profile("Test")
+    launched = []
+    saved = router._launch_web
+    router._launch_web = lambda *a, **k: launched.append(a[1]) or {"web_run": "x"}
+    try:
+        # BUG 1: her "yes" to the read-back went to the browser agent (did=web_working,
+        # task "yes"): the step was worked out again under the question and the read-back
+        # dropped. Now the question holds until she answers or the page changes, and a
+        # bare yes is the guide's, whatever Jev made of it.
+        sc = FormScreen()
+        m = FakeModel([field(CONF_LINE, 1, name="your confirmation code", ask="What's your code?"),
+                       field("Type your last name.", 2)])
+        router.GUIDE.screen, router.GUIDE.model = sc, m
+        router.GUIDE.tick, router.GUIDE.settle = 0.01, 0.04
+        j = FakeJev()
+        base = {"is_complete": 0.95, "language": ("english", 0.99)}
+        j.over = {**base, "intent": ("do_online", 1.0)}
+        router.handle(j, "Help me check in for my flight to Lisbon.", speak=False)
+        j.over = {**base, "intent": ("do_online", 1.0), "guide_command": ("gives_value", 1.0)}
+        r = router.handle(j, "my confirmation code is K 7 Q M 2 P", speak=False)
+        sc.struct = 7                      # the page moves under the question
+        sc.focused = 1
+        time.sleep(0.4)
+        check("while MicMic waits for her yes, nothing on the page asks the model again",
+              len(m.requests) == 1 and router.GUIDE.awaiting() == "confirm", (len(m.requests), router.GUIDE.awaiting()))
+        j.over = {**base, "intent": ("do_online", 0.91)}            # Jev read no command
+        r = router.handle(j, "yes", speak=False)
+        check("her bare 'yes' types the value, never the browser agent",
+              r["did"] == "guide_yes" and sc.fills == [(1, "K7QM2P")] and not launched, (r["did"], launched))
+        router.GUIDE.stop()
+        for word in ("yes", "Yes.", "ok", "okay", "no", "yeah", "כן", "нет"):
+            r = router.handle(j, word, speak=False)
+            check(f"a bare {word!r} never starts the browser agent, guide or none",
+                  r["did"] != "web_working" and not launched, (r["did"], launched))
+        # a guide running, nothing asked: "yes" says the step again, nothing else
+        router.GUIDE.model = FakeModel([field(CONF_LINE, 1)])
+        j.over = {**base, "intent": ("do_online", 1.0)}
+        router.handle(j, "Help me check in for my flight to Lisbon.", speak=False)
+        j.over = {**base, "intent": ("do_online", 0.9)}
+        r = router.handle(j, "yes", speak=False)
+        check("with nothing asked, 'yes' during a guide says the step again",
+              r["did"] == "guide_repeat" and r["say"] == CONF_LINE and not launched, (r["did"], r["say"]))
+        router.GUIDE.stop()
+    finally:
+        router._launch_web = saved
+
+    # BUG 3: the box beside "Alex Rivera" at the window's bottom edge was left out of
+    # the list (a ring needed half of it showing) and the step had no ring.
+    check("a control a quarter in the window still gets a ring",
+          G._visible_part((300, 1079, 24, 24), (0, 0, 1000, 1085)) is not None
+          and G._visible_part((300, 1081, 24, 24), (0, 0, 1000, 1085)) is None)
+    snap = FormScreen().snapshot({"app": "Google Chrome"})
+    snap["controls"][0]["required"] = True
+    text = G.build_request("x", "english", [], snap, "start")
+    check("required fields are named as such", '"Confirmation number" (empty) [required] hint' in text, text)
+    check("the model is told: nothing that continues before what it needs",
+          "Never point at a button that continues" in G.SYSTEM and "[optional]" in G.SYSTEM)
+
+    # BUG 4: "Type your Known Traveler Number" on a page already filled in, 33 s stall.
+    sc = FormScreen()
+    sc.page = "travelers"
+    sc.pages["travelers"] = [(1, "field", "Email", (300, 150, 300, 36), ""),
+                             (2, "field", "Known Traveler Number (optional)", (300, 200, 300, 36), "9 digits"),
+                             (3, "button", "Continue", (300, 300, 200, 40), "")]
+    sc.values[("travelers", 1)] = "alex@example.com"
+    check("a field the page calls optional is known as one (its label or hint says so)",
+          G._OPTIONAL.search("Known Traveler Number (optional)") and G._OPTIONAL.search("לא חובה")
+          and not G._OPTIONAL.search("Last name"))
+    m = FakeModel([field("Type your Known Traveler Number in the Known Traveler Number field.", 2),
+                   click("Your details are filled in. Click Continue at the bottom.", 3)])
+    g = new_guide(sc, m)
+    orig = sc.snapshot
+
+    def with_optional(front):
+        out = orig(front)
+        for c in out["controls"]:
+            c["optional"] = bool(G._OPTIONAL.search(c["label"]))
+        return out
+    sc.snapshot = with_optional
+    st = g.start("check in", "english", wait=True)
+    check("an optional field she never asked for is never a step: the model is asked again, "
+          "told to skip it, and the page's button is next",
+          st["say"].startswith("Your details are filled in") and len(m.requests) == 2
+          and "skip the optional field" in m.requests[1]["reason"], (st["say"], len(m.requests)))
+    g.stop()
+    m = FakeModel([field("Type your Known Traveler Number.", 2)])
+    g = new_guide(sc, m)
+    st = g.start("check in, my known traveler number is 123456789", "english", wait=True)
+    check("unless she asked for it", st["say"] == "Type your Known Traveler Number." and len(m.requests) == 1,
+          (st["say"], len(m.requests)))
+    g.stop()
+
+
 def t_page_card_buttons():
     html = (TG.ROOT / "savta" / "web" / "index.html").read_text()
     check("the card has Yes and No for a read-back, sent as do {confirm}",
@@ -784,6 +880,7 @@ def main():
              t_do_asks_then_types_what_she_says, t_do_refuses_secret_fields,
              t_confirmation_gate_intact, t_spoken_values, t_four_languages,
              t_router_field_turns, t_router_help_me_on_a_page, t_guide_is_one_request,
+             t_rehearsal_2026_10_11,
              t_page_card_buttons]
     for t in tests:
         print(f"\n-- {t.__name__}")
