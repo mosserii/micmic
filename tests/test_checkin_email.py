@@ -747,10 +747,103 @@ def t_router():
     check("a test process never reads the real screen for it", G.Guide().front_document() is None)
 
 
+def t_confirm_answers():
+    """The check-in take of 2026-10-12 (installed ac21d5d): at "Shall I press Confirm
+    seat?" MicMic's own two lines came back as her words, and her "yes" was then told "I
+    cannot press buttons inside programs yet" (Jev: do_online, inside_an_app 0.79)."""
+    import time as _t
+    from savta import router, profile as prof
+    prof.save({**prof.DEFAULT, "setup_complete": True, "step": "done", "name": "",
+               "language": "english", "city": "New York"})
+    router.due_briefing = lambda: False
+    router.get_contacts = lambda *a, **k: ["Dana Levi"]
+    mac.screen_locked = lambda: False
+    spoken = []
+    mac.say = lambda text, lang="english", **k: (spoken.append(text), mac.note_said(text))
+    launched = []
+    saved_web, saved_open = router._launch_web, mac.open_url
+    router._launch_web = lambda *a, **k: launched.append(a[1]) or {"web_run": "x"}
+    try:
+        sc = MailScreen()
+        mac.open_url = sc.open_link
+        router.GUIDE.screen, router.GUIDE.model = sc, CheckinModel(sc)
+        router.GUIDE.speaker = lambda text, lang: (spoken.append(text), mac.note_said(text))
+        router.GUIDE.tick, router.GUIDE.settle = 0.01, 0.05
+        j = BookingJev()
+        j.over = {"intent": ("do_online", 0.9), "is_complete": 0.95, "language": ("english", 0.99)}
+        router.handle(j, "check me in", speak=False)
+        until(lambda: router.GUIDE.awaiting() == "value", 10)
+        router.handle(j, "My passport number is P 0 0 4 2 8 1 1 7, and it expires March 14th, 2031", speak=False)
+        router.handle(j, "yes", speak=False)
+        until(lambda: router.GUIDE.state().get("target_label") == "Nationality", 5)
+        sc.pick("Nationality", "United States")
+        until(lambda: "restricted" in (router.GUIDE.state().get("target_label") or ""), 5)
+        sc.tick("I'm not carrying restricted items")
+        check("the guide waits for her yes on Confirm seat (autofill)",
+              until(lambda: router.GUIDE.awaiting() == "confirm" and sc.page == "seat", 8)
+              and router.GUIDE.state()["autofill"] and router.GUIDE.state()["target_label"] == "Confirm seat",
+              router.GUIDE.state())
+        # What the installed build said there, and what came back.
+        mac.note_said("Click the I'm not carrying restricted items checkbox below the passport details.")
+        mac.note_said("Everything is filled in. Shall I press Confirm seat?")
+        j.over = {**j.over, "inside_an_app": 0.79}
+        n = j.calls
+        r = router.handle(j, "i m not carrying restricted items checkbox below the passport details "
+                             "everything is filled in shall i press confirm seat", speak=False)
+        check("MicMic's own words heard back are dropped: no model, no answer, nothing started",
+              r["did"] == "ignored" and j.calls == n and not launched and not r["say"]
+              and router.GUIDE.awaiting() == "confirm" and "Confirm seat" not in sc.presses,
+              (r["did"], j.calls - n, launched, router.GUIDE.state().get("awaiting")))
+        r = router.handle(j, "yes", speak=False)
+        check("her yes is the guide's: Confirm seat pressed, never cannot_reach_app",
+              r["did"] == "guide_yes" and until(lambda: router.GUIDE.state()["status"] == "done", 3)
+              and "Confirm seat" in sc.presses and not launched, (r["did"], r.get("say"), sc.presses))
+        r = router.handle(j, "yes", speak=False)
+        check("a yes just after it finished is still the guide's: its last line, said again",
+              r["did"] == "guide_over" and r["say"] == router.GUIDE.state()["line"] and r["say"]
+              and not launched, (r["did"], r.get("say")))
+        router.GUIDE._s["ended"] = _t.time() - 600
+        for word in ("yes", "ok", "no"):
+            r = router.handle(j, word, speak=False)
+            check(f"a bare {word!r} with no guide is never a task inside a program, nor the browser agent",
+                  r["did"] not in ("cannot_reach_app", "web_working") and not launched, r["did"])
+    finally:
+        router._launch_web, mac.open_url = saved_web, saved_open
+        router.GUIDE.stop()
+
+
+def t_echo():
+    from savta import router
+    mac._SAID.clear()
+    check("nothing said: nothing is an echo", not router._echo_of_own_line(
+        "everything is filled in shall i press confirm seat"))
+    mac.note_said("Click the I'm not carrying restricted items checkbox below the passport details.")
+    mac.note_said("Everything is filled in. Shall I press Confirm seat?")
+    echo = router._echo_of_own_line
+    check("MicMic's two lines run together are an echo", echo(
+        "i m not carrying restricted items checkbox below the passport details everything is filled in "
+        "shall i press confirm seat"))
+    check("a word misheard in a long echo is still one", echo(
+        "i m not carrying restricted items chequebox below the passport details everything is filled in"))
+    check("her short answers are hers", not echo("yes press confirm seat") and not echo("yes please"))
+    check("a sentence of her own with a word MicMic never said is hers",
+          not echo("everything is filled in so press confirm seat"))
+    mac.note_said("Passport P, 0, 0, 4, 2, 8, 1, 1, 7, valid until March 14, 2031. Is that right?")
+    check("a correction of a read-back is hers", not echo("no P 0 0 4 2 8 1 1 8 valid until March 14 2031"))
+    mac.note_said("Shall I send see you at seven at the cafe to Dana?")
+    check("a message said again with one word changed is hers",
+          not echo("send see you at eight at the cafe to Dana"))
+    mac._SAID[:] = [(at - 120, t) for at, t in mac._SAID]
+    check("what MicMic said long ago is not an echo now", not echo(
+        "everything is filled in shall i press confirm seat"))
+    mac._SAID.clear()
+
+
 def main():
     tests = [t_demo_email, t_booking_read, t_her_details, t_field_map, t_decisions,
              t_autofill_says_values, t_autofill_she_types, t_autofill_never_without_her,
-             t_aisle_seat_when_asked, t_paid_choice_she_did_not_ask_for, t_four_languages, t_router]
+             t_aisle_seat_when_asked, t_paid_choice_she_did_not_ask_for, t_four_languages, t_router,
+             t_confirm_answers, t_echo]
     for t in tests:
         print(f"\n-- {t.__name__}")
         try:

@@ -7514,6 +7514,42 @@ def _bare_answer(utterance: str) -> str:
     return ""
 
 
+# How long after a guide ended a bare yes or no is still taken as its answer.
+GUIDE_ANSWER_LATE_S = 45.0
+# MicMic's own words heard back as hers (Guide 2026-10-12: she spoke over "Everything is
+# filled in. Shall I press Confirm seat?" and the turn was MicMic's two lines, run
+# together). An echo is MicMic's recent speech nearly word for word, in order, with no
+# word of her own; a correction of a read-back always brings one ("no", the new value).
+ECHO_WINDOW_S = 30.0
+ECHO_MIN_WORDS = 6
+ECHO_IN_ORDER = 0.9
+
+
+def _echo_words(text: str) -> list[str]:
+    return re.findall(r"[^\W_]+", (text or "").lower())
+
+
+def _echo_of_own_line(utterance: str) -> bool:
+    """Are her words MicMic's own recent speech, heard back by the microphone?"""
+    words = _echo_words(utterance)
+    if len(words) < ECHO_MIN_WORDS:
+        return False
+    said = mac.recently_said(ECHO_WINDOW_S)
+    if not said:
+        return False
+    spoken = _echo_words(" ".join(said))
+    if sum(1 for w in words if w not in set(spoken)) > (1 if len(words) >= 12 else 0):
+        return False
+    # Her words found in MicMic's, in the same order (longest common subsequence).
+    prev = [0] * (len(spoken) + 1)
+    for w in words:
+        cur = [0] * (len(spoken) + 1)
+        for k, x in enumerate(spoken, 1):
+            cur[k] = prev[k - 1] + 1 if w == x else max(prev[k], cur[k - 1])
+        prev = cur
+    return prev[-1] / len(words) >= ECHO_IN_ORDER
+
+
 def _guide_field_command(u: dict, utterance: str) -> str | None:
     """The guide command for her words while a field step is up, or None."""
     cmd = u.get("guide_command", "none")
@@ -8101,6 +8137,10 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             said_d = got_d.pop("said", "") or ""
             return respond("guide_gives_value", said_d, got_d.get("lang") or "english",
                            command="gives_value", local=True)
+
+    # MicMic's own voice, heard back by her microphone: dropped before any model sees it.
+    if depth == 0 and not speculative and _echo_of_own_line(utterance):
+        return respond("ignored", None, "english", why="echo of MicMic's own words")
 
     # A call has just gone out. Before anything else: is she calling it off? Without
     # this, "stop" reads as a fresh cry for help and dials the same person again.
@@ -9287,6 +9327,14 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
             and u.get("guide_command_confidence", 0.0) >= GUIDE_COMMAND_GATE):
         return _guide_command(u["guide_command"], lang, finish,
                               round(u["guide_command_confidence"], 2), utterance)
+    # A bare yes or no just after a guide finished answered its last question: what
+    # MicMic said as it ended is said again, never a new request.
+    if (depth == 0 and not GUIDE.active() and PENDING is None and AWAITING is None
+            and _bare_answer(utterance)):
+        ended = GUIDE.just_ended(GUIDE_ANSWER_LATE_S)
+        if ended and ended["line"]:
+            return finish("guide_over", ended["line"],
+                          detail={"guide": ended["status"], "bare": _bare_answer(utterance)})
 
     # --- a change to what MicMic just did -----------------------------------
     # Before "I only caught part of that": "at 7 instead" is short by nature, and
@@ -10143,6 +10191,9 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
     # number around, and no second signal is needed to tell the two apart any more.
     if ((u.get("inside_an_app", 0) > 0.7 or drive_named)
             and u["control_action"] not in _CAN_DO
+            # A bare "yes" is an answer, never a task inside a program (the check-in take
+            # of 2026-10-12: inside_an_app 0.79 on "yes").
+            and not _bare_answer(utterance)
             # Signing in on a site, a place near her: browser tasks (live at 33ecc3c the
             # bank sentence scored 0.85 here and was told buttons cannot be pressed).
             and not ((login_web or near_me) and intent == "do_online")

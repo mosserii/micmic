@@ -686,6 +686,24 @@ _GENDER_MARK = __import__("re").compile(r"«([^«»|]*)\|([^«»|]*)»")
 # through twenty seconds of speech before the machine would listen again.
 _SPEAKING: dict = {}
 _SPEECH_LOCK = threading.Lock()
+# The last few lines MicMic said, whole, with when: her microphone can hear MicMic itself
+# (the check-in take of 2026-10-12 sent "...everything is filled in, shall I press Confirm
+# seat" back as her words), and router._echo_of_own_line drops such a turn.
+_SAID: list = []
+
+
+def note_said(text: str) -> None:
+    """Remember a line MicMic is saying (say() does this for every line)."""
+    with _SPEECH_LOCK:
+        _SAID.append((time.time(), str(text or "")))
+        del _SAID[:-8]
+
+
+def recently_said(within: float = 60.0) -> list[str]:
+    """The lines MicMic said in the last `within` seconds, oldest first."""
+    now = time.time()
+    with _SPEECH_LOCK:
+        return [t for at, t in _SAID if now - at <= within]
 
 
 def speaking() -> bool:
@@ -748,6 +766,7 @@ def say(text: str, language: str = "english", tag: str | None = None,
     # other is worse than either of them, and it happens whenever an answer arrives
     # while a previous one is still being read out.
     stop_speaking()
+    note_said(text)
     with _SPEECH_LOCK:
         _SPEAKING["at"] = time.time()
         _SPEAKING["text"] = text[:120]

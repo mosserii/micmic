@@ -1225,6 +1225,17 @@ class Guide:
         with self._lock:
             return bool(self._s and self._s["status"] not in ENDED)
 
+    def just_ended(self, within: float) -> dict | None:
+        """The guide that ended in the last `within` seconds, {"status", "line"},
+        else None. A bare "yes" that lands just after it finished is still the guide's
+        (router): the check-in take of 2026-10-12 had Confirm seat pressed and her "yes"
+        then told "I cannot press buttons inside programs yet"."""
+        with self._lock:
+            s = self._s
+            if not s or s["status"] not in ENDED or time.time() - s.get("ended", 0.0) > within:
+                return None
+            return {"status": s["status"], "line": s.get("line") or ""}
+
     def context(self) -> dict | None:
         """For understand(): what a short "next" or "why" is about."""
         with self._lock:
