@@ -63,7 +63,23 @@ PLAN = {
         ("button", "Find my trip", 0, "click", "Click Find my trip, under the two boxes.", "", "", "")],
     "#/check-in/trip": [
         ("checkbox", "Check in Alex Rivera", 0, "click", "Tick the box next to Alex Rivera to check in.", "", "", ""),
-        ("button", "Check in selected traveler", 0, "click", "Click Check in selected traveler at the bottom.", "", "", "")],
+        ("button", "Check in selected traveler", 0, "click", "Click Check in selected traveler at the bottom.", "", "", ""),
+        # the short flow (the site's default since 2026-10-11): one "Check in" button
+        ("button", "Check in", 0, "click", "Click Check in, under Alex Rivera.", "", "", "")],
+    # The short flow: Trip, Passport and safety, Seat, Boarding pass.
+    "#/check-in/passport": [
+        ("field", "Passport number", 0, "secret",
+         "Enter your passport number exactly as printed on the photo page.", "your passport number", "", ""),
+        ("field", "Expiration date", 0, "type", "Type the date your passport expires, as month, day and year.",
+         "your passport expiry date", "When does your passport expire?", ""),
+        ("menu", "Nationality", 0, "choose", "Pick your nationality from the list.", "your nationality",
+         "What's your nationality?", ""),
+        ("checkbox", "I'm not carrying restricted items", 0, "click",
+         "Read the list, then tick the box to say you're not carrying any of these.", "", "", ""),
+        ("button", "Continue", 0, "click", "Click Continue at the bottom.", "", "", "")],
+    "#/check-in/seat": [
+        ("button", "Seat 14C*", 0, "click", "Choose seat 14C, the free aisle seat, on the map.", "", "", ""),
+        ("button", "Confirm seat", 0, "click", "Click Confirm seat to finish checking in.", "", "", "")],
     "#/check-in/travelers": [
         ("button", "Continue", 0, "click", "Your details are already filled in. Click Continue at the bottom.", "", "", "")],
     "#/check-in/documents": [
@@ -144,6 +160,8 @@ class LarklineModel:
         if "boarding-pass" in route:
             return {"done": True, "finish": "That's done: you're checked in, and your boarding pass is on screen.",
                     "say": "", "target": None, "kind": "click", "goal": "Check in for the Lisbon flight"}
+        goal = re.search(r"^Goal: (.*)$", prompt, re.M)
+        aisle = bool(goal and re.search(r"aisle", goal.group(1), re.I))
         if route in ("#", "#/", ""):           # the home page: open the Check in tab first
             plan = [("tab", "Check in", 0, "click", "Click the Check in tab, above the search form.",
                      "", "", "")] + PLAN["#/check-in"]
@@ -153,9 +171,17 @@ class LarklineModel:
             return {"done": False, "say": "Wait a moment for the page to load.", "target": None,
                     "kind": "wait", "goal": "Check in for the Lisbon flight"}
         controls = parse_controls(prompt)
+        if route == "#/check-in/seat" and aisle and not any(
+                c["label"].startswith("Seat 14C") for c in controls):
+            # Below the window: Gemini would say to scroll to it (the rail stays in view).
+            return {"done": False, "say": "Scroll down to find seat 14C, the free aisle seat.",
+                    "target": None, "kind": "look", "goal": "Check in for the Lisbon flight"}
         todo = []
         for i, item in enumerate(plan):
             role, label, nth, kind = item[:4]
+            if label == "Seat 14C*" and (not aisle or any(
+                    c["label"].startswith("Seat 14C") and "selected" in c["label"] for c in controls)):
+                continue                      # the free aisle seat only when she asked for it
             ctl = self._find(controls, role, label, nth)
             if ctl is not None and self._filled(ctl, controls, role, item):
                 continue
@@ -191,7 +217,8 @@ class LarklineModel:
         return {"done": False, "say": say, "target": ctl["id"], "kind": kind,
                 "why": "The airline needs it to check you in.", "goal": "Check in for the Lisbon flight",
                 "finish": "", "field": field, "ask": ask, "value": self._said(req, item),
-                "profile": profile, "then": then}
+                "profile": profile, "then": then,
+                "commits": label in ("Check in now", "Confirm seat")}
 
     @staticmethod
     def _said(req, item) -> str:
@@ -204,8 +231,9 @@ class LarklineModel:
 
     @staticmethod
     def _find(controls, role, label, nth):
-        same = [c for c in controls if c["role"] == role
+        same = [c for c in controls if (c["role"] == role or (label.endswith("*") and c["role"] == "checkbox"))
                 and (c["label"] == label or (label.endswith(".") and c["label"].startswith(label))
+                     or (label.endswith("*") and c["label"].startswith(label[:-1]))
                      or (role in ("option", "checkbox") and c["label"].startswith(label)))]
         return same[nth] if len(same) > nth else None
 
@@ -225,7 +253,8 @@ class LarklineModel:
 
 # ---------------------------------------------------------------- the person
 VALUES = [(r"confirmation", "K7QM2P"), (r"last name", "Rivera"), (r"passport number", "P00428117"),
-          (r"street|hotel", "Rua das Flores 28"), (r"^city$", "Lisbon"), (r"postal", "1200 195")]
+          (r"street|hotel", "Rua das Flores 28"), (r"^city$", "Lisbon"), (r"postal", "1200 195"),
+          (r"^expiration date$", "03/14/2031")]
 DATES = {"exp": ("03", "14", "2031"), "dob": ("07", "22", "1990")}
 
 
@@ -266,7 +295,7 @@ class Person:
                     self.router_say("yes")
                 return self.note(f"she asked MicMic to type {label!r}")
             self.router_say("do it for me")
-            if re.search(r"check in now|pay", label, re.I):
+            if re.search(r"check in now|confirm seat|pay", label, re.I):
                 self.pressed_final = True
             return self.note(f"she asked MicMic to press {label!r}")
         if kind in ("type", "secret"):
@@ -299,7 +328,7 @@ class Person:
             return self.note(f"she presses {label!r} herself")
         r = self.g.do_it(speak=False)
         self.note(f"Do it for me refused {label!r}: {r.get('said')!r}")
-        if re.search(r"check in now|pay", label, re.I):
+        if re.search(r"check in now|confirm seat|pay", label, re.I):
             self.pressed_final = True
         self.sc.press(snap, tid)
         self.note(f"she presses {label!r} herself")

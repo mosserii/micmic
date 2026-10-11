@@ -49,6 +49,7 @@ sys.path.insert(0, str(ROOT))
 from playwright.sync_api import sync_playwright  # noqa: E402
 
 from savta.actions.web import FORBIDDEN_FIELD  # noqa: E402
+from savta.actions.guide import _private_field  # noqa: E402
 
 # The demo site lives outside this repo; LARKLINE_DIR points at another copy.
 DEMO_DIR = Path(os.environ.get("LARKLINE_DIR")
@@ -172,6 +173,7 @@ _PROBE_JS = """(selector) => {
     out.structH1 = h1 ? h1.textContent.trim() : '';
     const a = document.activeElement;
     out.focusKey = a ? [a.tagName, a.id || '', (a.textContent || '').trim().slice(0, 40)].join('|') : '';
+    out.scrollY = window.scrollY;
     if (selector) {
         const el = document.querySelector(selector);
         if (el) {
@@ -191,6 +193,24 @@ _PROBE_JS = """(selector) => {
         }
     }
     return out;
+}"""
+
+# read_document(): the visible words in reading order and every link with its address.
+_DOC_JS = """() => {
+    const texts = [];
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let n;
+    while ((n = walker.nextNode())) {
+        const t = n.textContent.replace(/\\s+/g, ' ').trim();
+        const el = n.parentElement;
+        if (!t || !el || el.closest('script,style,[hidden]')) continue;
+        const cs = getComputedStyle(el);
+        if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+        texts.push(t);
+    }
+    const links = Array.from(document.querySelectorAll('a[href]')).map(
+        a => [(a.getAttribute('aria-label') || a.textContent || '').replace(/\\s+/g, ' ').trim(), a.href]);
+    return {text: texts.join(' | ').slice(0, 6000), links};
 }"""
 
 _CLEAR_TAGS_JS = (
@@ -290,8 +310,31 @@ class LarklineScreen:
     def press(self, snap: dict, target_id) -> tuple[bool, str]:
         return self._run(lambda: self._press_impl(snap, target_id))
 
-    def fill(self, snap: dict, target_id, value: str) -> tuple[bool, str]:
-        return self._run(lambda: self._fill_impl(snap, target_id, value))
+    def fill(self, snap: dict, target_id, value: str, private: bool = False) -> tuple[bool, str]:
+        return self._run(lambda: self._fill_impl(snap, target_id, value, private))
+
+    def page_url(self, front: dict) -> str:
+        return self._run(lambda: self._page.url)
+
+    def scroll(self, snap: dict, dy: int = 450) -> bool:
+        """MicMic scrolls her page (guide autofill's look step), like LiveScreen.scroll."""
+        self.user_scroll(dy)
+        return True
+
+    def read_document(self, front: dict) -> dict:
+        """The page's words and its links, like LiveScreen.read_document reads a window:
+        {"text", "links": [(label, url)], "error"}."""
+        def _do():
+            got = self._page.evaluate(_DOC_JS)
+            return {"text": got["text"], "links": [tuple(x) for x in got["links"]], "error": None}
+        return self._run(_do)
+
+    def open(self, url: str):
+        """A link opened in her browser (mac.open_url in the app): this page goes there."""
+        def _do():
+            self._page.goto(url, wait_until="load")
+            return True
+        return self._run(_do)
 
     def find(self, front: dict, role: str, label: str):
         def _do():
@@ -365,7 +408,8 @@ class LarklineScreen:
                 seen_ids.add(p.get("nodeId"))
                 prole = (p.get("role") or {}).get("value", "")
                 pname = ((p.get("name") or {}).get("value", "") or "").strip()
-                if prole in ("group", "radiogroup") and pname and len(pname) <= 80:
+                # a named section (a region) is an AXGroup to macOS too
+                if prole in ("group", "radiogroup", "region") and pname and len(pname) <= 80:
                     return pname
                 p = by_id.get(p.get("parentId"))
             return ""
@@ -424,6 +468,9 @@ class LarklineScreen:
                 or bool(FORBIDDEN_FIELD.search(label)) \
                 or bool(FORBIDDEN_FIELD.search(hint)) \
                 or bool(FORBIDDEN_FIELD.search(raw_value))
+            if pick and secure and _private_field(info.get("type", "") != "password", label, hint,
+                                                  group_of(node)):
+                secure = False                # as LiveScreen: a country list is no secret
             if pick:
                 value = "" if secure else (info.get("selectedText") or "")
             elif typed:
@@ -443,11 +490,14 @@ class LarklineScreen:
                 continue
 
             nid += 1
+            group = (lambda g: g if g != label else "")(group_of(node))
             out["controls"].append({
                 "id": nid, "role": role_word, "ax_role": role, "label": label[:90],
                 "value": value[:40] if isinstance(value, str) else value,
-                "hint": hint, "group": (lambda g: g if g != label else "")(group_of(node)),
+                "hint": hint, "group": group,
                 "checked": checked, "frame": vis, "secure": secure,
+                "private": _private_field(secure and info.get("type", "") != "password",
+                                          label, hint, group),
                 "typed": typed, "pick": pick})
             out["refs"][nid] = f'[data-mm-ref="{attempt}"]'
             # What probe() will read in this field (its length only for a secret one):
@@ -477,6 +527,8 @@ class LarklineScreen:
              "focus_key": info.get("focusKey"),
              "win": (0, 0, self._width, self._height)}
         if target_id is None:
+            # Where the page's first control is, as LiveScreen reads it: she scrolled.
+            p["anchor"] = round(-info.get("scrollY", 0))
             return p
         if not info["found"]:
             p["alive"] = False
@@ -516,12 +568,12 @@ class LarklineScreen:
             return False, repr(e)[:100]
         return True, "ok"
 
-    def _fill_impl(self, snap: dict, target_id, value: str) -> tuple[bool, str]:
+    def _fill_impl(self, snap: dict, target_id, value: str, private: bool = False) -> tuple[bool, str]:
         ctl = next((c for c in snap.get("controls") or [] if c["id"] == target_id), None)
         selector = (snap.get("refs") or {}).get(target_id)
         if ctl is None or not selector:
             return False, "stale"
-        if ctl.get("secure") or not ctl.get("typed"):
+        if (ctl.get("secure") and not (private and ctl.get("private"))) or not ctl.get("typed"):
             return False, "refused"
         value = re.sub(r"[\r\n]+", " ", str(value or "")).strip()
         loc = self._page.locator(selector)
@@ -593,7 +645,9 @@ def main() -> int:
     screen = LarklineScreen(base_url, height=2200)
     try:
         # ---- home / check-in form -------------------------------------------
-        screen.goto("/?reset=1")
+        # The full 8-step flow (?flow=full): the site's default became the 4-step one
+        # on 2026-10-11, and this self-test walks the trip, travelers and documents steps.
+        screen.goto("/?reset=1&flow=full")
         screen.goto("/#/check-in")
         front = screen.front()
         check("front() names Chrome", front is not None and front["app"] == "Google Chrome",

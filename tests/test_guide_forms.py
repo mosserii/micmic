@@ -654,20 +654,26 @@ def t_router_help_me_on_a_page():
             def page_url(self, front):
                 return "chrome://newtab/"
         router.GUIDE.screen = NewTab()
-        r = router.handle(j, "help me check in for my flight to Lisbon", speak=False)
+        r = router.handle(j, "help me renew my library books", speak=False)
         check("a new tab is not a page: the web task goes on as before, and the trace says why",
               r["did"] == "web_working" and launched
               and (r.get("detail") or {}).get("front_page", {}).get("why") == "blank page",
               (r["did"], r.get("detail")))
+        n = len(launched)
+        r = router.handle(j, "help me check in for my flight to Lisbon", speak=False)
+        check("a check-in with nothing to check in from says what to open (1.2.6), never the browser "
+              "agent, which went to a real airline", r["did"] == "checkin_no_email" and len(launched) == n
+              and r["detail"]["front"]["page"]["why"] == "blank page", (r["did"], r.get("detail")))
         router.GUIDE.screen = sc
         sc.page = "checkin"
-        n = len(launched)
         r = router.handle(j, "check me in for my flight to Lisbon", speak=False)
-        check("without 'help me', a web task is the browser's as before",
-              r["did"] == "web_working" and len(launched) == n + 1, r["did"])
+        check("without 'help me', on the airline's page MicMic fills in what it can (1.2.6)",
+              r["did"] == "checkin_started" and router.GUIDE.state().get("autofill")
+              and len(launched) == n, r["did"])
+        router.GUIDE.stop()
         sc.browser = False
-        r = router.handle(j, "help me check in for my flight", speak=False)
-        check("and with no browser in front (Notes) it is the browser's too, with the reason kept",
+        r = router.handle(j, "help me renew my library books", speak=False)
+        check("and with no browser in front (Notes) a web task is the browser's, with the reason kept",
               r["did"] == "web_working"
               and (r.get("detail") or {}).get("front_page", {}).get("why") == "not a browser",
               (r["did"], r.get("detail")))

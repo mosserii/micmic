@@ -180,7 +180,7 @@ class Person:
                 if self.g.awaiting() == "confirm":
                     self.say("yes")
                 return self.note(f"she asked MicMic to type {label!r}")
-            if re.search(r"check in now|pay", label, re.I):
+            if re.search(r"check in now|confirm seat|pay", label, re.I):
                 self.pressed_final = True
             self.say("do it for me")
             return self.note(f"she asked MicMic to press {label!r}")
@@ -209,7 +209,7 @@ class Person:
                 if o:
                     click(*center(o["frame"]))
                     return self.note(f"she picks {other!r} (not the ringed option)")
-        if re.search(r"check in now|pay", label, re.I):
+        if re.search(r"check in now|confirm seat|pay", label, re.I):
             self.pressed_final = True
             r = self.g.do_it(speak=False)
             self.note(f"Do it for me on {label!r}: {r.get('said')!r}")

@@ -24,6 +24,7 @@ from .actions import facts
 from .actions import live
 from .actions import web
 from .actions.guide import GUIDE
+from .actions import booking
 from .llm import LLM, claims_action, plain_reply, _spoken_with
 from . import profile as prof
 from . import paths
@@ -7343,6 +7344,117 @@ def _start_guide(utterance: str, u: dict, lang: str, speak: bool, finish) -> dic
                           **_guide_fix(st)})
 
 
+# "Check me in" with the airline's check-in email in front (1.2.6). The booking is read
+# off the email itself (actions/booking.py: code cuts the window's words into candidate
+# spans, ONE Jev request picks which is the code and which the passenger), the email's
+# own Check in link is opened in her browser, and the guide fills in there what it
+# knows, asks her once for her passport details, and asks before the button that
+# finishes it. Never the browser agent: it went to a REAL airline in a Chrome of its
+# own and stopped at its sign-in (the Larkline rehearsal, 2026-10-08).
+_CHECKIN_SAY = {
+    "found": {"hebrew": "מצאתי את ההזמנה, קוד {code}, על שם {name}. פותחת את דף הצ'ק-אין וממלאת את מה שאני יודעת.",
+              "arabic": "لقيت الحجز، الرمز {code}، باسم {name}. عم افتح صفحة تسجيل الوصول وعبّي اللي بعرفه.",
+              "russian": "Нашла бронирование, код {code}, на имя {name}. Открываю страницу регистрации и заполняю то, что знаю.",
+              "english": "Found it: booking {code}, for {name}. I'm opening the check-in page and filling in what I know."},
+    "found_no_name": {"hebrew": "מצאתי את ההזמנה, קוד {code}. פותחת את דף הצ'ק-אין וממלאת את מה שאני יודעת.",
+                      "arabic": "لقيت الحجز، الرمز {code}. عم افتح صفحة تسجيل الوصول وعبّي اللي بعرفه.",
+                      "russian": "Нашла бронирование, код {code}. Открываю страницу регистрации и заполняю то, что знаю.",
+                      "english": "Found it: booking {code}. I'm opening the check-in page and filling in what I know."},
+    "found_here": {"hebrew": "מצאתי את ההזמנה, קוד {code}. ממלאת את מה שאני יודעת בדף הזה.",
+                   "arabic": "لقيت الحجز، الرمز {code}. عم عبّي اللي بعرفه بهالصفحة.",
+                   "russian": "Нашла бронирование, код {code}. Заполняю на этой странице то, что знаю.",
+                   "english": "Found it: booking {code}. I'm filling in what I know on this page."},
+    "no_link": {"hebrew": "מצאתי את ההזמנה, קוד {code}, אבל אין במייל הזה קישור לצ'ק-אין. אפשר לפתוח את דף הצ'ק-אין של חברת התעופה ולבקש שוב.",
+                "arabic": "لقيت الحجز، الرمز {code}، بس ما في رابط لتسجيل الوصول بهالإيميل. افتح«ي|» صفحة تسجيل الوصول لشركة الطيران واطلب«ي|» مرة تانية.",
+                "russian": "Нашла бронирование, код {code}, но в этом письме нет ссылки на регистрацию. Откройте страницу регистрации авиакомпании и попросите ещё раз.",
+                "english": "I found booking {code}, but this email has no check-in link. Open the airline's check-in page and ask me again."},
+    "on_page": {"hebrew": "בסדר, אמלא בדף הזה את מה שאפשר, ואשאל אותך על השאר.",
+                "arabic": "ماشي، رح عبّي بهالصفحة اللي بقدر عليه، واسألك«ي|» عن الباقي.",
+                "russian": "Хорошо, заполню на этой странице всё, что смогу, а остальное спрошу у вас.",
+                "english": "Okay, I'll fill in what I can on this page, and ask you for the rest."},
+    "no_email": {"hebrew": "אפשר לפתוח את המייל של הצ'ק-אין מחברת התעופה, או את דף הצ'ק-אין שלה, ולבקש שוב.",
+                 "arabic": "افتح«ي|» إيميل تسجيل الوصول من شركة الطيران، أو صفحة تسجيل الوصول، واطلب«ي|» مرة تانية.",
+                 "russian": "Откройте письмо авиакомпании о регистрации или её страницу регистрации и попросите ещё раз.",
+                 "english": "Open the airline's check-in email, or its check-in page, and ask me again."},
+}
+# How long a line takes to say, so nothing is typed over the code being read back.
+_SAY_CHARS_PER_S = 15.0
+
+
+def _checkin_line(key: str, lang: str, **fmt) -> str:
+    t = _CHECKIN_SAY[key]
+    return t.get(lang, t["english"]).format(**fmt)
+
+
+def _read_front_soon(utterance: str):
+    """For "check me in": the window in front is read (Accessibility, up to 2 s) while
+    Jev reads her words, not after. None for any other request."""
+    if GUIDE.active() or not booking.CHECK_ME_IN.search(utterance or ""):
+        return None
+    box: dict = {}
+
+    def read():
+        try:
+            box["doc"] = GUIDE.front_document()
+        except Exception as e:  # noqa: BLE001
+            box["doc"], box["error"] = None, type(e).__name__
+    box["thread"] = threading.Thread(target=read, daemon=True, name="micmic-checkin-read")
+    box["thread"].start()
+    return box
+
+
+def _check_me_in(j, utterance: str, u: dict, lang: str, speak: bool, finish, box) -> dict:
+    gender = prof.load().get("gender", "")
+    if mac.screen_locked():
+        return finish("screen_locked", _ss("empty", lang), detail={"why": "the Mac is locked"})
+    box["thread"].join(4.0)
+    doc = box.get("doc")
+    helped = bool(_HELP_ME.search(utterance) or _GUIDE_ME.search(utterance))
+    front = {"app": (doc or {}).get("app", ""), "read": bool(doc),
+             "checkin_text": bool(doc and booking.looks_like_checkin(doc.get("text", "")))}
+    if front["checkin_text"]:
+        b = booking.extract(j, doc["text"])
+        known = booking.known(b)
+        code = b.get("confirmation_code", "")
+        front["booking"] = {k: b.get(k, "") for k in ("confirmation_code", "passenger_name",
+                                                       "flight_number", "flight_date")}
+        front["confidence"] = b.get("confidence", {})
+        if code:
+            from .actions.guide import _spell
+            spelled = _spell(code)
+            name = f"{b.get('first_name', '')} {b.get('last_name', '')}".strip()
+            goal = (f"Check in for {('flight ' + b['flight_number']) if b.get('flight_number') else 'the flight'} "
+                    f"on booking {code}{(' for ' + name) if name else ''}. She said: {utterance}")
+            link = booking.checkin_link(doc.get("links") or [])
+            here = doc.get("browser") and (not link or doc.get("url") == link)
+            if link and not here:
+                line = _checkin_line("found" if name else "found_no_name", lang, code=spelled, name=name)
+                mac.open_url(link)
+                st = GUIDE.start(goal, lang, speak=speak, gender=gender, known=known, autofill=True,
+                                 expect=link, leave=doc.get("url", ""),
+                                 hold=min(8.0, len(line) / _SAY_CHARS_PER_S))
+                return finish("checkin_started", line, guide=st,
+                              detail={"front": front, "link": link, "opened": True})
+            if here:
+                line = _checkin_line("found_here", lang, code=spelled)
+                st = GUIDE.start(goal, lang, speak=speak, gender=gender, known=known, autofill=True,
+                                 hold=min(8.0, len(line) / _SAY_CHARS_PER_S))
+                return finish("checkin_started", line, guide=st, detail={"front": front, "opened": False})
+            return finish("checkin_no_link", _checkin_line("no_link", lang, code=spelled),
+                          detail={"front": front})
+    page = GUIDE.page_in_front()
+    front["page"] = page
+    if page["page"]:
+        if helped:
+            return _start_guide(utterance, u, lang, speak, finish)     # "help me": she does it
+        line = _checkin_line("on_page", lang)
+        st = GUIDE.start(utterance, lang, speak=speak, gender=gender, autofill=True,
+                         hold=min(8.0, len(line) / _SAY_CHARS_PER_S))
+        return finish("checkin_started", line, guide=st, detail={"front": front, "opened": False})
+    return finish("checkin_no_email", _checkin_line("no_email", lang), asked_back=False,
+                  detail={"front": front, "why": "no check-in email or page in front"})
+
+
 def _guide_command(cmd: str, lang: str, finish, conf: float, utterance: str = "") -> dict:
     if cmd == "stop":
         st = GUIDE.stop()
@@ -7980,6 +8092,16 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
                 return respond(out_e["did"], out_e["say"], lang_e,
                                **{**out_e["detail"], "early": True})
 
+    # Her passport details, said for the form MicMic is filling in ("check me in"):
+    # read back by the guide itself and typed only on her yes. Her words go to no model,
+    # Jev included.
+    if depth == 0 and not speculative and GUIDE.active():
+        got_d = GUIDE.take_details(utterance, speak=False)
+        if got_d is not None:
+            said_d = got_d.pop("said", "") or ""
+            return respond("guide_gives_value", said_d, got_d.get("lang") or "english",
+                           command="gives_value", local=True)
+
     # A call has just gone out. Before anything else: is she calling it off? Without
     # this, "stop" reads as a fresh cry for help and dials the same person again.
     if LAST_EMERGENCY and time.time() - LAST_EMERGENCY["at"] < EMERGENCY_UNDO:
@@ -8614,6 +8736,9 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
     # The same for the guide's own Gemini connection when her words start or move one.
     if depth == 0 and not speculative and (GUIDE.active() or _GUIDE_ME.search(utterance)):
         GUIDE.warm()
+    checkin_read = _read_front_soon(utterance) if depth == 0 and not speculative else None
+    if checkin_read is not None:
+        GUIDE.warm()
     u = understand(j, utterance, contacts,
                    recent or json.dumps(MEM.snapshot(), ensure_ascii=False),
                    playing=now_playing, likes=longterm.summary(),
@@ -9141,6 +9266,10 @@ def _handle(j: Jev, utterance: str, recent: str = "", speak: bool = True,
         if _types_password(utterance):
             return finish("refused", _NO_PASSWORD.get(lang, _NO_PASSWORD["english"]),
                           detail={"refused": "password", "intent": u["intent"]})
+
+    # --- "check me in", with the airline's email or check-in page in front ----
+    if checkin_read is not None and not GUIDE.active():
+        return _check_me_in(j, utterance, u, lang, speak, finish, checkin_read)
 
     # --- a step-by-step guide is running ------------------------------------
     # "next", "why", "go back", "stop" are about the step on screen. Asked in the same

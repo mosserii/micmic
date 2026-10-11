@@ -79,6 +79,11 @@ NUDGE_AFTER = 20.0
 MAX_SAID = 8
 # Steps planned ahead on one page by one call, given without another.
 MAX_QUEUE = 5
+# "Check me in": how long the check-in page may take to come up in her browser after
+# MicMic opened the link, and how often one step is tried by MicMic before it is hers.
+PAGE_WAIT = 12.0
+AUTO_TRIES = 2
+AUTO_SCROLLS = 6
 
 KINDS = ("click", "type", "choose", "secret", "look", "wait")
 # Steps that fill something in: typed into, picked from a list, or typed by her alone.
@@ -115,13 +120,39 @@ CREDENTIAL = re.compile(
 FINISHING = re.compile(
     r"check.?in now|complete (?:your |the )?check.?in|continue to payment|\bpay and\b|"
     r"\bsubmit\b|\bsend\b|\bi confirm\b|\bi understand\b|\bi agree\b|\bi accept\b|"
+    r"\bi(?:'m| am) not carrying\b|\bi declare\b|\bi certify\b|\bi attest\b|"
     r"אני מאשר|אני מאשרת|אני מסכים|אני מסכימה|שליחה|לשלוח|"
     r"أؤكد|أوافق|إرسال|подтверждаю|согласен|согласна|отправить", re.I)
+
+# A button whose own words finish something: "Confirm seat" checked her in on Larkline's
+# short flow, and the model did not say so (live run, 2026-10-11). Asked first, or hers.
+_COMMIT = re.compile(
+    r"\b(?:confirm|complete|finish|finali[sz]e|submit|place (?:the |my |your )?order|book now|"
+    r"purchase)\b|אישור|לאשר|סיום|לסיים|تأكيد|أكّ?د|إنهاء|подтверд|заверш", re.I)
 
 # The part of web.FORBIDDEN_FIELD that is an identity number rather than a secret.
 _ID_NUMBER = re.compile(
     r"passport|national.?id|tax.?id|\bssn\b|social.?security|iban|account.?num|routing|"
     r"teudat|תעודת.?זהות|דרכון|رقم.?الهوية|جواز.?السفر|паспорт|снилс", re.I)
+
+
+# The identity numbers a check-in asks for. Bank numbers (IBAN, account) are not here.
+_TRAVEL_ID = re.compile(r"passport|national.?id|דרכון|תעודת.?זהות|جواز.?السفر|رقم.?الهوية|паспорт",
+                        re.I)
+
+
+def _private_field(withheld: bool, label: str, hint: str, group: str) -> bool:
+    """A field withheld from the model only because it asks for a passport's details
+    (its number, or its expiry date in a set named for the passport): MicMic may type
+    HER words into it, after reading them back, while it fills in what it knows (Guide
+    autofill). A password, a card, a PIN or a one-time code, or a field on a sign-in or
+    payment form, never."""
+    both = f"{label} {hint}"
+    rest = _EXPIRY.sub(" ", _ID_NUMBER.sub(" ", both))
+    return bool(withheld and _TRAVEL_ID.search(f"{both} {group}")
+                and not FORBIDDEN_FIELD.search(rest)
+                and not CREDENTIAL.search(f"{both} {group}"))
+
 
 # A field the page itself calls optional ("Known Traveler Number (optional)"): never a
 # step of its own unless she asked for it (the rehearsal stalled 33 s on one).
@@ -225,6 +256,57 @@ SAY = {
                      "arabic": "خذ«ي|» وقتك. لما تكون«ي|» جاهز«ة|»، اختار«ي|» من القائمة اللي علّمتها.",
                      "russian": "Не торопитесь. Когда будете готовы, выберите это в списке, который я обвела.",
                      "english": "Take your time. When you're ready, pick it from the list I circled."},
+    # Filling in what MicMic knows ("check me in" from her booking email): it asks once
+    # for what only she knows, and asks before the button that finishes it.
+    "need_values": {"hebrew": "כדי לסיים אני צריכה {what}. אפשר להגיד לי או להקליד.",
+                    "arabic": "لكمّل بحتاج {what}. فيك«ي|» تحكيلي أو تكتب«ي|».",
+                    "russian": "Чтобы закончить, мне нужно знать {what}. Можно сказать или ввести самим.",
+                    "english": "To finish, I need {what}. You can tell me, or type them in."},
+    "need_value": {"hebrew": "כדי לסיים אני צריכה את {what}. אפשר להגיד לי או להקליד.",
+                   "arabic": "لكمّل بحتاج {what}. فيك«ي|» تحكيلي أو تكتب«ي|».",
+                   "russian": "Чтобы закончить, мне нужно знать {what}. Можно сказать или ввести самим.",
+                   "english": "To finish, I need {what}. You can tell me, or type it in."},
+    "and": {"hebrew": " ו", "arabic": " و", "russian": " и ", "english": " and "},
+    "v_passport_number": {"hebrew": "מספר הדרכון", "arabic": "رقم جواز السفر",
+                          "russian": "номер паспорта", "english": "your passport number"},
+    "v_passport_expiry": {"hebrew": "תאריך התפוגה שלו", "arabic": "تاريخ انتهائه",
+                          "russian": "срок его действия", "english": "the date it expires"},
+    "v_date_of_birth": {"hebrew": "תאריך הלידה", "arabic": "تاريخ ميلادك«ي|»",
+                        "russian": "дату рождения", "english": "your date of birth"},
+    "rb_passport_number": {"hebrew": "דרכון {v}", "arabic": "جواز السفر {v}",
+                           "russian": "паспорт {v}", "english": "passport {v}"},
+    "rb_passport_expiry": {"hebrew": "בתוקף עד {v}", "arabic": "صالح لـ {v}",
+                           "russian": "действителен до {v}", "english": "valid until {v}"},
+    "rb_date_of_birth": {"hebrew": "תאריך לידה {v}", "arabic": "تاريخ الميلاد {v}",
+                         "russian": "дата рождения {v}", "english": "born {v}"},
+    "confirm_values": {"hebrew": "{v}. נכון?", "arabic": "{v}. صح؟", "russian": "{v}. Верно?",
+                       "english": "{v}. Is that right?"},
+    "filling": {"hebrew": "תודה, ממלאת.", "arabic": "شكراً، عم عبّيهم.",
+                "russian": "Спасибо, заполняю.", "english": "Thanks, filling them in."},
+    "confirm_final": {"hebrew": "הכול מולא. ללחוץ על {b}?",
+                      "arabic": "كل شي معبّى. بدّك«ي|» أكبس {b}؟",
+                      "russian": "Всё заполнено. Нажать «{b}»?",
+                      "english": "Everything is filled in. Shall I press {b}?"},
+    "pressed_final": {"hebrew": "לחצתי.", "arabic": "كبستها.", "russian": "Нажала.",
+                      "english": "Pressed it."},
+    "left_final": {"hebrew": "בסדר, את זה אשאיר לך.", "arabic": "ماشي، هاي بتركها إلك«ي|».",
+                   "russian": "Хорошо, это оставлю вам.", "english": "Okay, I'll leave that one to you."},
+    "no_page": {"hebrew": "פתחתי את דף הצ'ק-אין בדפדפן, אבל אני עוד לא רואה אותו. כשהוא פתוח, אפשר לבקש שוב.",
+                "arabic": "فتحت صفحة تسجيل الوصول بالمتصفح، بس لسا ما بشوفها. لما تنفتح، اطلب«ي|» مرة تانية.",
+                "russian": "Я открыла страницу регистрации в браузере, но пока её не вижу. Когда она откроется, попросите ещё раз.",
+                "english": "I opened the check-in page in your browser, but I can't see it yet. Once it's open, ask me again."},
+}
+
+# Month names for reading a date back, in her four languages (genitive in Russian).
+_MONTH_NAMES = {
+    "english": ("January", "February", "March", "April", "May", "June", "July", "August",
+                "September", "October", "November", "December"),
+    "hebrew": ("בינואר", "בפברואר", "במרץ", "באפריל", "במאי", "ביוני", "ביולי", "באוגוסט",
+               "בספטמבר", "באוקטובר", "בנובמבר", "בדצמבר"),
+    "arabic": ("يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس",
+               "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"),
+    "russian": ("января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа",
+                "сентября", "октября", "ноября", "декабря"),
 }
 
 
@@ -444,6 +526,12 @@ class LiveScreen:
                 forbidden = secure or screen._forbidden(role, sub, label, value) \
                     or bool(FORBIDDEN_FIELD.search(hint)) \
                     or (role in TYPED and bool(CREDENTIAL.search(group)))
+                private = _private_field(forbidden and not secure, label, hint, group)
+                if role == "AXPopUpButton" and private:
+                    # A list withheld only for a passport word in its hint ("Nationality,
+                    # as shown on your passport"): a country is no secret, and with its
+                    # choice hidden the step was given again after she had picked one.
+                    forbidden, private = False, False
                 checked = None
                 if kind_role in ("AXCheckBox", "AXRadioButton", "AXSwitch") \
                         and isinstance(vals[5], (int, float)):
@@ -458,7 +546,7 @@ class LiveScreen:
                         "hint": "" if not hint else screen.redact(hint),
                         "group": screen.redact(group) if group and group != label else "",
                         "checked": checked,
-                        "frame": vis, "secure": bool(forbidden),
+                        "frame": vis, "secure": bool(forbidden), "private": private,
                         "typed": role in TYPED, "pick": role == "AXPopUpButton",
                         "required": vals[11] is True or vals[11] == 1,
                         "optional": bool(_OPTIONAL.search(f"{label} {hint}"))})
@@ -549,20 +637,22 @@ class LiveScreen:
             return False, repr(e)[:100]
         return err == 0, "ok" if err == 0 else f"AX {err}"
 
-    def fill(self, snap: dict, target_id, value: str) -> tuple[bool, str]:
+    def fill(self, snap: dict, target_id, value: str, private: bool = False) -> tuple[bool, str]:
         """Type `value` into the ringed field. First the field's own AXValue, read back.
         Real Chrome took none of it in the rehearsal of 2026-10-11 ("I couldn't type it
         there"), so then: her browser in front, the keyboard in that very field (AX
         focus, else a click on it), select what is in it, and type the value as
         keystrokes, read back again. Keystrokes go only to that app and only into that
-        field: if either cannot be made sure of, nothing is typed. Never a secret field,
-        and never a Return, which could submit the form."""
+        field: if either cannot be made sure of, nothing is typed. Never a secret field
+        (`private`: her passport number, which she said and confirmed, may go into a
+        passport field, never into a password, card or code field), and never a Return,
+        which could submit the form."""
         ref = (snap.get("refs") or {}).get(target_id)
         ctl = next((c for c in snap.get("controls") or [] if c["id"] == target_id), None)
         ax = apps._ax()
         if ref is None or ax is None or ctl is None:
             return False, "stale"
-        if ctl.get("secure") or not ctl.get("typed"):
+        if (ctl.get("secure") and not (private and ctl.get("private"))) or not ctl.get("typed"):
             return False, "refused"
         value = re.sub(r"[\r\n]+", " ", str(value or "")).strip()
         try:
@@ -599,6 +689,68 @@ class LiveScreen:
                 return True, "typed"
             time.sleep(0.05)
         return False, "not taken"
+
+    def scroll(self, snap: dict, dy: int = 450) -> bool:
+        """Her page down by about `dy` points (up for a negative one), for a "scroll down
+        to it" step while MicMic fills in what it knows: a scroll-wheel turn over the
+        middle of her window, only while that window's app is in front."""
+        pid, win = snap.get("pid") or 0, snap.get("win")
+        if not pid or not win or _front_pid() != pid:
+            return False
+        try:
+            import Quartz
+            at = (win[0] + win[2] / 2, win[1] + win[3] / 2)
+            move = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, at,
+                                                  Quartz.kCGMouseButtonLeft)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, move)
+            time.sleep(0.05)
+            lines = max(1, round(abs(dy) / 50))
+            ev = Quartz.CGEventCreateScrollWheelEvent(None, Quartz.kCGScrollEventUnitLine, 1,
+                                                      -lines if dy > 0 else lines)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+        except Exception:  # noqa: BLE001
+            return False
+        return True
+
+    def read_document(self, front: dict) -> dict:
+        """The words of the window in front, in reading order, and its links with
+        where they go: {"text", "links": [(label, url)], "error"}. For an email or a
+        page MicMic reads booking details from (actions/booking.py). Accessibility only,
+        no AppleScript; everything passes through screen.redact()."""
+        ax, root = screen._app_root(front.get("pid") or 0)
+        if ax is None or root is None or not ax["trusted"]():
+            return {"text": "", "links": [], "error": "no_access"}
+        window = apps.find_window(ax, root)
+        if window is None:
+            return {"text": "", "links": [], "error": "no_window"}
+        texts: list[str] = []
+        links: list[tuple[str, str]] = []
+        started, seen = time.time(), [0]
+
+        def walk(el, depth):
+            if depth > screen.MAX_DEPTH or seen[0] >= WALK_NODES or time.time() - started > 2.0:
+                return
+            seen[0] += 1
+            vals = _many(el, ["AXRole", "AXValue", "AXTitle", "AXDescription", "AXChildren", "AXURL"])
+            if not vals:
+                return
+            role = str(vals[0] or "")
+            if role in ("AXStaticText", "AXHeading", "AXTextArea") and sum(map(len, texts)) < 6000:
+                t = vals[1] if isinstance(vals[1], str) else vals[2]
+                if isinstance(t, str) and t.strip():
+                    texts.append(screen._clean(t)[:400])
+            if role == "AXLink":
+                url = vals[5]
+                url = str(url.absoluteString()) if hasattr(url, "absoluteString") else str(url or "")
+                label = next((x for x in (vals[2], vals[3]) if isinstance(x, str) and x.strip()),
+                             "") or _child_text(el)
+                if url:
+                    links.append((screen._clean(label)[:80], url))
+            for k in list(vals[4] or []):
+                walk(k, depth + 1)
+        walk(window, 0)
+        return {"text": screen.redact(" | ".join(screen._dedupe(texts))), "links": links,
+                "error": None}
 
     def page_url(self, front: dict) -> str:
         """The address of the page in the front browser window, or "": a short search
@@ -800,7 +952,7 @@ SYSTEM = (
     '{{"done": true or false, "say": "...", "target": id or null, "kind": "click" | '
     '"type" | "choose" | "secret" | "look" | "wait", "why": "...", "goal": "...", '
     '"finish": "...", "field": "...", "ask": "...", "value": "...", "profile": "...", '
-    '"then": []}}\n'
+    '"then": [], "commits": true or false}}\n'
     "- say: the ONE next thing to do, one short sentence in {language}, at most 16 "
     "words, naming the control exactly as it is labelled on screen and roughly where "
     "it is, for example: Click APIs and Services in the menu on the left.\n"
@@ -845,9 +997,15 @@ SYSTEM = (
     "the page that it needs is still empty or unticked (a required field, the box that "
     "chooses who to check in, an answer to a question): that comes first. If it is "
     "below the visible part, say to scroll down to it.\n"
+    "- Never point at a choice that costs money (a seat with a price, a bag, an upgrade, "
+    "insurance) unless the goal or what they said asks for it: keep what is already "
+    "chosen and go on.\n"
     "- Skip fields marked [optional] and fields already filled, unless the goal or what "
     "they said asks for them. When everything required is filled, the next step is the "
     "page's main button (Continue, Next, Save).\n"
+    "- commits: true only when the step presses the button that finishes the goal itself "
+    "or spends money (Check in now, Pay, Book, Send, the last confirm after which it is "
+    "done); false for one that only goes on to the next page or step.\n"
     "- why: one short sentence in {language} on why this step matters.\n"
     "- goal: the goal restated in two to six words in {language}.\n"
     "- done: true only when the screen shows the goal is achieved; then finish is one "
@@ -857,10 +1015,19 @@ SYSTEM = (
     "say it again, more clearly. Plain words: no markdown, no lists, no em dashes.{address}")
 
 
+# How a known value is named to the model (Guide autofill, "check me in").
+_KNOWN_NAMES = {"confirmation_code": "confirmation code", "passenger_name": "passenger name",
+                "first_name": "first name", "last_name": "last name",
+                "flight_number": "flight number", "flight_date": "flight date"}
+
+
 def build_request(goal: str, lang: str, history: list[str], snap: dict,
-                  reason: str, said: list[str] | None = None) -> str:
+                  reason: str, said: list[str] | None = None,
+                  known: dict | None = None) -> str:
     """The user part of the step call, as text. Pure, so tests can read it.
-    `said` is what she said to MicMic while being guided, oldest first."""
+    `said` is what she said to MicMic while being guided, oldest first. `known`: what
+    MicMic read off her booking email ({key: {"value", "source"}}), which it types
+    itself; her passport and birth details are never in it."""
     win = snap.get("win") or (0, 0, 1, 1)
 
     def where(fr):
@@ -878,6 +1045,12 @@ def build_request(goal: str, lang: str, history: list[str], snap: dict,
     if said:
         lines.append("What they said while being guided, oldest first:")
         lines += [f'- "{x}"' for x in said]
+    if known:
+        lines.append("MicMic is filling in this form for them and types these itself, "
+                     "read off their booking email: " + "; ".join(
+                         f"{_KNOWN_NAMES.get(k, k)} {v['value']}" for k, v in known.items()
+                         if isinstance(v, dict) and v.get("value")) + ". Give every step in "
+                     "order as usual, the fields with these values included.")
     lines.append(f"App: {snap.get('app', '')}   Window: {snap.get('window', '')}")
     if snap.get("url"):
         lines.append(f"Web page: {snap.get('title', '')} ({snap.get('url', '')})")
@@ -965,6 +1138,9 @@ class Guide:
                       "asking", "awaiting"):
                 out[k] = s.get(k)
             out["field"] = (s.get("field") or {}).get("name", "")
+            if s["status"] == "step" and s.get("awaiting") == "confirm":
+                out["can_do"] = True          # her Yes to a question is always a button
+            out["autofill"] = bool(s.get("autofill"))
             return out
 
     def awaiting(self) -> str:
@@ -1005,6 +1181,30 @@ class Guide:
         if url and _NOT_A_PAGE.search(url):
             return {"page": False, "why": "blank page", "app": app}
         return {"page": True, "why": "web page" if url else "browser, address unread", "app": app}
+
+    def front_document(self) -> dict | None:
+        """The window in front read as a document, for "check me in": {"app", "text",
+        "links", "browser", "url"} (actions/booking.py reads the booking off it), or None.
+        A test process never reads the real screen."""
+        import os
+        if isinstance(self.screen, LiveScreen) and os.environ.get("MICMIC_STATE_DIR") \
+                and os.environ.get("MICMIC_GUIDE_REAL_SCREEN") != "1":
+            return None
+        if not hasattr(self.screen, "read_document"):
+            return None
+        from . import booking
+        doc = booking.read_window(self.screen)
+        if not doc:
+            return None
+        doc["browser"] = _is_browser(doc.get("app", ""), doc.get("bundle_id", ""))
+        doc["url"] = ""
+        if doc["browser"]:
+            try:
+                reader = getattr(self.screen, "page_url", None)
+                doc["url"] = reader(doc["front"]) if reader else ""
+            except Exception:  # noqa: BLE001
+                doc["url"] = ""
+        return doc
 
     def heard(self, utterance: str) -> None:
         """Something she said to MicMic while this guide runs: the step call sees it,
@@ -1067,9 +1267,17 @@ class Guide:
 
     # ------------------------------------------------ starting and stopping
     def start(self, goal: str, lang: str = "english", speak: bool = True, gender: str = "",
-              wait: bool = False) -> dict:
+              wait: bool = False, known: dict | None = None, autofill: bool = False,
+              expect: str = "", leave: str = "", hold: float = 0.0) -> dict:
         """Begin guiding toward `goal`. wait=True: the caller will say the first step
-        itself, so this returns once it is known and does not speak it."""
+        itself, so this returns once it is known and does not speak it.
+
+        "Check me in" (router, actions/booking.py): `known` is what MicMic read off her
+        booking email ({key: {"value", "source"}}); `autofill` has MicMic fill in what it
+        knows itself, ask once for what only she knows, and ask before the button that
+        finishes it; `expect` is the link it opened, whose page the first step waits for
+        (`leave`: the page she was on, which is not it); `hold` is how long the caller's
+        read-back line takes to say: nothing is typed or said before it is over."""
         with self._lock:
             if self._s and self._s["status"] not in ENDED:
                 self._s["status"] = "stopped"
@@ -1083,7 +1291,11 @@ class Guide:
                        "quiet": wait, "snap": None, "computed": 0, "why_shown": False,
                        "said": [], "calls": 0,
                        "queue": [], "field": {}, "asking": "", "awaiting": "",
-                       "step_at": time.time(), "nudged": False}
+                       "step_at": time.time(), "nudged": False,
+                       "known": dict(known or {}), "autofill": bool(autofill),
+                       "expect": expect, "leave": leave, "hold_until": time.time() + max(0.0, hold),
+                       "personal": {}, "asked": [], "tries": {}, "value_kind": "",
+                       "confirm_kind": "", "commits": False}
             self._offer = None
             self.heard(goal)                 # "guide me, my code is K7QM2P"
             # A client of its own, so a step never queues behind an answer she is
@@ -1105,6 +1317,7 @@ class Guide:
                 return {**self.state(), "said": _line("not_guiding", (s or {}).get("lang", "english"))}
             s["status"], s["ring"], s["can_do"] = "stopped", None, False
             s["asking"], s["awaiting"], s["queue"] = "", "", []
+            s["personal"], s["pending_values"] = {}, {}
             s["line"] = _line("stopped", s["lang"], s["gender"])
             s["rev"] += 1
             self._cv.notify_all()
@@ -1221,6 +1434,8 @@ class Guide:
         read it back for her yes. None when this step is not one MicMic types into."""
         with self._lock:
             s = self._s
+            if s and s["status"] == "step" and s.get("value_kind") == "values":
+                return self._give_values(s, utterance, speak)
             if not s or s["status"] != "step" or s.get("kind") != "type" \
                     or not s.get("can_do"):
                 return None
@@ -1239,6 +1454,18 @@ class Guide:
             s = self._s
             if not s or s["status"] != "step" or s.get("awaiting") != "confirm":
                 return {"ok": False, **self.state()}
+            if s.get("confirm_kind") == "values":
+                return self._answer_values(s, yes, heard, speak)
+            if s.get("confirm_kind") == "final":
+                # The button that finishes it (Check in now), asked before pressing.
+                s["awaiting"], s["confirm_kind"], s["asking"] = "", "", ""
+                s["rev"] += 1
+                if not yes:
+                    return self._tell(s, _line("left_final", s["lang"], s["gender"]), speak, ok=False)
+                snap, tid = s.get("snap"), s.get("target")
+                final = True
+            else:
+                final = False
             value = s.get("pending_value") or ""
             if not yes:
                 rest = _NO_WORDS.sub("", heard or "").strip()
@@ -1248,7 +1475,74 @@ class Guide:
                 s["asking"] = _line("what_instead", s["lang"], s["gender"])
                 s["rev"] += 1
                 return self._tell(s, s["asking"], speak, ok=False)
+        if final:
+            try:
+                ok, why = self.screen.press(snap, tid)
+            except Exception as e:  # noqa: BLE001
+                ok, why = False, repr(e)[:100]
+            with self._lock:
+                s = self._s
+                if not s or s["status"] in ENDED:
+                    return {"ok": ok, "why": why, **self.state()}
+                line = _line("pressed_final" if ok else "do_final", s["lang"], s["gender"])
+                return {**self._tell(s, line, speak, ok=ok), "why": why}
         return self._type(value, speak)
+
+    def take_details(self, utterance: str, speak: bool = True) -> dict | None:
+        """Her passport details said while MicMic waits for them ("P 0 0 4 2 8 1 1 7, it
+        expires March 14 2031"), or a correction of the ones it read back ("no, it's
+        ...P00428118"): handled here, before any model sees her words (router). None
+        when this is not that."""
+        with self._lock:
+            s = self._s
+            if not s or s["status"] != "step":
+                return None
+            if s.get("awaiting") == "value" and s.get("value_kind") == "values":
+                if not personal_values(utterance, s["lang"]):
+                    return None
+                return self._give_values(s, utterance, speak)
+            if s.get("awaiting") == "confirm" and s.get("confirm_kind") == "values" \
+                    and _NO_WORDS.match(utterance or "") \
+                    and personal_values(_NO_WORDS.sub("", utterance), s["lang"]):
+                return self._answer_values(s, False, utterance, speak)
+            return None
+
+    def _give_values(self, s: dict, utterance: str, speak: bool) -> dict:
+        """Her passport and birth details, said for the form ("P 0 0 4 2 8 1 1 7, it
+        expires March 14 2031"): read back for her yes. Nothing is typed before it, and
+        nothing she says goes to the model (heard() keeps a passport sentence out)."""
+        # All of her details she says are kept, asked for on this page or not: the
+        # expiry and birth boxes below the window come later, and are not asked again.
+        got = personal_values(utterance, s["lang"])
+        if not got:
+            s["asking"] = _line("say_again", s["lang"], s["gender"])
+            s["rev"] += 1
+            return self._tell(s, s["asking"], speak, ok=False)
+        s["pending_values"] = got
+        s["awaiting"], s["confirm_kind"] = "confirm", "values"
+        shown, spoken = _values_line(got, s["lang"], s["gender"])
+        s["asking"] = shown
+        s["rev"] += 1
+        return self._tell(s, spoken, speak, ok=False)
+
+    def _answer_values(self, s: dict, yes: bool, heard: str, speak: bool) -> dict:
+        if yes:
+            s["personal"].update(s.get("pending_values") or {})
+            s["pending_values"] = {}
+            s["awaiting"], s["confirm_kind"], s["value_kind"], s["asking"] = "", "", "", ""
+            s["answered"] = True
+            s["pending"] = "refill"            # the field on screen, filled now
+            s["rev"] += 1
+            self._cv.notify_all()
+            return self._tell(s, _line("filling", s["lang"], s["gender"]), speak, ok=True)
+        rest = _NO_WORDS.sub("", heard or "").strip()
+        if rest and personal_values(rest, s["lang"]):
+            return self._give_values(s, rest, speak)
+        s["pending_values"] = {}
+        s["awaiting"], s["confirm_kind"], s["value_kind"] = "value", "", "values"
+        s["asking"] = _line("what_instead", s["lang"], s["gender"])
+        s["rev"] += 1
+        return self._tell(s, s["asking"], speak, ok=False)
 
     def noted(self) -> dict:
         """She said a detail before its field came up: it is kept (heard()), and the
@@ -1324,6 +1618,147 @@ class Guide:
             threading.Thread(target=self._say, args=(line, s["lang"]), daemon=True).start()
         return {"ok": ok, **self.state(), "said": line}
 
+    # ------------------------------------------------ filling in what MicMic knows
+    def _autofill(self, sid: str) -> None:
+        """"Check me in": the step just given is done by MicMic when it can be (a field
+        it knows from her email, a detail she said and confirmed, a button that only
+        goes on, her name's box, a scroll), and said to her when it is hers (a list to
+        pick from, an option, a box that speaks for her). Her passport and birth
+        details are asked for once per page; the button that finishes it waits for her
+        yes; a payment, a password or a card is never MicMic's."""
+        with self._lock:
+            s = self._alive(sid)
+            if s is None or s["status"] != "step" or not s.get("autofill"):
+                return
+            snap, tid = s.get("snap") or {}, s.get("target")
+            ctl = next((c for c in snap.get("controls") or [] if c["id"] == tid), None)
+            act, arg = _auto_decide(s, snap, ctl)
+            if act in ("fill", "press", "scroll"):
+                # A scroll is counted per step (a long form has several), the rest per control.
+                key = _try_key(snap, ctl, act, s.get("say"))
+                n = s["tries"].get(key, 0)
+                if n >= (AUTO_SCROLLS if act == "scroll" else AUTO_TRIES):
+                    act = "hers"               # tried already: it is hers now
+                else:
+                    s["tries"][key] = n + 1
+            lang, gender, say = s["lang"], s["gender"], s.get("say") or ""
+            speak, hold = s.get("speak"), s.get("hold_until", 0.0)
+            line = ""
+            if act == "advance":
+                s["pending"] = "filled"
+                self._cv.notify_all()
+            elif act == "values":
+                asked, missing = list(s.get("asked") or []), _missing_personal(snap, s, arg)
+                if arg not in asked or (s.get("answered") and arg not in s.get("reasked", [])):
+                    # Asked once for what this page needs (and again, once, for what
+                    # her answer left out).
+                    if arg in asked:
+                        s.setdefault("reasked", []).extend(missing)
+                        missing = [k for k in missing if k not in s["personal"]]
+                    s["asked"] = asked + [k for k in missing if k not in asked]
+                    line = _ask_values(missing, lang, gender)
+                    s["values_line"] = line
+                s["awaiting"], s["value_kind"] = "value", "values"
+                s["asking"] = s.get("values_line") or ""
+                s["rev"] += 1
+            elif act == "final":
+                s["awaiting"], s["confirm_kind"] = "confirm", "final"
+                s["asking"] = line = _line("confirm_final", lang, gender, b=arg)
+                s["rev"] += 1
+            elif act == "hers":
+                line = say
+            elif act == "hers_final":
+                line = f"{say} {_line('do_final', lang, gender)}".strip()
+        if act in ("fill", "press", "scroll"):
+            if act == "fill":
+                self._sleep_until(sid, hold)
+            else:
+                # The watcher starts from the screen as it was BEFORE MicMic acted: a box
+                # it ticks moves nothing else, and would otherwise be its starting point.
+                try:
+                    before = self.screen.probe(snap, tid)
+                except Exception:  # noqa: BLE001
+                    before = None
+                with self._lock:
+                    s = self._alive(sid)
+                    if s is not None and before:
+                        s["base"] = before
+            ok = self._auto_act(snap, tid, act, arg)
+            with self._lock:
+                s = self._alive(sid)
+                if s is None or s.get("target") != tid or s["status"] != "step":
+                    return
+                if ok and act == "fill":
+                    s.setdefault("filled_by_micmic", []).append((ctl or {}).get("label", ""))
+                    s["pending"] = "filled"     # the next field at once
+                    self._cv.notify_all()
+                    return
+                if ok:
+                    return                      # the watcher sees the page move
+                s["tries"][_try_key(snap, ctl, act, say)] = AUTO_SCROLLS
+                line = (_line("type_failed", lang, gender) if act == "fill" else say)
+        if line and speak:
+            self._sleep_until(sid, hold)
+            self._say(line, lang)
+
+    def _auto_act(self, snap: dict, tid, act: str, arg) -> bool:
+        try:
+            if act == "fill":
+                value, private = arg
+                if private:
+                    ok, _ = self.screen.fill(snap, tid, value, private=True)
+                else:
+                    ok, _ = self.screen.fill(snap, tid, value)
+                return bool(ok)
+            if act == "press":
+                return bool(self.screen.press(snap, tid)[0])
+            scroll = getattr(self.screen, "scroll", None)
+            return bool(scroll and scroll(snap, arg or 450))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _sleep_until(self, sid: str, when: float) -> None:
+        """Until the caller's read-back line is over: the code is heard before it is typed."""
+        while time.time() < when:
+            with self._lock:
+                if self._alive(sid) is None:
+                    return
+            time.sleep(min(0.2, max(0.0, when - time.time())))
+
+    def _wait_for_page(self, sid: str) -> bool:
+        """The page of the link MicMic opened ("check me in") in front in her browser:
+        the same site as the link (or the one a mail service's redirect names), or else
+        a new page that has held still. True at once when no link was opened."""
+        with self._lock:
+            s = self._alive(sid)
+            if s is None:
+                return False
+            want, leave = s.get("expect") or "", s.get("leave") or ""
+        if not want:
+            return True
+        started, other, other_at = time.time(), "", 0.0
+        while time.time() - started < PAGE_WAIT:
+            with self._lock:
+                if self._alive(sid) is None:
+                    return False
+            try:
+                front = self.screen.front()
+                url = ""
+                if front and _is_browser(front.get("app", ""), front.get("bundle_id", "")):
+                    reader = getattr(self.screen, "page_url", None)
+                    url = reader(front) if reader else ""
+                if url and url != leave and not _NOT_A_PAGE.search(url):
+                    if _same_site(url, want):
+                        return True
+                    if url != other:
+                        other, other_at = url, time.time()
+                    elif time.time() - started > 3.0 and time.time() - other_at > 1.5:
+                        return True            # a redirect to the airline's own site
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(0.25)
+        return False
+
     # ------------------------------------------------ the thread
     def _wait_for(self, sid: str, computed_before: int) -> dict:
         deadline = time.time() + WAIT_FOR_STEP
@@ -1356,6 +1791,14 @@ class Guide:
                     return
                 reason = s.pop("pending", None)
             if reason:
+                # The check-in page MicMic opened from her email: its first step waits
+                # for it to be in front, never read off the email still showing.
+                if reason == "start" and not self._wait_for_page(sid):
+                    return self._fail(sid, "no_page")
+                # Her details, confirmed: the field on screen is filled with them now.
+                if reason == "refill":
+                    self._autofill(sid)
+                    continue
                 # A field she filled, with the next one already planned on this page:
                 # no model call, the next step at once.
                 if reason == "filled" and self._from_queue(sid):
@@ -1411,7 +1854,8 @@ class Guide:
                 continue
             if base is None:
                 early = s.pop("early", None)
-                base = dict(p)
+                before = s.pop("base", None)
+                base = dict(before or p)
                 if early:
                     for k in ("pid", "title", "url", "struct"):
                         base[k] = early.get(k)
@@ -1421,6 +1865,18 @@ class Guide:
                 raw = (snap.get("raw") or {})
                 if kind in FIELD_KINDS and target in raw and base.get("alive"):
                     base["state"] = (raw[target],) + tuple((base.get("state") or (None, None, None))[1:])
+                # A box, likewise: ticked while the step was being worked out is done.
+                ctl = next((c for c in snap.get("controls") or [] if c["id"] == target), None)
+                if kind == "click" and ctl and ctl.get("role") in ("checkbox", "switch") \
+                        and ctl.get("checked") is not None and base.get("alive") and not before:
+                    base["state"] = (int(bool(ctl["checked"])),) + tuple(
+                        (base.get("state") or (None, None, None))[1:])
+                if group and not before:
+                    # The set of options as it was read: she may pick one at once.
+                    marks = [next((c.get("checked") for c in snap.get("controls") or []
+                                   if c["id"] == o), None) for o in group]
+                    if all(m is not None for m in marks):
+                        base["group"] = tuple(int(bool(m)) for m in marks)
                 last = base
                 touched = bool(p.get("focused"))
                 continue
@@ -1433,7 +1889,9 @@ class Guide:
             # the read-back was dropped, and her "yes" went to the browser agent.
             with self._lock:
                 s = self._alive(sid)
-                asking = bool(s and s.get("awaiting"))
+                # Asked for her details for this page, she may type them in herself
+                # instead: her typing is watched as on any field.
+                asking = bool(s and s.get("awaiting") and s.get("value_kind") != "values")
             if asking:
                 if (p.get("pid"), p.get("title"), p.get("url")) != \
                         (base.get("pid"), base.get("title"), base.get("url")):
@@ -1536,6 +1994,7 @@ class Guide:
             goal, lang, gender = s["goal"], s["lang"], s["gender"]
             history = list(s["history"])
             said = list(s.get("said") or [])
+            known = dict(s.get("known") or {})
         try:
             front = self.screen.front()
         except Exception:  # noqa: BLE001
@@ -1558,7 +2017,7 @@ class Guide:
         image = None if snap.get("secure_focus") else self._shot(front)
         req = {"goal": goal, "lang": lang, "gender": gender, "history": history,
                "reason": reason, "image": image, "said": said, "session": f"guide:{sid}",
-               "prompt": build_request(goal, lang, history, snap, reason, said),
+               "prompt": build_request(goal, lang, history, snap, reason, said, known),
                "ids": [c["id"] for c in snap.get("controls") or []]}
         with self._lock:
             s = self._alive(sid)
@@ -1572,12 +2031,29 @@ class Guide:
         # 33 s on "Type your Known Traveler Number" on a page that was already filled
         # in): asked once more, told to skip it.
         skip = _optional_target(res, snap, said)
+        paid = "" if skip else _paid_target(res, snap, goal, said)
+        if paid:
+            # A paid seat she never asked for (the live run of 2026-10-11 rang "Seat 8A,
+            # $119" on a check-in): asked once more, told to keep what is chosen.
+            why = f"{reason}; \"{paid}\" costs money and she did not ask for it: keep what is chosen"
+            req = {**req, "reason": why,
+                   "prompt": build_request(goal, lang, history, snap, why, said, known)}
+            with self._lock:
+                s = self._alive(sid)
+                if s is not None:
+                    s["calls"] = s.get("calls", 0) + 1
+            try:
+                res = (self.model or self._gemini)(req)
+            except Exception:  # noqa: BLE001
+                res = None
+            if _paid_target(res, snap, goal, said):
+                res = None if not isinstance(res, dict) else {**res, "target": None, "kind": "wait"}
         if skip:
             req = {**req, "reason": f"{reason}; skip the optional field \"{skip}\", she "
                                     f"did not ask for it",
                    "prompt": build_request(goal, lang, history, snap,
                                            f"{reason}; skip the optional field \"{skip}\", "
-                                           f"she did not ask for it", said)}
+                                           f"she did not ask for it", said, known)}
             with self._lock:
                 s = self._alive(sid)
                 if s is not None:
@@ -1687,8 +2163,12 @@ class Guide:
             s["snap"] = snap
             s["early"] = early
             s["ring"] = _ring(snap, tid)
-            s["can_do"] = self._can_do(snap, tid, kind, say, field)
+            s["commits"] = bool(res.get("commits")) and kind == "click"
+            # The button that finishes it (the model says so: Confirm seat that checks
+            # her in) is hers to press, like Check in now.
+            s["can_do"] = self._can_do(snap, tid, kind, say, field) and not s["commits"]
             s["asking"], s["awaiting"], s["pending_value"] = "", "", ""
+            s["value_kind"], s["confirm_kind"] = "", ""
             if queue is not None:
                 s["queue"] = queue
             elif kind in FIELD_KINDS and ctl is not None:
@@ -1700,11 +2180,16 @@ class Guide:
             s["rev"] += 1
             quiet = s.pop("quiet", False)
             s["quiet"] = False
-            speak = s["speak"] and not quiet and not same and not kept
+            # Filling in what it knows, MicMic says only what is hers to do (_autofill).
+            auto = bool(s.get("autofill"))
+            speak = s["speak"] and not quiet and not same and not kept and not auto
             lang = s["lang"]
             self._cv.notify_all()
         if speak:
             self._say(say, lang)
+        # The same "scroll down to it" again: scrolled again (a long seat map).
+        if auto and not kept and (not same or kind == "look"):
+            self._autofill(sid)
 
     @staticmethod
     def _can_do(snap: dict | None, tid, kind: str, say: str, field: dict | None = None) -> bool:
@@ -1722,7 +2207,7 @@ class Guide:
             return False
         text = f"{ctl.get('label', '')} {ctl.get('hint', '')} {(field or {}).get('name', '')} {say}"
         if CREDENTIAL.search(text) or FINAL_BUTTON.search(text) or FINISHING.search(text) \
-                or apps.DESTRUCTIVE.search(text):
+                or apps.DESTRUCTIVE.search(text) or _COMMIT.search(ctl.get("label", "")):
             return False
         # A password, card or identity field is judged by what the page calls it (the
         # snapshot marked it secure): "the date your passport expires" in the step's own
@@ -1739,6 +2224,7 @@ class Guide:
 
     def _end(self, s: dict, status: str, line: str, speak: bool) -> None:
         s["status"], s["line"], s["ring"], s["can_do"] = status, line, None, False
+        s["personal"], s["pending_values"] = {}, {}      # her passport details go with it
         s["asking"], s["awaiting"], s["queue"] = "", "", []
         s["computed"] += 1
         s["rev"] += 1
@@ -1822,12 +2308,12 @@ def _kind_for(ctl: dict | None, kind) -> str:
     kind = kind if kind in KINDS else ""
     if ctl is None:
         return kind or "look"
+    if ctl.get("pick"):
+        return "choose"              # a list is picked from, never typed: whatever its hint says
     if ctl.get("secure"):
         return "secret"
     if ctl.get("typed"):
         return "secret" if kind == "secret" else "type"
-    if ctl.get("pick"):
-        return "choose"
     return kind if kind in ("click", "look", "wait") else "click"
 
 
@@ -1857,6 +2343,22 @@ _NATO = {w: w[0].upper() for w in (
     "x-ray", "yankee", "zulu")}
 
 
+def _piece(t: str) -> str | None:
+    """One spoken piece of a code: a digit word, a letter's radio name, a letter or a
+    short group of digits and capitals; None for an ordinary word."""
+    low = t.lower().strip(".,")
+    if low in _DIGIT_WORDS:
+        return _DIGIT_WORDS[low]
+    if low in _NATO:
+        return _NATO[low]
+    t = t.strip(".,")
+    if t.isdigit() or (len(t) == 1 and t.isalnum()):
+        return t
+    if len(t) <= 3 and t.isalnum() and (any(ch.isdigit() for ch in t) or t.isupper()):
+        return t
+    return None
+
+
 def spoken_value(utterance: str) -> str:
     """What she said should go in the field, without the words around it. A code
     spelled out ("K 7 Q M 2 P", "P zero zero four") is joined into one; a name or an
@@ -1865,21 +2367,8 @@ def spoken_value(utterance: str) -> str:
     text = _LEAD.sub("", text, count=1) if _LEAD.search(text) else text
     text = _TAIL.sub("", text).strip().strip("\"'“”«»").strip()
     toks = text.split()
-
-    def piece(t: str) -> str | None:
-        low = t.lower().strip(".,")
-        if low in _DIGIT_WORDS:
-            return _DIGIT_WORDS[low]
-        if low in _NATO:
-            return _NATO[low]
-        t = t.strip(".,")
-        if t.isdigit() or (len(t) == 1 and t.isalnum()):
-            return t
-        if len(t) <= 3 and t.isalnum() and (any(ch.isdigit() for ch in t) or t.isupper()):
-            return t
-        return None
     if len(toks) >= 2:
-        parts = [piece(t) for t in toks]
+        parts = [_piece(t) for t in toks]
         # Digit groups alone ("1200 195", a phone number) keep their spaces.
         if all(parts) and not all(t.strip(".,").isdigit() for t in toks):
             return "".join(parts).upper()
@@ -1946,6 +2435,338 @@ def _field_info(res: dict, kind: str, said: list[str]) -> dict:
     return info
 
 
+
+# ---------------------------------------------------------------- filling in what it knows
+# Which field a value MicMic knows from her booking email goes into, by what the page
+# calls the field (its label and hint first, the step's own name for it second).
+_KNOWN_FIELDS = (
+    ("confirmation_code", re.compile(
+        r"confirmation|booking.?(?:code|ref|reference|number)|record.?locator|"
+        r"reservation.?(?:code|number)|\bpnr\b|קוד.?הזמנה|מספר.?הזמנה|רقم.?الحجز|"
+        r"رمز.?الحجز|код.?брони|номер.?брони", re.I)),
+    ("last_name", re.compile(r"last.?name|surname|family.?name|שם.?משפחה|اسم.?العائلة|"
+                             r"الكنية|фамили", re.I)),
+    ("first_name", re.compile(r"first.?name|given.?name|שם.?פרטי|الاسم.?الأول|(?<![а-я])имя(?![а-я])",
+                              re.I)),
+    ("passenger_name", re.compile(r"full.?name|passenger.?name|name.?on.?(?:the )?booking|"
+                                  r"שם.?מלא|الاسم.?الكامل|полное.?имя|фио", re.I)),
+    ("flight_number", re.compile(r"flight.?(?:number|no\b)|מספר.?טיסה|رقم.?الرحلة|номер.?рейса",
+                                 re.I)),
+)
+_BIRTH = re.compile(r"birth|\bdob\b|\bborn\b|לידה|נולד|ميلاد|الولادة|рождени", re.I)
+_EXPIRY = re.compile(r"expir|valid (?:until|thru|through)|תוקף|תפוגה|انتهاء|صلاحية|"
+                     r"срок действия|действителен до|истека", re.I)
+_PASSPORT_NO = re.compile(r"(?:passport|document).{0,12}(?:number|no\b|#)|"
+                          r"מספר.?(?:ה)?דרכון|رقم.?(?:جواز|الجواز)|номер.?паспорта", re.I)
+_DATE_PARTS = (("month", re.compile(r"^(?:month|mm|חודש|شهر|الشهر|месяц)$", re.I)),
+               ("day", re.compile(r"^(?:day|dd|יום|يوم|اليوم|день|число)$", re.I)),
+               ("year", re.compile(r"^(?:year|yyyy|yy|שנה|سنة|السنة|год)$", re.I)))
+# A price beside a control ("Seat 15D, aisle, $39"): choosing it spends her money.
+_MONEY = re.compile(r"[$€£₪]\s?\d|\d\s?(?:USD|EUR|ILS|GBP|₪)\b|\b\d+[.,]\d\d\b")
+
+
+def _known_key(ctl: dict, field: dict) -> str:
+    for text in (f"{ctl.get('label', '')} {ctl.get('hint', '')}", (field or {}).get("name", "")):
+        for key, rx in _KNOWN_FIELDS:
+            if text and rx.search(text):
+                return key
+    return ""
+
+
+def _personal_key(ctl: dict, field: dict | None, say: str, snap: dict):
+    """(key, part) for a field asking for her passport number, its expiry date or her
+    date of birth ("month", "day" or "year" for one of three boxes, else ""), or None.
+    Only from what the page calls the field: these are never guessed or inferred."""
+    lab = f"{ctl.get('label', '')} {ctl.get('hint', '')}"
+    ctx = f"{lab} {ctl.get('group', '')} {(field or {}).get('name', '')}"
+    label = re.sub(r"[\s*:]+$", "", str(ctl.get("label", "")).strip())
+    part = next((p for p, rx in _DATE_PARTS if rx.match(label)), "")
+    if _BIRTH.search(ctx):
+        return "date_of_birth", part
+    if _EXPIRY.search(ctx):
+        # A card's expiry date is never hers to say here.
+        if CREDENTIAL.search(f"{lab} {ctl.get('group', '')}") or FINAL_BUTTON.search(lab):
+            return None
+        if _TRAVEL_ID.search(f"{ctx} {say}") or _TRAVEL_ID.search(str(snap.get("text") or "")):
+            return "passport_expiry", part
+        return None
+    if part:
+        return None
+    if _PASSPORT_NO.search(ctx) or (ctl.get("private") and _TRAVEL_ID.search(lab)):
+        return "passport_number", ""
+    return None
+
+
+def _missing_personal(snap: dict, s: dict, first: str) -> list:
+    """Her details this page asks for that MicMic has not got: the step's own first,
+    then the empty fields in the window, in their order."""
+    have = s.get("personal") or {}
+    keys = [first] if first and first not in have else []
+    for c in snap.get("controls") or []:
+        if not c.get("typed") or c.get("value") or c.get("filled"):
+            continue
+        if c.get("secure") and not c.get("private"):
+            continue
+        pk = _personal_key(c, {}, "", snap)
+        if pk and pk[0] not in have and pk[0] not in keys:
+            keys.append(pk[0])
+    return keys
+
+
+def _ask_values(keys: list, lang: str, gender: str) -> str:
+    names = [_line(f"v_{k}", lang, gender) for k in keys]
+    if not names:
+        return ""
+    if len(names) == 1:
+        return _line("need_value", lang, gender, what=names[0])
+    what = ", ".join(names[:-1]) + _line("and", lang, gender) + names[-1]
+    return _line("need_values", lang, gender, what=what)
+
+
+def _say_date(d, lang: str) -> str:
+    months = _MONTH_NAMES.get(lang, _MONTH_NAMES["english"])
+    if lang == "english":
+        return f"{months[d.month - 1]} {d.day}, {d.year}"
+    return f"{d.day} {months[d.month - 1]} {d.year}"
+
+
+def _values_line(values: dict, lang: str, gender: str) -> tuple[str, str]:
+    """Her details read back: (shown on the card, spoken with the passport number one
+    character at a time)."""
+    shown, spoken = [], []
+    for key in ("passport_number", "passport_expiry", "date_of_birth"):
+        if key not in values:
+            continue
+        v = values[key]
+        text = v if key == "passport_number" else _say_date(v, lang)
+        shown.append(_line(f"rb_{key}", lang, gender, v=text))
+        spoken.append(_line(f"rb_{key}", lang, gender, v=_spell(text) if key == "passport_number" else text))
+
+    def whole(parts):
+        line = _line("confirm_values", lang, gender, v=", ".join(parts))
+        return line[:1].upper() + line[1:]
+    return whole(shown), whole(spoken)
+
+
+def _date_for(ctl: dict, d, part: str) -> str:
+    """A date as this field wants it: one of three boxes, or the order and separator its
+    hint or placeholder shows ("MM/DD/YYYY", "For example, 03/14/2031", "YYYY-MM-DD")."""
+    if part == "month":
+        return f"{d.month:02d}"
+    if part == "day":
+        return f"{d.day:02d}"
+    if part == "year":
+        return str(d.year)
+    h = f"{ctl.get('hint', '')} {ctl.get('label', '')}"
+    if re.search(r"YYYY.?MM.?DD|\d{4}-\d{2}-\d{2}", h, re.I):
+        return f"{d.year}-{d.month:02d}-{d.day:02d}"
+    sep = "/"
+    m = re.search(r"\b(\d{1,2})([/.\- ])(\d{1,2})\2\d{4}\b", h)
+    if m:
+        sep = m.group(2)
+        dmy = int(m.group(1)) > 12
+    else:
+        f = re.search(r"\b(DD|MM)([/.\- ])(?:DD|MM)\2YY", h, re.I)
+        sep = f.group(2) if f else "/"
+        dmy = bool(f and f.group(1).upper() == "DD")
+    a, b = (d.day, d.month) if dmy else (d.month, d.day)
+    return f"{a:02d}{sep}{b:02d}{sep}{d.year}"
+
+
+_COMMON = {"available", "with", "your", "this", "that", "from", "have", "check", "flight", "please"}
+
+
+def _she_asked_for(label: str, heard: str) -> bool:
+    """Her words name this choice: two of its words ("free", "aisle", "seat")."""
+    words = {w for w in re.findall(r"[^\W\d_]{4,}", str(label or "").lower()) if w not in _COMMON}
+    low = str(heard or "").lower()
+    return sum(1 for w in words if re.search(rf"\b{re.escape(w)}\b", low)) >= 2
+
+
+def _names_passenger(label: str, known: dict) -> bool:
+    """A box whose label names the passenger on her booking ("Check in Alex Rivera")."""
+    low = str(label or "").lower()
+    first = str((known.get("first_name") or {}).get("value") or "").lower()
+    last = str((known.get("last_name") or {}).get("value") or "").lower()
+    return bool(first and last and first in low and last in low)
+
+
+def _same_site(url: str, want: str) -> bool:
+    """`url` is on the site `want` links to, or on the one a mail service's redirect
+    link names (?q=, ?url=)."""
+    from urllib.parse import parse_qs, urlsplit
+    hosts = {urlsplit(want).netloc.lower()}
+    for vals in parse_qs(urlsplit(want).query).values():
+        for v in vals:
+            if re.match(r"https?://", v):
+                hosts.add(urlsplit(v).netloc.lower())
+    return urlsplit(url).netloc.lower() in hosts - {""}
+
+
+def _try_key(snap: dict, ctl: dict | None, act: str, say) -> tuple:
+    if act == "scroll":
+        return snap.get("url", ""), act, str(say or "")
+    return snap.get("url", ""), (ctl or {}).get("role"), (ctl or {}).get("label"), act
+
+
+def _auto_decide(s: dict, snap: dict, ctl: dict | None):
+    """What MicMic does with the step on screen while it fills in what it knows:
+    ("fill", (value, private)), ("press", None), ("scroll", None), ("advance", None)
+    for a field already right, ("values", key) for her details, ("final", label) for the
+    button that finishes it, ("hers", None) or ("hers_final", None), or ("none", None)."""
+    kind, say, field = s.get("kind"), s.get("say") or "", s.get("field") or {}
+    known, personal = s.get("known") or {}, s.get("personal") or {}
+    if kind == "wait":
+        return "none", None
+    if kind == "look":
+        up = re.search(r"\bup\b|\babove\b|\btop\b|למעלה|لفوق|للأعلى|вверх|выше", say, re.I)
+        return ("scroll", -450 if up else 450) if snap.get("browser") else ("hers", None)
+    if ctl is None or not snap.get("browser"):
+        return "hers", None
+    if kind in ("type", "secret") and ctl.get("typed"):
+        if ctl.get("secure") and not ctl.get("private"):
+            return "hers", None                 # a password, a card, a code: never
+        key = "" if ctl.get("secure") else _known_key(ctl, field)
+        value = str((known.get(key) or {}).get("value") or "") if key else ""
+        if value:
+            if _squash(ctl.get("value")) == _squash(value):
+                return "advance", None
+            return "fill", (value, False)
+        pk = _personal_key(ctl, field, say, snap)
+        if pk:
+            pkey, part = pk
+            if pkey in personal:
+                v = personal[pkey] if pkey == "passport_number" else _date_for(ctl, personal[pkey], part)
+                return "fill", (v, bool(ctl.get("private")))
+            if ctl.get("value") or ctl.get("filled"):
+                return "advance", None          # she typed it in herself
+            return "values", pkey
+        return "hers", None
+    if kind != "click":
+        return "hers", None                     # a list to pick from: hers
+    role, label = ctl.get("role"), ctl.get("label", "")
+    text = f"{label} {ctl.get('hint', '')} {say}"
+    if role in ("checkbox", "switch"):
+        # Her name's box ("Check in Alex Rivera"), or a free choice she asked for by name
+        # (a seat map's toggles are boxes in Chrome: "get me the free aisle seat");
+        # any other box speaks for her.
+        if ctl.get("checked") or FINISHING.search(label) or _MONEY.search(f"{label} {ctl.get('hint', '')}"):
+            return "hers", None
+        # Her own words only: the goal MicMic wrote names the booking and the flight.
+        heard = " ".join(str(x).split("She said:", 1)[-1] for x in [s.get("goal", "")] + list(s.get("said") or []))
+        if _names_passenger(label, known) or _she_asked_for(label, heard):
+            return "press", None
+        return "hers", None
+    if role == "option" or _MONEY.search(f"{label} {ctl.get('hint', '')}"):
+        return "hers", None
+    if FINAL_BUTTON.search(text) or CREDENTIAL.search(text) \
+            or re.search(r"\bpay|payment|billing|checkout|תשלום|دفع|оплат", text, re.I):
+        return "hers_final", None
+    if apps.DESTRUCTIVE.search(text):
+        return "hers", None
+    if FINISHING.search(label) or _COMMIT.search(label) or s.get("commits"):
+        return "final", label
+    return "press", None
+
+
+# Her passport and birth details, as she says them.
+_MONTH_WORDS = {
+    **{m.lower(): i + 1 for i, m in enumerate(_MONTH_NAMES["english"])},
+    **{m.lower()[:3]: i + 1 for i, m in enumerate(_MONTH_NAMES["english"])}, "sept": 9,
+    **{m[1:]: i + 1 for i, m in enumerate(_MONTH_NAMES["hebrew"])}, "מרס": 3,
+    **{m: i + 1 for i, m in enumerate(_MONTH_NAMES["arabic"])},
+    "كانون الثاني": 1, "شباط": 2, "آذار": 3, "نيسان": 4, "أيار": 5, "حزيران": 6, "تموز": 7,
+    "آب": 8, "أيلول": 9, "تشرين الأول": 10, "تشرين الثاني": 11, "كانون الأول": 12,
+    **{m: i + 1 for i, m in enumerate(_MONTH_NAMES["russian"])},
+    **{m: i + 1 for i, m in enumerate(("январь", "февраль", "март", "апрель", "май", "июнь", "июль",
+                                       "август", "сентябрь", "октябрь", "ноябрь", "декабрь"))},
+}
+_MONTH_RX = "|".join(sorted((re.escape(m) for m in _MONTH_WORDS), key=len, reverse=True))
+_DATES = (
+    ("md", re.compile(rf"(?<!\w)(?:ב|ل)?({_MONTH_RX})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+(\d{{4}})", re.I)),
+    ("dm", re.compile(rf"(?<!\d)(\d{{1,2}})(?:st|nd|rd|th|-?го)?\s+(?:of\s+)?(?:ב|ل)?({_MONTH_RX})\.?,?\s+(\d{{4}})",
+                      re.I)),
+    ("iso", re.compile(r"(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)")),
+    ("num", re.compile(r"(?<!\d)(\d{1,2})[/.\- ](\d{1,2})[/.\- ](\d{4})(?!\d)")),
+)
+
+
+def _dates_said(text: str, lang: str):
+    """(start, end, date) for each date in her words."""
+    import datetime
+    found, taken = [], []
+    for how, rx in _DATES:
+        for m in rx.finditer(text):
+            if any(a < m.end() and m.start() < b for a, b in taken):
+                continue
+            try:
+                if how == "md":
+                    mo, d, y = _MONTH_WORDS[m.group(1).lower()], int(m.group(2)), int(m.group(3))
+                elif how == "dm":
+                    d, mo, y = int(m.group(1)), _MONTH_WORDS[m.group(2).lower()], int(m.group(3))
+                elif how == "iso":
+                    y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                else:
+                    a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                    # Her own order: month first in English, day first elsewhere; the
+                    # other way round when only that one is a real date.
+                    mo, d = (a, b) if lang == "english" else (b, a)
+                    if mo > 12 >= d:
+                        mo, d = d, mo
+                found.append((m.start(), m.end(), datetime.date(y, mo, d)))
+                taken.append((m.start(), m.end()))
+            except (KeyError, ValueError):
+                continue
+    return sorted(found)
+
+
+def personal_values(text: str, lang: str = "english", today=None) -> dict:
+    """{"passport_number", "passport_expiry", "date_of_birth"} as far as she said them:
+    "P 0 0 4 2 8 1 1 7, it expires March 14 2031, born July 22 1990". A date goes where
+    her words around it put it (expires, born), else by its year (a future one is an
+    expiry, one long past a birth). Never anything she did not say."""
+    import datetime
+    t = re.sub(r"\s+", " ", str(text or "")).strip()
+    today = today or datetime.date.today()
+    out: dict = {}
+    rest = t
+    for a, b, d in reversed(_dates_said(t, lang)):
+        before = t[max(0, a - 60):a]
+        e = [m.end() for m in _EXPIRY.finditer(before)]
+        r = [m.end() for m in _BIRTH.finditer(before)]
+        if e or r:
+            key = "passport_expiry" if (max(e) if e else -1) > (max(r) if r else -1) else "date_of_birth"
+        elif d >= today:
+            key = "passport_expiry"
+        elif d.year <= today.year - 10:
+            key = "date_of_birth"
+        else:
+            key = ""
+        if key and key not in out:
+            out[key] = d
+        rest = rest[:a] + " , " + rest[b:]
+    # The passport number: one code of 6 to 9 letters and digits, said whole
+    # ("P00428117") or a piece at a time ("P zero zero four ..."), with at least 4 digits.
+    best, run = "", []
+    for tok in re.split(r"[\s,;]+", rest) + [""]:
+        word = tok.strip(".")
+        whole = re.fullmatch(r"[A-Za-z0-9]{6,9}", word) and sum(ch.isdigit() for ch in word) >= 4
+        p = None if whole else _piece(word)
+        if p is not None:
+            run.append(p)
+            continue
+        joined = "".join(run).upper()
+        run = []
+        while len(joined) > 9 and joined[:1].isalpha():
+            joined = joined[1:]              # "it's a P 0 0 ...": the "a" is not in it
+        for cand in (joined, word.upper() if whole else ""):
+            if 6 <= len(cand) <= 9 and sum(ch.isdigit() for ch in cand) >= 4 and len(cand) > len(best):
+                best = cand
+    if best:
+        out["passport_number"] = best
+    return out
+
+
 def _plan(then, snap: dict, current, said: list[str]) -> list:
     """The fields the model planned after this one on the same page, kept by role and
     label so they can be found again after she types. Fields, lists and boxes only."""
@@ -1973,6 +2794,22 @@ def _plan(then, snap: dict, current, said: list[str]) -> list:
                     "value": item.get("value") or "", "profile": item.get("profile") or "",
                     "why": "", "goal": ""})
     return out
+
+
+def _paid_target(res, snap: dict, goal: str, said: list[str]) -> str:
+    """The label of the control the step points at when choosing it costs money (a price
+    beside it) and her words never asked for it; else "". Buttons that pay are judged
+    elsewhere (FINAL_BUTTON): this is a seat, a bag, an extra."""
+    if not isinstance(res, dict) or res.get("done"):
+        return ""
+    tid = _as_id(res.get("target"))
+    ctl = next((c for c in snap.get("controls") or [] if c["id"] == tid), None)
+    if ctl is None or ctl.get("checked") or not _MONEY.search(f"{ctl.get('label', '')} {ctl.get('hint', '')}"):
+        return ""
+    if FINAL_BUTTON.search(ctl.get("label", "")) or re.search(r"\bpay", ctl.get("label", ""), re.I):
+        return ""                            # paying is the button's whole point
+    heard = " ".join(str(x).split("She said:", 1)[-1] for x in [goal] + list(said or []))
+    return "" if _she_asked_for(ctl.get("label", ""), heard) else ctl.get("label", "")
 
 
 def _asked_for(label: str, said: list[str]) -> bool:
